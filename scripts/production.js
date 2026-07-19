@@ -1,0 +1,157 @@
+// production.js
+// 🏭 生産(ユニット/建造物)を汎用的に管理するモジュール。
+//
+// 【設計方針】
+// 生産物ごとに個別の関数を作るのではなく、PRODUCTION_DEFS に定義を1つ追加するだけで
+// 新しいユニット/建造物を増やせるようにする。
+//
+// 各都市(city)は一度に1つだけ生産を行える。
+//   city.production      = { id, progress, cost } | null   … 進行中の生産
+//   city.productionCarry = number                           … 中断/完了時に余った生産力(次回に引き継ぐ)
+//
+// 生産の流れ:
+//   1. startProduction() で開始。開始時、直前までの余剰(productionCarry)を初期値として引き継ぐ。
+//   2. 毎ターン tickProduction() で、その都市の産出生産力ぶんだけ progress を加算する。
+//   3. progress が cost に到達したら完成。onComplete() を呼び、超過分は productionCarry として次回に持ち越す。
+//   4. cancelProduction() で生産を中止した場合も、その時点の progress は productionCarry として持ち越される(消滅しない)。
+
+/**
+ * 生産可能な物の定義。
+ * 新しいユニット/建造物を増やしたい場合は、ここに1エントリ追加するだけでよい。
+ *
+ * @typedef {Object} ProductionDef
+ * @property {string} label 表示名
+ * @property {string} icon 表示アイコン(絵文字)
+ * @property {"unit"|"building"} category カテゴリ(メニュー分類用)
+ * @property {number} cost 完成に必要な生産力の合計値
+ * @property {boolean} [uniquePerCity] true の場合、都市に既に存在する場合は再生産不可
+ * @property {(city: any) => boolean} [hasBuilt] uniquePerCity 用: 既に保有済みか判定する関数
+ * @property {number} [extraUpkeep] 生産中、都市の食料消費に追加される値
+ * @property {(city: any, ctx: any) => void} onComplete 完成時の効果を適用する関数
+ * @property {(city: any) => string} [completeMessage] 完成時のメッセージ生成関数
+ */
+export const PRODUCTION_DEFS = {
+    worker: {
+        label: "労働者",
+        icon: "👷",
+        category: "unit",
+        cost: 10,
+        onComplete: (city) => {
+            city.workers = (city.workers ?? 0) + 1;
+        },
+        completeMessage: (city) => `§e🎉【${city.name}】労働者の生産が完了！ (👷x${city.workers})`,
+    },
+    missile: {
+        label: "ミサイル",
+        icon: "🚀",
+        category: "unit",
+        cost: 200,
+        onComplete: (city) => {
+            city.missiles = (city.missiles ?? 0) + 1;
+        },
+        completeMessage: (city) => `§c🚀🎉【${city.name}】ミサイルの製造が完了しました！ (在庫: ${city.missiles}発)`,
+    },
+    tradingPost: {
+        label: "交易所",
+        icon: "🏛️",
+        category: "building",
+        cost: 10,
+        uniquePerCity: true,
+        hasBuilt: (city) => !!city.tradingPost,
+        extraUpkeep: 1, // 建設中は食料消費+1
+        onComplete: (city, ctx) => {
+            city.tradingPost = { status: "active", routes: [] };
+            if (ctx?.connectTradeRoutes && ctx?.cityKey && ctx?.tiles) {
+                ctx.connectTradeRoutes(ctx.cityKey, city, ctx.tiles);
+            }
+        },
+        completeMessage: (city) => `§e🎉【${city.name}】交易所が完成しました！`,
+    },
+};
+
+/** 生産物IDの一覧を取得 */
+export function getProductionIds() {
+    return Object.keys(PRODUCTION_DEFS);
+}
+
+/** 生産物の定義を取得 */
+export function getProductionDef(id) {
+    return PRODUCTION_DEFS[id] ?? null;
+}
+
+/**
+ * 指定した生産物を、この都市で今から開始できるかどうかを判定する。
+ * @returns {{ ok: boolean, message?: string }}
+ */
+export function canStartProduction(city, id) {
+    const def = PRODUCTION_DEFS[id];
+    if (!def) return { ok: false, message: "§c不明な生産物です。" };
+    if (city.production) return { ok: false, message: "§c既にこの都市では別の生産が進行中です。" };
+    if (def.uniquePerCity && def.hasBuilt?.(city)) {
+        return { ok: false, message: `§cこの都市には既に【${def.label}】が存在します。` };
+    }
+    return { ok: true };
+}
+
+/**
+ * 生産を開始する。直前までの余剰生産力(productionCarry)があれば初期値として引き継ぐ。
+ * @returns {{id: string, progress: number, cost: number} | null}
+ */
+export function startProduction(city, id) {
+    const def = PRODUCTION_DEFS[id];
+    if (!def) return null;
+
+    const carry = city.productionCarry ?? 0;
+    city.production = { id, progress: carry, cost: def.cost };
+    city.productionCarry = 0;
+    return city.production;
+}
+
+/**
+ * 生産を中止する。蓄積していた生産力は消滅させず、次の生産に引き継ぐ。
+ * @returns {{id: string, progress: number, cost: number} | null} 中止された生産の情報(なければ null)
+ */
+export function cancelProduction(city) {
+    if (!city.production) return null;
+    const cancelled = city.production;
+    city.productionCarry = (city.productionCarry ?? 0) + cancelled.progress;
+    city.production = null;
+    return cancelled;
+}
+
+/**
+ * 毎ターン呼び出す生産の進行処理。
+ * @param {any} city 対象の都市データ
+ * @param {number} productionAmount このターン、この都市が産出した生産力
+ * @param {any} ctx onComplete に渡す追加情報 ({ cityKey, tiles, connectTradeRoutes } など)
+ * @returns {{ done: boolean, message: string } | null} 生産中でなければ null
+ */
+export function tickProduction(city, productionAmount, ctx) {
+    if (!city.production) return null;
+    const def = PRODUCTION_DEFS[city.production.id];
+    if (!def) {
+        // 不明な生産物データが残っていた場合の安全策
+        city.production = null;
+        return null;
+    }
+
+    city.production.progress += productionAmount ?? 0;
+
+    if (city.production.progress >= city.production.cost) {
+        const overflow = city.production.progress - city.production.cost;
+        def.onComplete(city, ctx);
+        const message = def.completeMessage
+            ? def.completeMessage(city)
+            : `§e🎉【${city.name}】${def.label}の生産が完了！`;
+
+        city.production = null;
+        city.productionCarry = (city.productionCarry ?? 0) + overflow;
+        return { done: true, message };
+    }
+
+    const progressText = Math.floor(city.production.progress * 10) / 10;
+    return {
+        done: false,
+        message: `§7【${city.name}】${def.icon} ${def.label}を生産中... (${progressText}/${city.production.cost})`,
+    };
+}
