@@ -4,7 +4,7 @@ import { getMapConfig, getTile, getTiles } from "./state.js";
 import { worldToTile, TERRAIN_TYPES, RESOURCE_TYPES } from "./mapGen.js"
 import { turnInfoText, endTurn, isPlayersTurn, joinGame, endGame, getTurnState, calculateCityFoodIncomes, getCityCurrentYields, startGame } from "./turns.js";
 import { PRODUCTION_DEFS, canStartProduction } from "./production.js";
-import { getDefinitions, getKindLabel, getPointsLabel, getProgressState } from "./progression.js";
+import { getDefinitions, getKindLabel, getPointsLabel, getProgressState, hasCompletedProgress } from "./progression.js";
 import { getRelation, sendRequest, getRequestsFor, acceptRequest, rejectRequest, breakRelation } from "./diplomacy.js";
 import { getAttackRange, getAttackableTargets, getEffectiveCombatStrength } from "./combat.js";
 import { getRealPlayer, getControllableCivs, getActiveCivId, setActiveCivId, addVirtualCiv, getCivStorageHandle } from "./civs.js";
@@ -607,41 +607,55 @@ function openCivDiplomacyDetail(player, targetCiv, allCivs) {
     const myCiv = player;
     const currentRel = getRelation(myCiv, targetCiv.id);
 
+    // 💡 不可侵条約には「使節団」、同盟には「外交」civicの取得が必要。
+    const canProposePact = hasCompletedProgress(player, "civic", "emissaries");
+    const canProposeAlliance = hasCompletedProgress(player, "civic", "diplomacy");
+
     let relText = "関係なし";
     if (currentRel === "pact") relText = "不可侵条約 締結中";
     if (currentRel === "alliance") relText = "同盟 締結中";
 
+    const body = [`対象国: ${targetCiv.name}`, `現在の関係: ${relText}`];
+    if (!canProposePact) body.push("§7※不可侵条約の提案には社会制度「使節団」の取得が必要です");
+    if (!canProposeAlliance) body.push("§7※同盟の提案には社会制度「外交」の取得が必要です");
+
+    const buttons = [];
+    if (currentRel === "none") {
+        if (canProposePact) buttons.push({ text: "📜 不可侵条約を提案する", action: "proposePact" });
+        if (canProposeAlliance) buttons.push({ text: "👑 同盟を提案する", action: "proposeAlliance" });
+    } else if (currentRel === "pact") {
+        if (canProposeAlliance) buttons.push({ text: "👑 同盟を提案する", action: "proposeAlliance" });
+        buttons.push({ text: "❌ 不可侵条約を破棄する", action: "break" });
+    } else if (currentRel === "alliance") {
+        buttons.push({ text: "❌ 同盟を解消する", action: "break" });
+    }
+    if (buttons.length === 0) buttons.push({ text: "閉じる", action: "close" });
+
     const form = new ActionFormData()
         .title(`外交: ${targetCiv.name}`)
-        .body(`対象国: ${targetCiv.name}\n現在の関係: ${relText}`);
-
-    if (currentRel === "none") {
-        form.button("📜 不可侵条約を提案する");
-        form.button("👑 同盟を提案する");
-    } else if (currentRel === "pact") {
-        form.button("👑 同盟を提案する");
-        form.button("❌ 不可侵条約を破棄する");
-    } else if (currentRel === "alliance") {
-        form.button("❌ 同盟を解消する");
-    }
+        .body(body.join("\n"));
+    for (const btn of buttons) form.button(btn.text);
 
     form.show(realPlayer).then(res => {
         if (res.canceled) return;
+        const selected = buttons[res.selection]?.action;
 
-        if (currentRel === "none") {
-            if (res.selection === 0) sendDiplomaticProposal(player, targetCiv, "pact");
-            if (res.selection === 1) sendDiplomaticProposal(player, targetCiv, "alliance");
-        } else if (currentRel === "pact") {
-            if (res.selection === 0) sendDiplomaticProposal(player, targetCiv, "alliance");
-            if (res.selection === 1) confirmBreakRelation(player, targetCiv);
-        } else if (currentRel === "alliance") {
-            if (res.selection === 0) confirmBreakRelation(player, targetCiv);
-        }
+        if (selected === "proposePact") sendDiplomaticProposal(player, targetCiv, "pact");
+        if (selected === "proposeAlliance") sendDiplomaticProposal(player, targetCiv, "alliance");
+        if (selected === "break") confirmBreakRelation(player, targetCiv);
     });
 }
 
-/** 提案の送信処理 */
+/** 提案の送信処理。不可侵条約は「使節団」、同盟は「外交」civicの取得を条件とする。 */
 function sendDiplomaticProposal(player, targetCiv, type) {
+    if (type === "pact" && !hasCompletedProgress(player, "civic", "emissaries")) {
+        player.sendMessage("§c不可侵条約を提案するには社会制度「使節団」の取得が必要です。");
+        return;
+    }
+    if (type === "alliance" && !hasCompletedProgress(player, "civic", "diplomacy")) {
+        player.sendMessage("§c同盟を提案するには社会制度「外交」の取得が必要です。");
+        return;
+    }
     const res = sendRequest(player, targetCiv, type);
     player.sendMessage(res.message);
 }
