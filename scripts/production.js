@@ -90,7 +90,7 @@ export const PRODUCTION_DEFS = {
         completeMessage: (city) => `§e[Archer]【${city.name}】に弓兵を配置しました！ (HP: 100/100、遠距離戦闘力: 20、近距離戦闘力: 15)`,
     },
     uoooo: {
-        label: "うおおおおおお",
+        label: "うおおおおおお冷笑的",
         icon: "[うおｗ]",
         category: "unit",
         cost: 500,
@@ -104,7 +104,7 @@ export const PRODUCTION_DEFS = {
                 };
             }
         },
-        completeMessage: (city) => `§e[Warrior]【${city.name}】にうおｗを配置しました！ (HP: 100/100、戦闘力: 20)`,
+        completeMessage: (city) => `§e[Sneer]【${city.name}】が冷笑された！ (HP: 100/100、戦闘力: 20)`,
     },
     tradingPost: {
         label: "交易所",

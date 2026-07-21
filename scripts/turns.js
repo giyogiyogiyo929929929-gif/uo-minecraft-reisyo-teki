@@ -14,7 +14,7 @@ const TILE_SIZE = 5;
 // 💡 プレイヤー固有の色。ゲーム開始時(startGame)に一度だけ playerOrder の並び順で確定させ、
 //    turn.playerColors に保存する。旗の設置処理では毎回ここから色を読み取るだけにすることで、
 //    「1ターン中に旗設置関数を複数回呼ぶと色がずれていく」問題を防ぐ。
-export const PLAYER_COLORS = ["red", "blue", "green", "yellow", "purple", "orange", "cyan", "magenta", "light_blue", "lime"];
+export const PLAYER_COLORS = ["red", "blue", "green", "yellow", "purple", "orange", "cyan", "magenta", "light_blue", "lime", "pink"];
 
 /** ゲーム開始時に確定したプレイヤーの固有色を取得する。未確定の場合は white を返す。 */
 export function getPlayerColor(playerId) {
@@ -90,7 +90,7 @@ function countCheatingBlocks(dimension, tiles, tx, tz, config) {
                     extraProd += 1;
                 }
                 if (block.typeId === "minecraft:magma") {
-                    extraProd += 100;
+                    extraProd += 10;
                 }
             }
         }
