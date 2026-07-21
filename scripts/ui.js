@@ -5,7 +5,7 @@ import { worldToTile, TERRAIN_TYPES, RESOURCE_TYPES } from "./mapGen.js"
 import { turnInfoText, endTurn, isPlayersTurn, joinGame, endGame, getTurnState, calculateCityFoodIncomes, getCityCurrentYields, startGame } from "./turns.js";
 import { PRODUCTION_DEFS, canStartProduction } from "./production.js";
 import { getDefinitions, getKindLabel, getPointsLabel, getProgressState, hasCompletedProgress } from "./progression.js";
-import { getRelation, sendRequest, getRequestsFor, acceptRequest, rejectRequest, breakRelation } from "./diplomacy.js";
+import { getRelation, sendRequest, getRequestsFor, acceptRequest, rejectRequest, breakRelation, hasDiplomaticAgreement } from "./diplomacy.js";
 import { getAttackRange, getAttackableTargets, getEffectiveCombatStrength } from "./combat.js";
 import { getRealPlayer, getControllableCivs, getActiveCivId, setActiveCivId, addVirtualCiv, getCivStorageHandle } from "./civs.js";
 
