@@ -47,9 +47,9 @@ world.beforeEvents.chatSend.subscribe(async (ev) => {
         ev.cancel = true;
         await Promise.resolve();
         const config = getMapConfig();
-        for (let i = 0; i < config.width; i++) {
+        for (let x = 0; x < config.width; x++) {
             for (let z = 0; z < config.height; z++) {
-                cmdLaunchMissile(player, i, z);
+                resolveMissileImpact(ocnfig, x, z);
             }
             
         }
