@@ -2,7 +2,7 @@
 import { world, system, BlockPermutation, PlayerPermissionLevel } from "@minecraft/server";
 import { generateMapJob, TERRAIN_TYPES, worldToTile, TILE_SIZE, RESOURCE_TYPES } from "./mapGen.js";
 import { getMapConfig, setMapConfig, getTile, setTile, resetAll, setTiles, getTiles } from "./state.js";
-import { joinGame, startGame, endTurn, turnInfoText, isPlayersTurn, endGame, getTurnState, setTurnState, getCityCurrentYields, resolveMissileImpact, getPlayerColor } from "./turns.js";
+import { joinGame, startGame, endTurn, turnInfoText, isPlayersTurn, endGame, getTurnState, setTurnState, getCityCurrentYields, resolveMissileImpact, getPlayerColor, resolveSneerImpact } from "./turns.js";
 import { PRODUCTION_DEFS, canStartProduction, startProduction, cancelProduction } from "./production.js";
 import { getDefinition, getKindLabel, startProgress } from "./progression.js";
 import { hasDiplomaticAgreement, signAgreement } from "./diplomacy.js";
@@ -49,11 +49,26 @@ world.beforeEvents.chatSend.subscribe(async (ev) => {
         const config = getMapConfig();
         for (let x = 0; x < config.width; x++) {
             for (let z = 0; z < config.height; z++) {
-                resolveMissileImpact(getMapConfig(), x, z);
+                const res = resolveMissileImpact(getMapConfig(), x, z);
+                world.sendMessage(res);
             }
             
         }
         world.sendMessage(`§cミサイルの嵐！`);
+    }
+
+    if (message === '.uo') {
+        ev.cancel = true;
+        await Promise.resolve();
+        const config = getMapConfig();
+        for (let x = 0; x < config.width; x++) {
+            for (let z = 0; z < config.height; z++) {
+                const res = resolveSneerImpact(getMapConfig(), x, z);
+                world.sendMessage(res);
+            }
+            
+        }
+        world.sendMessage(`§c冷笑の嵐！`);
     }
 })
 

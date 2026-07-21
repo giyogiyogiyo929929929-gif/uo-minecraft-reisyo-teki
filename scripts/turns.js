@@ -329,6 +329,42 @@ export function destroyCity(tiles, cityKey, config, dimension) {
  * 💡 ミサイルの着弾処理。爆発パーティクル/効果音を再生し、着弾先に都市があれば破壊する。
  * @returns {string|null} world.sendMessage 用の結果メッセージ（都市が無ければ null）
  */
+export function resolveSneerImpact(config, targetTx, targetTz) {
+    const dimension = world.getDimension("overworld");
+
+    const centerX = config.originX + targetTx * TILE_SIZE + 2;
+    const centerZ = config.originZ + targetTz * TILE_SIZE + 2;
+    const centerY = config.ySurface + 2;
+
+    // 💥 着弾エフェクト（パーティクル + 効果音）
+    try {
+        dimension.spawnParticle("minecraft:huge_explosion_emitter", { x: centerX, y: centerY, z: centerZ });
+    } catch (e) {}
+    try {
+        dimension.playSound("random.hurt", { x: centerX, y: centerY, z: centerZ }, { volume: 4, pitch: 1.0 });
+    } catch (e) {}
+
+    const tiles = getTiles();
+    const targetKey = `${targetTx},${targetTz}`;
+    const targetTile = tiles[targetKey];
+
+    if (!targetTile || !targetTile.city) {
+        return `§7[うおｗ] (${targetTx}, ${targetTz}) になにもなくてうおｗ`;
+    }
+
+    const cityName = targetTile.city.name;
+    const ownerName = targetTile.ownerName ?? "うおシティ";
+
+    destroyCity(tiles, targetKey, config, dimension);
+    setTiles(tiles);
+
+    return `§c[うおｗ] 【${cityName}】(${ownerName})がなくなってあｗ`;
+}
+
+/**
+ * 💡 ミサイルの着弾処理。爆発パーティクル/効果音を再生し、着弾先に都市があれば破壊する。
+ * @returns {string|null} world.sendMessage 用の結果メッセージ（都市が無ければ null）
+ */
 export function resolveMissileImpact(config, targetTx, targetTz) {
     const dimension = world.getDimension("overworld");
 
