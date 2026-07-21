@@ -49,7 +49,7 @@ world.beforeEvents.chatSend.subscribe(async (ev) => {
         const config = getMapConfig();
         for (let x = 0; x < config.width; x++) {
             for (let z = 0; z < config.height; z++) {
-                resolveMissileImpact(ocnfig, x, z);
+                resolveMissileImpact(getMapConfig(), x, z);
             }
             
         }
