@@ -2,6 +2,10 @@
 import { world, BlockPermutation } from "@minecraft/server";
 import { getTurnState, setTurnState, resetAll, getTiles, setTiles, getMapConfig, setTile } from "./state.js";
 import { PRODUCTION_DEFS, tickProduction } from "./production.js";
+import { grantProgressPoints, resetProgress } from "./progression.js";
+import { resetDiplomacy } from "./diplomacy.js";
+import { hasCompletedProgress } from "./progression.js";
+import { getCivStorageHandle, resolveCivName } from "./civs.js";
 
 export { getTurnState, setTurnState };
 
@@ -19,8 +23,7 @@ export function getPlayerColor(playerId) {
 }
 
 function getPlayerNameById(id) {
-    for (const p of world.getAllPlayers()) { if (p.id === id) return p.name; }
-    return null;
+    return resolveCivName(id);
 }
 
 /**
@@ -126,7 +129,7 @@ export function getCityCurrentYields(cityKey, tiles) {
         if (nearestCityKey === cityKey) assignedTiles.push(t);
     }
 
-    // 🍏+🛠️ の合計出力が高い優秀なマスから順にソート (市民の自動最適配置)
+    // [Food]+[Prod] の合計出力が高い優秀なマスから順にソート (市民の自動最適配置)
     assignedTiles.sort((a, b) => {
         const scoreA = (a.tile.foodYield ?? 0) + (a.tile.productionYield ?? 0);
         const scoreB = (b.tile.foodYield ?? 0) + (b.tile.productionYield ?? 0);
@@ -157,6 +160,10 @@ export function getCityCurrentYields(cityKey, tiles) {
         food += cheatIncomes.extraFood;
         production += cheatIncomes.extraProd;
     }
+
+    // 法典の効果: 所有するすべての都市の食料生産量を+1。
+    const ownerHandle = getCivStorageHandle(playerId);
+    if (ownerHandle && hasCompletedProgress(ownerHandle, "civic", "codeOfLaws")) food += 1;
 
     return { food, production: Math.max(1, production), oil }; // 最低生産力は1を保証
 }
@@ -265,7 +272,7 @@ export function calculateCityFoodIncomes(playerId) {
         }
     }
 
-    // アクティブな交易路から発生する食料ボーナス(🍏)を都市の収入に加算
+    // アクティブな交易路から発生する食料ボーナス([Food])を都市の収入に加算
     for (const key in tiles) {
         const t = tiles[key];
         if (t.city && t.city.tradingPost && t.city.tradingPost.status === "active" && t.city.tradingPost.routes) {
@@ -342,7 +349,7 @@ export function resolveMissileImpact(config, targetTx, targetTz) {
     const targetTile = tiles[targetKey];
 
     if (!targetTile || !targetTile.city) {
-        return `§7🚀 (${targetTx}, ${targetTz}) に着弾しましたが、そこに都市はありませんでした。`;
+        return `§7[Missile] (${targetTx}, ${targetTz}) に着弾しましたが、そこに都市はありませんでした。`;
     }
 
     const cityName = targetTile.city.name;
@@ -360,13 +367,22 @@ function processPlayerTurnStart(playerId) {
 
     const tiles = getTiles();
     const playerCities = [];
+    let movementRefreshed = false;
 
     for (const key in tiles) {
+        const unit = tiles[key].combatUnit;
+        if (unit?.ownerId === playerId) {
+            unit.movementRemaining = unit.movement ?? 0;
+            movementRefreshed = true;
+        }
         if (tiles[key].ownerId === playerId && tiles[key].city) {
             playerCities.push({ key, tile: tiles[key] });
         }
     }
-    if (playerCities.length === 0) return;
+    if (playerCities.length === 0) {
+        if (movementRefreshed) setTiles(tiles);
+        return;
+    }
 
     const summaryReport = [];
     const dimension = world.getDimension("overworld");
@@ -449,7 +465,7 @@ function processPlayerTurnStart(playerId) {
                     city.foodStorage = growthThreshold - 1; housingBlock = true;
                 }
             }
-            let msg = `§7[${city.name}]§f 選択マスからの収穫:+${income} 🍏 | 消費:-${consumption} 🍖 | 貯留: ${city.foodStorage}/${growthThreshold}`;
+            let msg = `§7[${city.name}]§f 選択マスからの収穫:+${income} [Food] | 消費:-${consumption} 🍖 | 貯留: ${city.foodStorage}/${growthThreshold}`;
             if (growSuccess) msg += ` 🎉§a人口が ${city.population} に増加！`;
             else if (housingBlock) msg += ` ⚠️§e住宅制限(上限:${city.housing})のため成長停止！`;
             summaryReport.push(msg);
@@ -459,14 +475,23 @@ function processPlayerTurnStart(playerId) {
 
     setTiles(tiles);
 
-    const player = world.getAllPlayers().find(p => p.id === playerId);
+    const player = getCivStorageHandle(playerId);
     if (player) {
+        let totalPop = 0;
+        for(const c of playerCities) { totalPop += c.tile.city.population; }
+
+        // 人口1ごとに科学力・文化力を1獲得する。進行中の項目がなければ
+        // 繰越ポイントとして保存され、開始した研究／制度へ直ちに使われる。
+        const technologyResult = grantProgressPoints(player, "technology", totalPop);
+        const civicResult = grantProgressPoints(player, "civic", totalPop);
+        if (technologyResult) summaryReport.unshift(technologyResult);
+        if (civicResult) summaryReport.unshift(civicResult);
         // 💡 石油の収入処理を個人のDynamicPropertyに適用
         if (totalOilIncome > 0) {
             const currentOil = player.getDynamicProperty("strategic_oil") ?? 0;
             const newOilTotal = currentOil + totalOilIncome;
             player.setDynamicProperty("strategic_oil", newOilTotal);
-            summaryReport.unshift(`§b🛢️ 石油収入: +${totalOilIncome} 個を獲得！ (現在の在庫: ${newOilTotal} 個)`);
+            summaryReport.unshift(`§b 石油収入: +${totalOilIncome} 個を獲得！ (現在の在庫: ${newOilTotal} 個)`);
         }
 
         player.sendMessage("§6=== 💡 都市のターン報告 ===");
@@ -499,6 +524,15 @@ export function startGame() {
     turn.playerOrder.forEach((playerId, idx) => {
         turn.playerColors[playerId] = PLAYER_COLORS[idx % PLAYER_COLORS.length];
     });
+
+    // 前ゲームの研究・制度ポイントを持ち越さない。(実プレイヤー・テスト国家とも)
+    for (const playerId of turn.playerOrder) {
+        const handle = getCivStorageHandle(playerId);
+        if (!handle) continue; // オフラインの実プレイヤーはデータを書き込めないためスキップ
+        resetProgress(handle, "technology");
+        resetProgress(handle, "civic");
+        resetDiplomacy(handle);
+    }
 
     setTurnState(turn);
 

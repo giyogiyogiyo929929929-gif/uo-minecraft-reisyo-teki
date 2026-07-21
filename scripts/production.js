@@ -33,27 +33,82 @@
 export const PRODUCTION_DEFS = {
     worker: {
         label: "労働者",
-        icon: "👷",
+        icon: "[Worker]",
         category: "unit",
         cost: 10,
         onComplete: (city) => {
             city.workers = (city.workers ?? 0) + 1;
         },
-        completeMessage: (city) => `§e🎉【${city.name}】労働者の生産が完了！ (👷x${city.workers})`,
+        completeMessage: (city) => `§e🎉【${city.name}】労働者の生産が完了！ ([Worker]x${city.workers})`,
     },
     missile: {
         label: "ミサイル",
-        icon: "🚀",
+        icon: "[Missile]",
         category: "unit",
         cost: 200,
         onComplete: (city) => {
             city.missiles = (city.missiles ?? 0) + 1;
         },
-        completeMessage: (city) => `§c🚀🎉【${city.name}】ミサイルの製造が完了しました！ (在庫: ${city.missiles}発)`,
+        completeMessage: (city) => `§c[Missile]🎉【${city.name}】ミサイルの製造が完了しました！ (在庫: ${city.missiles}発)`,
+    },
+    warrior: {
+        label: "戦士",
+        icon: "[Warrior]",
+        category: "unit",
+        cost: 30,
+        requiresEmptyCombatTile: true,
+        onComplete: (city, ctx) => {
+            const tile = ctx?.tiles?.[ctx.cityKey];
+            if (tile) {
+                tile.combatUnit = {
+                    // 💡 attackRange: 近接ユニットのため攻撃距離は移動力と同じ(1)。
+                    id: "warrior", label: "戦士", hp: 100, maxHp: 100, combatStrength: 20,
+                    movement: 1, movementRemaining: 1, attackRange: 1, ownerId: tile.ownerId, ownerName: tile.ownerName,
+                };
+            }
+        },
+        completeMessage: (city) => `§e[Warrior]【${city.name}】に戦士を配置しました！ (HP: 100/100、戦闘力: 20)`,
+    },
+    archer: {
+        label: "弓兵",
+        icon: "[Archer]",
+        category: "unit",
+        cost: 50,
+        requiresEmptyCombatTile: true,
+        onComplete: (city, ctx) => {
+            const tile = ctx?.tiles?.[ctx.cityKey];
+            if (tile) {
+                tile.combatUnit = {
+                    // 💡 弓兵は遠距離戦闘ユニット: 遠距離戦闘力20、近距離戦闘力15の2種類の戦闘力を持つ。
+                    //    combatStrength は互換表示用に近距離戦闘力と同じ値を入れておく。
+                    id: "archer", label: "弓兵", hp: 100, maxHp: 100,
+                    combatStrength: 15, rangedCombatStrength: 20, meleeCombatStrength: 15,
+                    movement: 1, movementRemaining: 1, attackRange: 2, ownerId: tile.ownerId, ownerName: tile.ownerName,
+                };
+            }
+        },
+        completeMessage: (city) => `§e[Archer]【${city.name}】に弓兵を配置しました！ (HP: 100/100、遠距離戦闘力: 20、近距離戦闘力: 15)`,
+    },
+    uoooo: {
+        label: "うおおおおおお",
+        icon: "[うおｗ]",
+        category: "unit",
+        cost: 500,
+        requiresEmptyCombatTile: true,
+        onComplete: (city, ctx) => {
+            const tile = ctx?.tiles?.[ctx.cityKey];
+            if (tile) {
+                tile.combatUnit = {
+                    id: "uoooo", label: "うおｗ", hp: 100, maxHp: 100, combatStrength: 200,
+                    movement: 10, movementRemaining: 10, attackRange: 20, ownerId: tile.ownerId, ownerName: tile.ownerName,
+                };
+            }
+        },
+        completeMessage: (city) => `§e[Warrior]【${city.name}】にうおｗを配置しました！ (HP: 100/100、戦闘力: 20)`,
     },
     tradingPost: {
         label: "交易所",
-        icon: "🏛️",
+        icon: "[Trade]",
         category: "building",
         cost: 10,
         uniquePerCity: true,
@@ -83,12 +138,15 @@ export function getProductionDef(id) {
  * 指定した生産物を、この都市で今から開始できるかどうかを判定する。
  * @returns {{ ok: boolean, message?: string }}
  */
-export function canStartProduction(city, id) {
+export function canStartProduction(city, id, tile = null) {
     const def = PRODUCTION_DEFS[id];
     if (!def) return { ok: false, message: "§c不明な生産物です。" };
     if (city.production) return { ok: false, message: "§c既にこの都市では別の生産が進行中です。" };
     if (def.uniquePerCity && def.hasBuilt?.(city)) {
         return { ok: false, message: `§cこの都市には既に【${def.label}】が存在します。` };
+    }
+    if (def.requiresEmptyCombatTile && tile?.combatUnit) {
+        return { ok: false, message: "§cこのマスにはすでに戦闘ユニットが存在します。" };
     }
     return { ok: true };
 }

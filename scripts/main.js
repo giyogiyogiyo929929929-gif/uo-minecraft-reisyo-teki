@@ -8,6 +8,8 @@ import { getTurnState, getTiles, getMapConfig } from "./state.js";
 import { worldToTile, TERRAIN_TYPES, RESOURCE_TYPES } from "./mapGen.js";
 import { getCityCurrentYields } from "./turns.js";
 import { PRODUCTION_DEFS } from "./production.js";
+import { getEffectiveCombatStrength, getEffectiveRangedStrength, isRangedUnit } from "./combat.js";
+import { getActingPlayer, resolveCivName } from "./civs.js";
 
 const MENU_ITEM_ID = "minecraft:compass";
 
@@ -18,16 +20,26 @@ registerScriptCommands();
  * 💡 プレイヤーIDから現在のプレイヤー名を取得するヘルパー関数
  */
 function getPlayerNameById(id) {
-    for (const p of world.getAllPlayers()) {
-        if (p.id === id) return p.name;
+    return resolveCivName(id) ?? "オフライン";
+}
+
+/**
+ * 💡 戦闘ユニットの戦闘力表示テキストを組み立てる。
+ * 遠距離戦闘ユニットは「遠距離/近距離」の両方を、近距離戦闘ユニットは単一の値を表示する。
+ */
+function formatCombatStrengthText(unit) {
+    if (isRangedUnit(unit)) {
+        const rangedBase = unit.rangedCombatStrength ?? unit.combatStrength ?? 0;
+        const meleeBase = unit.meleeCombatStrength ?? unit.combatStrength ?? 0;
+        return `遠距離${getEffectiveRangedStrength(unit)}(基本${rangedBase})/近距離${getEffectiveCombatStrength(unit)}(基本${meleeBase})`;
     }
-    return "オフライン";
+    return `${getEffectiveCombatStrength(unit)}(基本${unit.combatStrength ?? 0})`;
 }
 
 // アイテム使用でメニューを開く(コンパスを使用)
 world.afterEvents.itemUse.subscribe((eventData) => {
     if (eventData.itemStack?.typeId === MENU_ITEM_ID) {
-        openMainMenu(eventData.source);
+        openMainMenu(getActingPlayer(eventData.source));
     }
 });
 
@@ -71,9 +83,9 @@ system.runInterval(() => {
         if (!turn || !turn.started) {
             if (turn && turn.playerOrder && turn.playerOrder.length > 0) {
                 const names = turn.playerOrder.map(id => getPlayerNameById(id)).join(", ");
-                player.onScreenDisplay.setActionBar(`§e👥 待機中プレイヤー: §f[ ${names} ]`);
+                player.onScreenDisplay.setActionBar(`§e[Pop] 待機中プレイヤー: §f[ ${names} ]`);
             } else {
-                player.onScreenDisplay.setActionBar("§7👥 参加者がいません。メニューから参加してください。");
+                player.onScreenDisplay.setActionBar("§7[Pop] 参加者がいません。メニューから参加してください。");
             }
             continue; // 次のプレイヤーの処理へ
         }
@@ -106,10 +118,14 @@ system.runInterval(() => {
 
             // 領有プレイヤー名と都市名の整形
             const ownerText = tile.ownerName ? `§a${tile.ownerName}` : "§7中立";
-            const cityText = tile.city ? ` §e[🎪都市: ${tile.city.name} (👥x${tile.city.population})]` : "";
+            const cityText = tile.city ? ` §e[🎪都市: ${tile.city.name} ([Pop]x${tile.city.population})]` : "";
+            const combatUnit = tile.combatUnit;
+            const combatUnitText = combatUnit
+                ? `§c[Warrior] ${combatUnit.label ?? combatUnit.id} | HP: ${combatUnit.hp ?? 0}/${combatUnit.maxHp ?? 100} | 戦闘力: ${formatCombatStrengthText(combatUnit)} | 移動力: ${combatUnit.movementRemaining ?? combatUnit.movement ?? 0}/${combatUnit.movement ?? 0} | 攻撃距離: ${combatUnit.attackRange ?? combatUnit.movement ?? 0}`
+                : "§7戦闘ユニット: なし";
             
-            // 算出量の可視化 (🍏食料 / 🛠️生産) ※マス自体が持つベース値
-            const yieldText = `§a🍏x${tile.foodYield ?? 0} §7| §6🛠️x${tile.productionYield ?? 0}`;
+            // 算出量の可視化 ([Food]食料 / [Prod]生産) ※マス自体が持つベース値
+            const yieldText = `§a[Food]x${tile.foodYield ?? 0} §7| §6[Prod]x${tile.productionYield ?? 0}`;
 
             // 💡 このマスが帰属している都市（都市そのもの、または帰属先の都市）を特定
             const cityKey = tile.city ? key : tile.belongsToCityKey;
@@ -122,7 +138,7 @@ system.runInterval(() => {
                 // 💡 市民配置ロジックを考慮した「今」実際に出ている産出量
                 const yields = getCityCurrentYields(cityKey, tiles);
                 const oilText = yields.oil > 0 ? ` §7| §b🛢️x${yields.oil}` : "";
-                currentYieldLine = `\n§f今の産出(都市全体): §a🍏x${yields.food} §7| §6🛠️x${yields.production}${oilText}`;
+                currentYieldLine = `\n§f今の産出(都市全体): §a[Food]x${yields.food} §7| §6[Prod]x${yields.production}${oilText}`;
 
                 // 💡 帰属都市そのものの詳細情報
                 const c = cityTile.city;
@@ -137,16 +153,16 @@ system.runInterval(() => {
                     }
                 }
 
-                const tpText = c.tradingPost?.status === "active" ? " §7| §a🏛️交易所稼働中" : "";
-                const missileText = (c.missiles ?? 0) > 0 ? ` §7| §c🚀x${c.missiles}` : "";
-                cityInfoLine = `\n§6【${c.isCapital ? "首都" : "都市"}: ${c.name}】§f 人口:§a${c.population}§f/§e${c.housing} §f| 👷${c.workers ?? 0}人 §f| 🍏貯留${c.foodStorage ?? 0} §f| §c飢餓${c.starvationTurns ?? 0}/3${productionText}${tpText}${missileText}`;
+                const tpText = c.tradingPost?.status === "active" ? " §7| §a[Trade]交易所稼働中" : "";
+                const missileText = (c.missiles ?? 0) > 0 ? ` §7| §c[Missile]x${c.missiles}` : "";
+                cityInfoLine = `\n§6【${c.isCapital ? "首都" : "都市"}: ${c.name}】§f 人口:§a${c.population}§f/§e${c.housing} §f| [Worker]${c.workers ?? 0}人 §f| [Food]貯留${c.foodStorage ?? 0} §f| §c飢餓${c.starvationTurns ?? 0}/3${productionText}${tpText}${missileText}`;
             }
 
             // アクションバーへ出力
             player.onScreenDisplay.setActionBar(
                 `§b🗺️ 補正座標: [${tx}, ${tz}] §7| §f地形: §b${terrainLabel} §7| §f資源: §e${resourceLabel}\n` +
                 `§f領有: ${ownerText}${cityText}\n` +
-                `§fベース産出: ${yieldText}` +
+                `§fベース産出: ${yieldText}\n${combatUnitText}` +
                 currentYieldLine +
                 cityInfoLine
             );

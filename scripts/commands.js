@@ -4,13 +4,18 @@ import { generateMapJob, TERRAIN_TYPES, worldToTile, TILE_SIZE, RESOURCE_TYPES }
 import { getMapConfig, setMapConfig, getTile, setTile, resetAll, setTiles, getTiles } from "./state.js";
 import { joinGame, startGame, endTurn, turnInfoText, isPlayersTurn, endGame, getTurnState, setTurnState, getCityCurrentYields, resolveMissileImpact, getPlayerColor } from "./turns.js";
 import { PRODUCTION_DEFS, canStartProduction, startProduction, cancelProduction } from "./production.js";
+import { getDefinition, getKindLabel, startProgress } from "./progression.js";
+import { hasDiplomaticAgreement, signAgreement } from "./diplomacy.js";
+import { getAttackRange, resolveCombat, tileDistance } from "./combat.js";
+import { addVirtualCiv, getControllableCivs, getActiveCivId, setActiveCivId, getActingPlayer } from "./civs.js";
 import { openMainMenu } from "./ui.js";
 
 // 💡 都市名の命名プール
 const CITY_NAMES_POOL = [
     "ローマ", "カルタゴ", "アレクサンドリア", "アテネ", "バビロン", "スパルタ", 
     "ペルセポリス", "テノチティトラン", "クスコ", "長安", "京都", "ロンドン", 
-    "パリ", "ベルリン", "モスクワ", "ワシントン", "イスタンブール", "カイロ"
+    "パリ", "ベルリン", "モスクワ", "ワシントン", "イスタンブール", "カイロ",
+    "青森"
 ];
 
 function isOperator(player) {
@@ -20,7 +25,8 @@ function isOperator(player) {
 function reply(player, text) { player.sendMessage(text); }
 
 world.beforeEvents.chatSend.subscribe(async (ev) => {
-    const { sender: player, message } = ev;
+    const { sender: realPlayer, message } = ev;
+    const player = getActingPlayer(realPlayer);
 
     if (message === '.missile') {
         ev.cancel = true;
@@ -35,7 +41,7 @@ world.beforeEvents.chatSend.subscribe(async (ev) => {
         city.missiles = 999;
         const [cx, cz] = capitalKey.split(",");
         setTile(parseInt(cx, 10), parseInt(cz, 10), capitalTile);
-        player.sendMessage(`§c🚀🎉【${city.name}】ミサイルチート発動！ (在庫: ${city.missiles}発)`);
+        player.sendMessage(`§c[Missile]🎉【${city.name}】ミサイルチート発動！ (在庫: ${city.missiles}発)`);
     }
     if (message === '.nuke') {
         ev.cancel = true;
@@ -68,12 +74,60 @@ function cmdHelp(player) {
         "§c!civ launch <x> <z> §f: 指定マスへミサイルを発射",
         "§e!civ info §f: 現在の情報を表示",
         "§e!civ menu §f: メニューを開く",
+        "§d!civ addciv [名前] §f: ソロテスト用の国家を追加(OPのみ)",
+        "§d!civ switchciv [番号] §f: 操作中の国家を切り替える",
+        "§d!civ civs §f: 操作できる国家の一覧を表示",
     ].join("\n"));
 }
 
 function cmdEndGame(player) {
     if (!isOperator(player)) { reply(player, "§cこのコマンドはOPのみ実行できます。"); return; }
     world.sendMessage(endGame().message);
+}
+
+/** ソロテスト用に、OPが自分で操作できる国家をもう一つ追加する。 */
+function cmdAddCiv(realPlayer, name) {
+    if (!isOperator(realPlayer)) { reply(realPlayer, "§cこのコマンドはOPのみ実行できます。"); return; }
+    const turn = getTurnState();
+    if (turn.started) { reply(realPlayer, "§cゲーム開始後は国家を追加できません。ゲーム開始前に追加してください。"); return; }
+
+    const civ = addVirtualCiv(realPlayer, name);
+    reply(realPlayer, `§aテスト国家【${civ.name}】を追加しました。§e!civ switchciv§aで操作を切り替え、§e!civ join§aで参加させてください。`);
+}
+
+/** 操作中の国家を切り替える(自分自身、または自分が追加したテスト国家のみ)。 */
+function cmdSwitchCiv(realPlayer, arg) {
+    const civs = getControllableCivs(realPlayer);
+    if (civs.length <= 1) { reply(realPlayer, "§c切り替えられる国家がありません。§e!civ addciv§cでテスト国家を追加してください。"); return; }
+
+    let target = null;
+    if (arg) {
+        const idx = parseInt(arg, 10);
+        target = (!isNaN(idx) && civs[idx - 1]) ? civs[idx - 1] : civs.find(c => c.id === arg);
+    }
+
+    if (!target) {
+        const activeId = getActiveCivId(realPlayer);
+        reply(realPlayer, [
+            "§e操作中の国家を切り替えます。番号を指定してください(例: !civ switchciv 2):",
+            ...civs.map((c, i) => `${i + 1}. ${c.name}${c.id === activeId ? " §a(操作中)" : ""}${c.isVirtual ? " §7(テスト国家)" : ""}`),
+        ].join("\n"));
+        return;
+    }
+
+    const result = setActiveCivId(realPlayer, target.id);
+    if (!result.ok) { reply(realPlayer, result.message); return; }
+    reply(realPlayer, `§a操作中の国家を【${target.name}】に切り替えました。`);
+}
+
+/** 操作できる国家の一覧を表示する。 */
+function cmdListCivs(realPlayer) {
+    const civs = getControllableCivs(realPlayer);
+    const activeId = getActiveCivId(realPlayer);
+    reply(realPlayer, [
+        "§e--- 操作できる国家一覧 ---",
+        ...civs.map((c, i) => `${i + 1}. ${c.name}${c.id === activeId ? " §a(操作中)" : ""}${c.isVirtual ? " §7(テスト国家)" : ""}`),
+    ].join("\n"));
 }
 
 export function cmdRenameCity(player, tx, tz, newName) {
@@ -314,7 +368,7 @@ export function cmdStartProduction(player, productionId) {
     if (!tile || !tile.city) { reply(player, "§cここにあなたの都市はありません。"); return { ok: false }; }
     if (tile.ownerId !== player.id) { reply(player, "§cこの都市の所有権がありません。"); return { ok: false }; }
 
-    const check = canStartProduction(tile.city, productionId);
+    const check = canStartProduction(tile.city, productionId, tile);
     if (!check.ok) { reply(player, check.message); return { ok: false }; }
 
     startProduction(tile.city, productionId);
@@ -326,7 +380,7 @@ export function cmdStartProduction(player, productionId) {
 
     world.sendMessage(
         `§e${def.icon} ${player.name} が都市【${tile.city.name}】で【${def.label}】の生産を開始しました！` +
-        ` (必要生産力: ${tile.city.production.cost}、現在の生産力: 🛠️x${production}、予測: 約${estTurns}ターン)`
+        ` (必要生産力: ${tile.city.production.cost}、現在の生産力: [Prod]x${production}、予測: 約${estTurns}ターン)`
     );
     return { ok: true };
 }
@@ -365,7 +419,7 @@ export function cmdLaunchMissile(player, targetTx, targetTz) {
     const tile = getTile(tx, tz);
     if (!tile || !tile.city) { reply(player, "§cここにあなたの都市はありません。"); return { ok: false }; }
     if (tile.ownerId !== player.id) { reply(player, "§cこの都市の所有権がありません。"); return { ok: false }; }
-    if (!tile.city.missiles || tile.city.missiles <= 0) { reply(player, "§c🚀 発射可能なミサイルがありません。"); return { ok: false }; }
+    if (!tile.city.missiles || tile.city.missiles <= 0) { reply(player, "§c[Missile] 発射可能なミサイルがありません。"); return { ok: false }; }
 
     const ttx = Math.floor(targetTx);
     const ttz = Math.floor(targetTz);
@@ -377,7 +431,7 @@ export function cmdLaunchMissile(player, targetTx, targetTz) {
     tile.city.missiles -= 1;
     setTile(tx, tz, tile);
 
-    world.sendMessage(`§c🚀 ${player.name} の都市【${tile.city.name}】から (${ttx}, ${ttz}) へミサイルが発射されました！`);
+    world.sendMessage(`§c[Missile] ${player.name} の都市【${tile.city.name}】から (${ttx}, ${ttz}) へミサイルが発射されました！`);
     player.runCommand(`playsound random.bow @a ${player.location.x} ${player.location.y} ${player.location.z}`);
 
     // 💡 演出用に少し間を置いてから着弾させる（2秒後）
@@ -443,7 +497,10 @@ export function cmdSettle(player) {
         for (let dz = -1; dz <= 1; dz++) {
             if (dx === 0 && dz === 0) continue;
             const neighbor = allTiles[`${tx + dx},${tz + dz}`];
-            if (neighbor && neighbor.ownerId && neighbor.ownerId !== player.id) { hasEnemyNeighbor = true; break; }
+            if (neighbor && neighbor.ownerId && neighbor.ownerId !== player.id && !hasDiplomaticAgreement(player.id, neighbor.ownerId)) {
+                hasEnemyNeighbor = true;
+                break;
+            }
         }
         if (hasEnemyNeighbor) break;
     }
@@ -594,13 +651,20 @@ function cmdInfo(player) {
 export function registerScriptCommands() {
     system.afterEvents.scriptEventReceive.subscribe((eventData) => {
         if (eventData.id !== "civ:cmd") return;
-        const player = eventData.sourceEntity;
-        if (!player || player.typeId !== "minecraft:player") return;
+        const realPlayer = eventData.sourceEntity;
+        if (!realPlayer || realPlayer.typeId !== "minecraft:player") return;
 
         const args = (eventData.message ? eventData.message.trim() : "").split(/\s+/);
         const sub = (args.shift() ?? "help").toLowerCase();
 
         system.run(() => {
+            // 💡 国家の追加・切替・一覧は「実プレイヤー」自身の操作。現在操作中の国家に関係なく、
+            //    常に実プレイヤー本人の権限・所有物として処理する。
+            if (sub === "addciv") { cmdAddCiv(realPlayer, args.join(" ")); return; }
+            if (sub === "switchciv") { cmdSwitchCiv(realPlayer, args[0]); return; }
+            if (sub === "civs") { cmdListCivs(realPlayer); return; }
+
+            const player = getActingPlayer(realPlayer); // 💡 現在操作中の国家として振る舞う
             switch (sub) {
                 case "generate": cmdGenerate(player, args); break;
                 case "join": cmdJoin(player); break;
@@ -619,6 +683,8 @@ export function registerScriptCommands() {
                 case "buildmissile": cmdStartProduction(player, "missile"); break; // 互換用エイリアス
                 case "buildtp": cmdStartProduction(player, "tradingPost"); break; // 互換用エイリアス
                 case "cancelbuild": cmdCancelProduction(player); break;
+                case "research": cmdStartProgress(player, "technology", args[0]); break;
+                case "civic": cmdStartProgress(player, "civic", args[0]); break;
                 case "launch": {
                     const ltx = parseInt(args[0], 10);
                     const ltz = parseInt(args[1], 10);
@@ -630,4 +696,174 @@ export function registerScriptCommands() {
             }
         });
     });
+}
+
+/** 研究・社会制度は都市ではなくプレイヤー全体に属する。 */
+export function cmdStartProgress(player, kind, id) {
+    if (!isPlayersTurn(player)) {
+        reply(player, "§cあなたのターンではありません。");
+        return { ok: false };
+    }
+    if (!getDefinition(kind, id)) {
+        reply(player, `§c不明な${getKindLabel(kind) || "項目"}です。`);
+        return { ok: false };
+    }
+    const result = startProgress(player, kind, id);
+    reply(player, result.message);
+    return result;
+}
+
+export function cmdSignAgreement(player, type, targetId) {
+    if (!isPlayersTurn(player)) {
+        reply(player, "§cあなたのターンではありません。");
+        return { ok: false };
+    }
+    const result = signAgreement(player, type, targetId);
+    if (result.ok) world.sendMessage(result.message);
+    else reply(player, result.message);
+    return result;
+}
+
+/** 戦闘ユニットをマス間で移動する。戦闘・都市占領はここでは扱わない。 */
+export function cmdMoveCombatUnit(player, fromTx, fromTz, toTx, toTz) {
+    const config = getMapConfig();
+    if (!config) { reply(player, "§cマップ未生成です。"); return { ok: false }; }
+    if (!isPlayersTurn(player)) { reply(player, "§cあなたのターンではありません。"); return { ok: false }; }
+
+    const source = getTile(fromTx, fromTz);
+    const target = getTile(toTx, toTz);
+    const unit = source?.combatUnit;
+    if (!unit || unit.ownerId !== player.id) { reply(player, "§cこのマスに移動可能なあなたの戦闘ユニットはいません。"); return { ok: false }; }
+    if (!target) { reply(player, "§c移動先がマップ外です。"); return { ok: false }; }
+    if (target.combatUnit) { reply(player, "§c移動先にはすでに戦闘ユニットが存在します。"); return { ok: false }; }
+
+    const distance = Math.max(Math.abs(toTx - fromTx), Math.abs(toTz - fromTz));
+    const remaining = unit.movementRemaining ?? unit.movement ?? 0;
+    if (distance < 1 || distance > remaining) { reply(player, "§cそのマスへ移動するには移動力が足りません。"); return { ok: false }; }
+
+    source.combatUnit = null;
+    unit.movementRemaining = remaining - distance;
+    target.combatUnit = unit;
+    setTile(fromTx, fromTz, source);
+    setTile(toTx, toTz, target);
+    world.sendMessage(`§e[Warrior] ${player.name} の${unit.label ?? "戦闘ユニット"}が (${fromTx}, ${fromTz}) から (${toTx}, ${toTz}) へ移動しました。 (残り移動力: ${unit.movementRemaining})`);
+    return { ok: true };
+}
+
+/**
+ * 戦闘ユニットで隣接(攻撃距離内)の敵ユニットを攻撃する。
+ * 先制攻撃(攻撃側→防御側) → 生存していれば反撃(防御側→攻撃側)、の順で解決する。
+ * 攻撃を行うと、そのユニットは今ターンの残り移動力を使い切る(以後の移動・再攻撃は不可)。
+ */
+export function cmdAttackCombatUnit(player, fromTx, fromTz, toTx, toTz) {
+    const config = getMapConfig();
+    if (!config) { reply(player, "§cマップ未生成です。"); return { ok: false }; }
+    if (!isPlayersTurn(player)) { reply(player, "§cあなたのターンではありません。"); return { ok: false }; }
+
+    const source = getTile(fromTx, fromTz);
+    const target = getTile(toTx, toTz);
+    const attacker = source?.combatUnit;
+    if (!attacker || attacker.ownerId !== player.id) { reply(player, "§cこのマスに攻撃可能なあなたの戦闘ユニットはいません。"); return { ok: false }; }
+    if (!target) { reply(player, "§c攻撃先がマップ外です。"); return { ok: false }; }
+
+    const defender = target.combatUnit;
+    if (!defender) { reply(player, "§c攻撃先に戦闘ユニットが存在しません。"); return { ok: false }; }
+    if (defender.ownerId === player.id) { reply(player, "§c自分のユニットは攻撃できません。"); return { ok: false }; }
+    if (hasDiplomaticAgreement(player.id, defender.ownerId)) { reply(player, "§c外交協定を結んでいる相手のユニットは攻撃できません。"); return { ok: false }; }
+
+    const remaining = attacker.movementRemaining ?? attacker.movement ?? 0;
+    if (remaining <= 0) { reply(player, "§c移動力が残っていないため攻撃できません。"); return { ok: false }; }
+
+    const range = getAttackRange(attacker);
+    const distance = tileDistance(fromTx, fromTz, toTx, toTz);
+    if (distance < 1 || distance > range) { reply(player, "§cそのマスは攻撃距離外です。"); return { ok: false }; }
+
+    const attackerLabel = attacker.label ?? "戦闘ユニット";
+    const defenderLabel = defender.label ?? "戦闘ユニット";
+
+    // 💡 攻撃側と防御側の間のマス距離を算出し、反撃の可否・反撃時の戦闘力選択に用いる。
+    const result = resolveCombat(attacker, defender, distance);
+    // 攻撃を行うと、このユニットは今ターンの行動を終える(以後の移動・再攻撃は不可)。
+    attacker.movementRemaining = 0;
+
+    source.combatUnit = attacker;
+    target.combatUnit = defender;
+
+    const lines = [];
+    lines.push(`§c⚔ ${player.name} の${attackerLabel} (${fromTx}, ${fromTz}) が ${defenderLabel} (${toTx}, ${toTz}) を攻撃！`);
+    lines.push(`§7先制ダメージ: ${result.firstDamage}`);
+
+    if (result.defenderDestroyed) {
+        lines.push(`§c💀 ${defenderLabel}は撃破されました！`);
+        target.combatUnit = null;
+    } else {
+        lines.push(`§7 └ ${defenderLabel} 残りHP: ${Math.max(0, Math.round(defender.hp))}/${defender.maxHp ?? 100}`);
+        if (result.counterSkippedReason === "outOfDefenderRange") {
+            lines.push(`§7${defenderLabel}の攻撃範囲外からの攻撃のため、反撃はありません。`);
+        } else {
+            lines.push(`§7反撃ダメージ: ${result.counterDamage}`);
+            if (result.attackerDestroyed) {
+                lines.push(`§c💀 ${attackerLabel}は反撃により撃破されました！`);
+                source.combatUnit = null;
+            } else {
+                lines.push(`§7 └ ${attackerLabel} 残りHP: ${Math.max(0, Math.round(attacker.hp))}/${attacker.maxHp ?? 100}`);
+            }
+        }
+    }
+
+    setTile(fromTx, fromTz, source);
+    setTile(toTx, toTz, target);
+    world.sendMessage(lines.join("\n"));
+    return { ok: true, result };
+}
+
+/**
+ * 都市に自分の戦闘ユニットが存在し、かつそのユニットの移動力が最大値のまま(今ターン未行動)
+ * であれば、その都市を占領してオーナーを自分に切り替える。
+ * この都市に帰属していた領有マス(belongsToCityKey が一致するマス)も同時に占領する。
+ */
+export function cmdCaptureCity(player, tx, tz) {
+    const config = getMapConfig();
+    if (!config) { reply(player, "§cマップ未生成です。"); return { ok: false }; }
+    if (!isPlayersTurn(player)) { reply(player, "§cあなたのターンではありません。"); return { ok: false }; }
+
+    const cityKey = `${tx},${tz}`;
+    const tiles = getTiles();
+    const tile = tiles[cityKey];
+    if (!tile || !tile.city) { reply(player, "§cこのマスに都市がありません。"); return { ok: false }; }
+    if (!tile.ownerId || tile.ownerId === player.id) { reply(player, "§cこの都市はすでにあなたのものです。"); return { ok: false }; }
+
+    const unit = tile.combatUnit;
+    if (!unit || unit.ownerId !== player.id) { reply(player, "§cこの都市にあなたの戦闘ユニットがいません。"); return { ok: false }; }
+
+    const maxMovement = unit.movement ?? 0;
+    const remaining = unit.movementRemaining ?? maxMovement;
+    if (remaining < maxMovement) { reply(player, "§c占領するには移動力が最大値残っている必要があります。(今ターンは既に行動済みです)"); return { ok: false }; }
+
+    const previousOwnerId = tile.ownerId;
+    const previousOwnerName = tile.ownerName ?? "不明";
+    const cityName = tile.city.name;
+
+    tile.ownerId = player.id;
+    tile.ownerName = player.name;
+    unit.movementRemaining = 0;
+    tile.combatUnit = unit;
+
+    // 💡 この都市に帰属していた領有マス(belongsToCityKey が一致するマス)も同時に占領する
+    let capturedTileCount = 0;
+    for (const key in tiles) {
+        if (key === cityKey) continue;
+        const t = tiles[key];
+        if (t.ownerId === previousOwnerId && t.belongsToCityKey === cityKey) {
+            t.ownerId = player.id;
+            t.ownerName = player.name;
+            capturedTileCount++;
+        }
+    }
+
+    setTiles(tiles);
+
+    const extraText = capturedTileCount > 0 ? ` (帰属していた領有マス${capturedTileCount}マスも同時に占領)` : "";
+    world.sendMessage(`§6🏳 ${player.name} が ${previousOwnerName} の【${cityName}】を占領しました！${extraText}`);
+    return { ok: true };
 }
