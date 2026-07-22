@@ -3,7 +3,7 @@ import { world, BlockPermutation } from "@minecraft/server";
 import { getTurnState, setTurnState, resetAll, getTiles, setTiles, getMapConfig, setTile } from "./state.js";
 import { PRODUCTION_DEFS, tickProduction } from "./production.js";
 import { grantProgressPoints, resetProgress } from "./progression.js";
-import { resetDiplomacy } from "./diplomacy.js";
+import { resetDiplomacy, getRelation } from "./diplomacy.js";
 import { hasCompletedProgress } from "./progression.js";
 import { getCivStorageHandle, resolveCivName } from "./civs.js";
 
@@ -328,6 +328,93 @@ export function destroyCity(tiles, cityKey, config, dimension) {
     tiles[cityKey].city = null; tiles[cityKey].ownerId = null; tiles[cityKey].ownerName = null;
 }
 
+/** 生存している(都市を1つ以上持つ)国家IDの一覧を返す。 */
+function getAliveCivIds(turn, tiles) {
+    const order = Array.isArray(turn?.playerOrder) ? turn.playerOrder : [];
+    return order.filter(id => Object.values(tiles).some(t => t.ownerId === id && t.city));
+}
+
+/** この国家が(このゲーム開始以降に)一度でも首都を設置したことがあるかどうか。 */
+function hasEverFoundedCapital(civId) {
+    const handle = getCivStorageHandle(civId);
+    return !!handle && handle.getDynamicProperty("civ:hasFoundedCapital") === true;
+}
+
+/**
+ * ゲームに勝利した国家(たち)へ勝利ポイントを+1する(他ゲームでいうレート的なもの)。
+ * 戦闘での勝敗ではなく、ゲームそのものに勝利した場合にのみ付与する。
+ * ゲームをまたいで持続する値のため、startGame() 時にもリセットしない。
+ */
+function awardVictoryPoints(civIds) {
+    for (const civId of civIds) {
+        const handle = getCivStorageHandle(civId);
+        if (!handle) continue;
+        const current = handle.getDynamicProperty("civ:victoryPoints") ?? 0;
+        handle.setDynamicProperty("civ:victoryPoints", current + 1);
+    }
+}
+
+/** 渡された国家ID全員が、互いに同盟関係にあるかどうかを判定する。 */
+function areAllMutuallyAllied(civIds) {
+    for (let i = 0; i < civIds.length; i++) {
+        const handle = getCivStorageHandle(civIds[i]);
+        if (!handle) return false; // オフライン等でハンドルが取れない場合は判定不能として同盟勝利にしない
+        for (let j = 0; j < civIds.length; j++) {
+            if (i === j) continue;
+            if (getRelation(handle, civIds[j]) !== "alliance") return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * 🏆 勝利条件の判定。
+ * ・生存国家(都市を1つ以上持つ国家)が1つだけになった場合 → その国家のソロ勝利。
+ * ・生存国家が2つ以上でも、参加人数が4人以上のゲームにおいて、生存者全員が互いに
+ *   同盟関係にある場合 → その同盟グループの同盟勝利。
+ * 勝利が確定した場合、結果をワールドにブロードキャストしてゲームをリセットする
+ * (以後 !civ join からやり直しになる)。
+ * @param {any} [tiles] 既に読み込み済みのタイルデータ(省略時は内部で取得する)
+ * @returns {boolean} 勝利が確定してゲームを終了させた場合 true
+ */
+export function checkAndAnnounceVictory(tiles) {
+    const turn = getTurnState();
+    if (!turn.started || !Array.isArray(turn.playerOrder) || turn.playerOrder.length === 0) return false;
+    // 💡 参加国家が最初から1つしかない(ソロテスト等)場合、「最後の1国」判定に意味が無いため何もしない。
+    if (turn.playerOrder.length < 2) return false;
+
+    const allTiles = tiles ?? getTiles();
+    const aliveIds = getAliveCivIds(turn, allTiles);
+
+    // 想定外(同時全滅など): 勝者を決められないため何もしない
+    if (aliveIds.length === 0) return false;
+
+    // 💡 まだ一度も首都を設置していない(＝参入準備中でしかない)国家が残っている場合、
+    //    それは「脱落」ではなく単に「まだ始めていない」だけの可能性があるため、
+    //    誤って早期に勝利判定をしないよう見送る。
+    const notYetStarted = turn.playerOrder.filter(id => !hasEverFoundedCapital(id));
+    if (notYetStarted.length > 0) return false;
+
+    if (aliveIds.length === 1) {
+        const winnerName = resolveCivName(aliveIds[0]) ?? "不明な国家";
+        awardVictoryPoints(aliveIds);
+        world.sendMessage(`§6★★★ 勝利！ §a【${winnerName}】§6が唯一残った国家となりました！(ソロ勝利、勝利ポイント+1) ★★★`);
+        resetAll();
+        return true;
+    }
+
+    // 💡 同盟勝利は、そのゲームの参加人数が4人以上の場合のみ判定する。
+    if (turn.playerOrder.length >= 4 && areAllMutuallyAllied(aliveIds)) {
+        const names = aliveIds.map(id => resolveCivName(id) ?? "不明な国家").join("、");
+        awardVictoryPoints(aliveIds);
+        world.sendMessage(`§6★★★ 勝利！ §b【${names}】§6の同盟が、他のすべての国家を退けました！(同盟勝利、勝利ポイント+1) ★★★`);
+        resetAll();
+        return true;
+    }
+
+    return false;
+}
+
 /**
  * 💡 ミサイルの着弾処理。爆発パーティクル/効果音を再生し、着弾先に都市があれば破壊する。
  * @returns {string|null} world.sendMessage 用の結果メッセージ（都市が無ければ null）
@@ -360,6 +447,7 @@ export function resolveMissileImpact(config, targetTx, targetTz) {
 
     destroyCity(tiles, targetKey, config, dimension);
     setTiles(tiles);
+    checkAndAnnounceVictory(tiles);
 
     return `§c💥 【${cityName}】(${ownerName})がミサイル攻撃により破壊されました！`;
 }
@@ -369,6 +457,10 @@ function processPlayerTurnStart(playerId) {
     if (!config) return;
 
     const tiles = getTiles();
+    // 💡 このプレイヤーのターン処理を始める前に、既に決着がついていないかを確認する
+    //    (直前の占領・ミサイル攻撃などで、生存国家が1つ(または同盟のみ)になっている場合)。
+    if (checkAndAnnounceVictory(tiles)) return;
+
     const playerCities = [];
     let movementRefreshed = false;
 
@@ -478,6 +570,9 @@ function processPlayerTurnStart(playerId) {
 
     setTiles(tiles);
 
+    // 💡 このターンの飢餓による都市崩壊などで、生存国家が1つ(または同盟のみ)になっていないかを確認する。
+    if (checkAndAnnounceVictory(tiles)) return;
+
     const player = getCivStorageHandle(playerId);
     if (player) {
         let totalPop = 0;
@@ -529,12 +624,15 @@ export function startGame() {
     });
 
     // 前ゲームの研究・制度ポイントを持ち越さない。(実プレイヤー・テスト国家とも)
+    // 💡 勝利ポイント(civ:victoryPoints)はレート的な値としてゲームを跨いで持続させるため、
+    //    ここではリセットしない。
     for (const playerId of turn.playerOrder) {
         const handle = getCivStorageHandle(playerId);
         if (!handle) continue; // オフラインの実プレイヤーはデータを書き込めないためスキップ
         resetProgress(handle, "technology");
         resetProgress(handle, "civic");
         resetDiplomacy(handle);
+        handle.setDynamicProperty("civ:hasFoundedCapital", false); // 新しいゲームでは首都を再び設置できるようにする
     }
 
     setTurnState(turn);

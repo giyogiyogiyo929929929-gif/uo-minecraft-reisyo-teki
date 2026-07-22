@@ -196,6 +196,29 @@ export const PRODUCTION_DEFS = {
         },
         completeMessage: (city) => `§e🎉【${city.name}】穀物庫が完成しました！ (食料生産量+1、住居+2)`,
     },
+    capital: {
+        label: "遷都",
+        icon: "[👑]",
+        category: "building",
+        cost: 100,
+        // 💡 「すでに首都である都市」では実行不可(首都以外の都市でのみ遷都できる)。
+        disallowInCapital: true,
+        onComplete: (city, ctx) => {
+            // 💡 この都市の所有者が今まで持っていた(であろう)首都から、首都フラグを外してから
+            //    この都市を新しい首都にする(1国家につき首都は常に1つだけにする)。
+            const ownerId = ctx?.tiles?.[ctx?.cityKey]?.ownerId;
+            if (ownerId && ctx?.tiles) {
+                for (const key in ctx.tiles) {
+                    const t = ctx.tiles[key];
+                    if (t.city && t.city.isCapital && t.ownerId === ownerId) {
+                        t.city.isCapital = false;
+                    }
+                }
+            }
+            city.isCapital = true;
+        },
+        completeMessage: (city) => `§e👑【${city.name}】が新たな首都になりました！(遷都完了)`,
+    },
 };
 
 /** 生産物IDの一覧を取得 */
@@ -225,6 +248,9 @@ export function canStartProduction(city, id, tile = null, player = null) {
     }
     if (def.requiresEmptyCombatTile && tile?.combatUnit) {
         return { ok: false, message: "§cこのマスにはすでに戦闘ユニットが存在します。" };
+    }
+    if (def.disallowInCapital && city.isCapital) {
+        return { ok: false, message: "§cこの都市は既に首都です。" };
     }
     if (def.requiresTechnology) {
         const hasTech = !!player && hasCompletedProgress(player, "technology", def.requiresTechnology);

@@ -2,7 +2,7 @@
 import { world, system, BlockPermutation, PlayerPermissionLevel } from "@minecraft/server";
 import { generateMapJob, TERRAIN_TYPES, worldToTile, TILE_SIZE, RESOURCE_TYPES } from "./mapGen.js";
 import { getMapConfig, setMapConfig, getTile, setTile, resetAll, setTiles, getTiles } from "./state.js";
-import { joinGame, startGame, endTurn, turnInfoText, isPlayersTurn, endGame, getTurnState, setTurnState, getCityCurrentYields, resolveMissileImpact, getPlayerColor } from "./turns.js";
+import { joinGame, startGame, endTurn, turnInfoText, isPlayersTurn, endGame, getTurnState, setTurnState, getCityCurrentYields, resolveMissileImpact, getPlayerColor, checkAndAnnounceVictory } from "./turns.js";
 import { PRODUCTION_DEFS, canStartProduction, startProduction, cancelProduction, addWorkers, consumeWorkerAction, hasAvailableWorkerAction } from "./production.js";
 import { getDefinition, getKindLabel, startProgress } from "./progression.js";
 import { hasDiplomaticAgreement, signAgreement } from "./diplomacy.js";
@@ -68,7 +68,7 @@ function cmdHelp(player) {
         "§e!civ claim §f: 周囲の土地を領有 (コスト: 人口1)",
         "§e!civ buyrights §f: 開拓権を獲得 (コスト: 首都人口2)",
         "§e!civ settle §f: 都市を建設 (コスト: 開拓権x1)",
-        "§e!civ build <worker|warrior|archer|missile|tradingPost|granary> §f: 生産を開始",
+        "§e!civ build <worker|warrior|archer|missile|tradingPost|granary|capital> §f: 生産を開始",
         "§c!civ cancelbuild §f: 進行中の生産を中止(蓄積分は次に引き継ぎ)",
         "§e!civ chop §f: 森林を伐採して住宅上限+1",
         "§c!civ launch <x> <z> §f: 指定マスへミサイルを発射",
@@ -471,7 +471,12 @@ export function cmdSettle(player) {
         return;
     }
 
-    const isCapital = !hasAnyCity;
+    // 💡 首都は生涯で1度だけ自動設置される。一度でも首都を持ったことがあるプレイヤーは、
+    //    (占領やミサイル攻撃で首都を失い、都市を1つも持っていない状態になったとしても)
+    //    !civ settle で新しい首都が自動的に立つことはない。以後、首都を取り戻すには
+    //    既存の都市で「遷都」を生産する必要がある(cmdSettleでは常に通常の都市になる)。
+    const hasFoundedCapitalBefore = player.getDynamicProperty("civ:hasFoundedCapital") === true;
+    const isCapital = !hasAnyCity && !hasFoundedCapitalBefore;
 
     const initPopulation = isCapital ? 2 : 1;
     const initWorkers = isCapital ? 1 : 0;
@@ -528,6 +533,7 @@ export function cmdSettle(player) {
         productionCarry: 0     // 💡 中断/完了時に余った生産力(次の生産に引き継ぐ)
     };
     if (initWorkers > 0) addWorkers(tile.city, initWorkers);
+    if (isCapital) player.setDynamicProperty("civ:hasFoundedCapital", true);
     tile.ownerId = player.id;
     tile.ownerName = player.name;
     setTile(tx, tz, tile);
@@ -850,6 +856,14 @@ export function cmdCaptureCity(player, tx, tz) {
     unit.movementRemaining = 0;
     tile.combatUnit = unit;
 
+    // 💡 占領した都市はそのまま自分の首都にはならない(通常の都市として扱う)。
+    //    首都を占領しても占領側にそのまま首都権が移ってしまうバグの修正。
+    //    占領側がここを首都にしたい場合は、改めて「遷都」を生産する必要がある。
+    const capturedCapital = !!tile.city.isCapital;
+    if (capturedCapital) {
+        tile.city.isCapital = false;
+    }
+
     // 💡 この都市に帰属していた領有マス(belongsToCityKey が一致するマス)も同時に占領する
     let capturedTileCount = 0;
     for (const key in tiles) {
@@ -865,6 +879,8 @@ export function cmdCaptureCity(player, tx, tz) {
     setTiles(tiles);
 
     const extraText = capturedTileCount > 0 ? ` (帰属していた領有マス${capturedTileCount}マスも同時に占領)` : "";
-    world.sendMessage(`§6🏳 ${player.name} が ${previousOwnerName} の【${cityName}】を占領しました！${extraText}`);
+    const capitalText = capturedCapital ? " §c(相手の首都を陥落させました！)" : "";
+    world.sendMessage(`§6🏳 ${player.name} が ${previousOwnerName} の【${cityName}】を占領しました！${extraText}${capitalText}`);
+    checkAndAnnounceVictory(tiles);
     return { ok: true };
 }

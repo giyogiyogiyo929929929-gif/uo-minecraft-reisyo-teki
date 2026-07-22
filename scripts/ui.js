@@ -41,6 +41,10 @@ export async function openMainMenu(player) {
     const oil = player.getDynamicProperty("strategic_oil") ?? 0;
     body.push(`§b保有中の石油: ${oil} 個`);
 
+    // 💡 戦闘勝利ポイント(他ゲームでいうレート的なもの。ゲームを跨いで持続する)
+    const victoryPoints = player.getDynamicProperty("civ:victoryPoints") ?? 0;
+    body.push(`§6🏆 勝利ポイント: ${victoryPoints}`);
+
     let currentTile = null;
     let hasAnyCity = false;
     let capitalPopulation = 0;
@@ -379,6 +383,8 @@ async function openProductionCategoryMenu(player, tx, tz, category) {
                 } else if (def.requiresTechnology && !hasCompletedProgress(player, "technology", def.requiresTechnology)) {
                     const techDef = getDefinition("technology", def.requiresTechnology);
                     body.push(`§7🔒 ${def.icon} ${def.label}: 技術【${techDef?.label ?? def.requiresTechnology}】が必要`);
+                } else if (def.disallowInCapital && city.isCapital) {
+                    body.push(`§7${def.icon} ${def.label}: この都市は既に首都です`);
                 }
                 continue;
             }
