@@ -2,8 +2,8 @@
 import { world, system, BlockPermutation, PlayerPermissionLevel } from "@minecraft/server";
 import { generateMapJob, TERRAIN_TYPES, worldToTile, TILE_SIZE, RESOURCE_TYPES } from "./mapGen.js";
 import { getMapConfig, setMapConfig, getTile, setTile, resetAll, setTiles, getTiles } from "./state.js";
-import { joinGame, startGame, endTurn, turnInfoText, isPlayersTurn, endGame, getTurnState, setTurnState, getCityCurrentYields, resolveMissileImpact, getPlayerColor, resolveSneerImpact } from "./turns.js";
-import { PRODUCTION_DEFS, canStartProduction, startProduction, cancelProduction } from "./production.js";
+import { joinGame, startGame, endTurn, turnInfoText, isPlayersTurn, endGame, getTurnState, setTurnState, getCityCurrentYields, resolveMissileImpact, getPlayerColor } from "./turns.js";
+import { PRODUCTION_DEFS, canStartProduction, startProduction, cancelProduction, addWorkers, consumeWorkerAction, hasAvailableWorkerAction } from "./production.js";
 import { getDefinition, getKindLabel, startProgress } from "./progression.js";
 import { hasDiplomaticAgreement, signAgreement } from "./diplomacy.js";
 import { getAttackRange, resolveCombat, tileDistance } from "./combat.js";
@@ -47,28 +47,13 @@ world.beforeEvents.chatSend.subscribe(async (ev) => {
         ev.cancel = true;
         await Promise.resolve();
         const config = getMapConfig();
-        for (let x = 0; x < config.width; x++) {
+        for (let i = 0; i < config.width; i++) {
             for (let z = 0; z < config.height; z++) {
-                const res = resolveMissileImpact(getMapConfig(), x, z);
-                world.sendMessage(res);
+                cmdLaunchMissile(player, i, z);
             }
             
         }
         world.sendMessage(`§cミサイルの嵐！`);
-    }
-
-    if (message === '.uo') {
-        ev.cancel = true;
-        await Promise.resolve();
-        const config = getMapConfig();
-        for (let x = 0; x < config.width; x++) {
-            for (let z = 0; z < config.height; z++) {
-                const res = resolveSneerImpact(getMapConfig(), x, z);
-                world.sendMessage(res);
-            }
-            
-        }
-        world.sendMessage(`§c冷笑の嵐！`);
     }
 })
 
@@ -83,7 +68,7 @@ function cmdHelp(player) {
         "§e!civ claim §f: 周囲の土地を領有 (コスト: 人口1)",
         "§e!civ buyrights §f: 開拓権を獲得 (コスト: 首都人口2)",
         "§e!civ settle §f: 都市を建設 (コスト: 開拓権x1)",
-        "§e!civ build <worker|missile|tradingPost> §f: 生産を開始",
+        "§e!civ build <worker|warrior|archer|missile|tradingPost|granary> §f: 生産を開始",
         "§c!civ cancelbuild §f: 進行中の生産を中止(蓄積分は次に引き継ぎ)",
         "§e!civ chop §f: 森林を伐採して住宅上限+1",
         "§c!civ launch <x> <z> §f: 指定マスへミサイルを発射",
@@ -383,7 +368,7 @@ export function cmdStartProduction(player, productionId) {
     if (!tile || !tile.city) { reply(player, "§cここにあなたの都市はありません。"); return { ok: false }; }
     if (tile.ownerId !== player.id) { reply(player, "§cこの都市の所有権がありません。"); return { ok: false }; }
 
-    const check = canStartProduction(tile.city, productionId, tile);
+    const check = canStartProduction(tile.city, productionId, tile, player);
     if (!check.ok) { reply(player, check.message); return { ok: false }; }
 
     startProduction(tile.city, productionId);
@@ -532,7 +517,8 @@ export function cmdSettle(player) {
     tile.city = {
         name: cityUniqueName, // 👈 名前をセット
         population: initPopulation,
-        workers: initWorkers,
+        workers: 0,
+        workerUnits: [],       // 💡 各労働者の残り行動回数(addWorkersで付与する)
         housing: housing,
         foodStorage: 0,
         starvationTurns: 0,
@@ -541,6 +527,7 @@ export function cmdSettle(player) {
         production: null,      // 💡 進行中の生産 { id, progress, cost } | null (production.js で管理)
         productionCarry: 0     // 💡 中断/完了時に余った生産力(次の生産に引き継ぐ)
     };
+    if (initWorkers > 0) addWorkers(tile.city, initWorkers);
     tile.ownerId = player.id;
     tile.ownerName = player.name;
     setTile(tx, tz, tile);
@@ -612,15 +599,14 @@ export function cmdChop(player) {
     const cityTile = allTiles[cityKey];
     if (!cityTile || !cityTile.city) { reply(player, "§c帰属先の都市が見つかりません。"); return { ok: false }; }
 
-    // 💡 労働者数のチェック
-    const currentWorkers = cityTile.city.workers ?? 0;
-    if (currentWorkers <= 0) {
+    // 💡 労働者の行動回数チェック(労働者1人あたり行動回数WORKER_ACTIONS_PER_UNIT。1消費するごとに-1)
+    if (!hasAvailableWorkerAction(cityTile.city)) {
         reply(player, `§c❌ 労働者が足りません！この作業には帰属都市【${cityTile.city.name}】の労働者が必要です。`);
         return { ok: false };
     }
 
-    // 💡 労働者を-1し、伐採効果（住宅上限+1）をその帰属都市に付与
-    cityTile.city.workers = currentWorkers - 1;
+    // 💡 労働者の行動回数を1消費し、伐採効果（住宅上限+1）をその帰属都市に付与
+    consumeWorkerAction(cityTile.city);
     cityTile.city.housing += 1;
     
     const [cxStr, czStr] = cityKey.split(",");
@@ -646,7 +632,7 @@ export function cmdChop(player) {
     }
 
     player.runCommand(`playsound dig.wood @a ${player.location.x} ${player.location.y} ${player.location.z}`);
-    world.sendMessage(`§d🪓 ${player.name} が (${tx}, ${tz}) の森を伐採！【${cityTile.city.name}】の労働者を1消費し、同都市の住宅上限が +1！`);
+    world.sendMessage(`§d🪓 ${player.name} が (${tx}, ${tz}) の森を伐採！【${cityTile.city.name}】の労働者の行動回数を1消費し、同都市の住宅上限が +1！`);
     return { ok: true };
 }
 

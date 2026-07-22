@@ -14,7 +14,7 @@ const TILE_SIZE = 5;
 // 💡 プレイヤー固有の色。ゲーム開始時(startGame)に一度だけ playerOrder の並び順で確定させ、
 //    turn.playerColors に保存する。旗の設置処理では毎回ここから色を読み取るだけにすることで、
 //    「1ターン中に旗設置関数を複数回呼ぶと色がずれていく」問題を防ぐ。
-export const PLAYER_COLORS = ["red", "blue", "green", "yellow", "purple", "orange", "cyan", "magenta", "light_blue", "lime", "pink"];
+export const PLAYER_COLORS = ["red", "blue", "green", "yellow", "purple", "orange", "cyan", "magenta", "light_blue", "lime"];
 
 /** ゲーム開始時に確定したプレイヤーの固有色を取得する。未確定の場合は white を返す。 */
 export function getPlayerColor(playerId) {
@@ -90,7 +90,7 @@ function countCheatingBlocks(dimension, tiles, tx, tz, config) {
                     extraProd += 1;
                 }
                 if (block.typeId === "minecraft:magma") {
-                    extraProd += 10;
+                    extraProd += 100;
                 }
             }
         }
@@ -164,6 +164,9 @@ export function getCityCurrentYields(cityKey, tiles) {
     // 法典の効果: 所有するすべての都市の食料生産量を+1。
     const ownerHandle = getCivStorageHandle(playerId);
     if (ownerHandle && hasCompletedProgress(ownerHandle, "civic", "codeOfLaws")) food += 1;
+
+    // 穀物庫の効果: 建設したこの都市の食料生産量を+1。
+    if (cityTile.city.granary) food += 1;
 
     return { food, production: Math.max(1, production), oil }; // 最低生産力は1を保証
 }
@@ -323,42 +326,6 @@ export function destroyCity(tiles, cityKey, config, dimension) {
         dimension.getBlock({ x: baseX, y: config.ySurface + 1, z: baseZ })?.setPermutation(BlockPermutation.resolve("minecraft:air"));
     }
     tiles[cityKey].city = null; tiles[cityKey].ownerId = null; tiles[cityKey].ownerName = null;
-}
-
-/**
- * 💡 ミサイルの着弾処理。爆発パーティクル/効果音を再生し、着弾先に都市があれば破壊する。
- * @returns {string|null} world.sendMessage 用の結果メッセージ（都市が無ければ null）
- */
-export function resolveSneerImpact(config, targetTx, targetTz) {
-    const dimension = world.getDimension("overworld");
-
-    const centerX = config.originX + targetTx * TILE_SIZE + 2;
-    const centerZ = config.originZ + targetTz * TILE_SIZE + 2;
-    const centerY = config.ySurface + 2;
-
-    // 💥 着弾エフェクト（パーティクル + 効果音）
-    try {
-        dimension.spawnParticle("minecraft:huge_explosion_emitter", { x: centerX, y: centerY, z: centerZ });
-    } catch (e) {}
-    try {
-        dimension.playSound("random.hurt", { x: centerX, y: centerY, z: centerZ }, { volume: 4, pitch: 1.0 });
-    } catch (e) {}
-
-    const tiles = getTiles();
-    const targetKey = `${targetTx},${targetTz}`;
-    const targetTile = tiles[targetKey];
-
-    if (!targetTile || !targetTile.city) {
-        return `§7[うおｗ] (${targetTx}, ${targetTz}) になにもなくてうおｗ`;
-    }
-
-    const cityName = targetTile.city.name;
-    const ownerName = targetTile.ownerName ?? "うおシティ";
-
-    destroyCity(tiles, targetKey, config, dimension);
-    setTiles(tiles);
-
-    return `§c[うおｗ] 【${cityName}】(${ownerName})がなくなってあｗ`;
 }
 
 /**

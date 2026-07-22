@@ -3,8 +3,8 @@ import { ActionFormData, ModalFormData } from "@minecraft/server-ui";
 import { getMapConfig, getTile, getTiles } from "./state.js";
 import { worldToTile, TERRAIN_TYPES, RESOURCE_TYPES } from "./mapGen.js"
 import { turnInfoText, endTurn, isPlayersTurn, joinGame, endGame, getTurnState, calculateCityFoodIncomes, getCityCurrentYields, startGame } from "./turns.js";
-import { PRODUCTION_DEFS, canStartProduction } from "./production.js";
-import { getDefinitions, getKindLabel, getPointsLabel, getProgressState, hasCompletedProgress } from "./progression.js";
+import { PRODUCTION_DEFS, canStartProduction, getTotalWorkerActionsRemaining } from "./production.js";
+import { getDefinitions, getKindLabel, getPointsLabel, getProgressState, hasCompletedProgress, getDefinition } from "./progression.js";
 import { getRelation, sendRequest, getRequestsFor, acceptRequest, rejectRequest, breakRelation, hasDiplomaticAgreement } from "./diplomacy.js";
 import { getAttackRange, getAttackableTargets, getEffectiveCombatStrength } from "./combat.js";
 import { getRealPlayer, getControllableCivs, getActiveCivId, setActiveCivId, addVirtualCiv, getCivStorageHandle } from "./civs.js";
@@ -85,7 +85,7 @@ export async function openMainMenu(player) {
                 const currentYields = getCityCurrentYields(`${tx},${tz}`, allTiles);
 
                 body.push(`\n§6【${city.isCapital ? "首都" : "地方都市"}: ${city.name}】`);
-                body.push(`§f  - 人口: §a${city.population} §f/ 住宅上限: §e${city.housing} §f| [Worker] 労働者: §b${city.workers ?? 0} 人`);
+                body.push(`§f  - 人口: §a${city.population} §f/ 住宅上限: §e${city.housing} §f| [Worker] 労働者: §b${city.workers ?? 0} 人 §7(残り行動:${getTotalWorkerActionsRemaining(city)})`);
                 body.push(`§f  - ⚖️ 現市民の選択総出力: §6[Food]x${currentYields.food} §f/ §e[Prod]x${currentYields.production}`);
                 
                 // 💡 進行中の生産(ユニット/建造物)を汎用的に表示。新しい生産物を増やしても自動で対応する。
@@ -124,7 +124,7 @@ export async function openMainMenu(player) {
                     const belongsCityTile = allTiles[currentTile.belongsToCityKey];
                     if (belongsCityTile && belongsCityTile.city) {
                         body.push(`\n§b帰属都市: 【${belongsCityTile.city.name}】`);
-                        body.push(`§7(この領地で稼働できる労働者: [Worker]x${belongsCityTile.city.workers ?? 0})`);
+                        body.push(`§7(この領地で稼働できる労働者: [Worker]x${belongsCityTile.city.workers ?? 0}、残り行動:${getTotalWorkerActionsRemaining(belongsCityTile.city)})`);
                     }
                 }
             }
@@ -372,10 +372,13 @@ async function openProductionCategoryMenu(player, tx, tz, category) {
             const def = PRODUCTION_DEFS[id];
             if (def.category !== category) continue;
 
-            const check = canStartProduction(city, id, tile);
+            const check = canStartProduction(city, id, tile, player);
             if (!check.ok) {
                 if (def.uniquePerCity && def.hasBuilt?.(city)) {
                     body.push(`§7${def.icon} ${def.label}: 建設済み`);
+                } else if (def.requiresTechnology && !hasCompletedProgress(player, "technology", def.requiresTechnology)) {
+                    const techDef = getDefinition("technology", def.requiresTechnology);
+                    body.push(`§7🔒 ${def.icon} ${def.label}: 技術【${techDef?.label ?? def.requiresTechnology}】が必要`);
                 }
                 continue;
             }

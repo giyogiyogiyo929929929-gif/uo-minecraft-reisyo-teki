@@ -4,11 +4,16 @@ export const TECHNOLOGIES = {
     animalHusbandry: { label: "畜産", cost: 10, prerequisites: [] },
     mining: { label: "採掘", cost: 10, prerequisites: [] },
     astrology: { label: "占星術", cost: 10, prerequisites: [] },
+    // 💡 弓術: 弓兵の生産に必要。前提条件として畜産が必要。
+    archery: { label: "弓術", cost: 15, prerequisites: ["animalHusbandry"] },
+    // 💡 陶磁器: 前提条件なし。取得後、都市に穀物庫(食料生産量+1、住居+2)を建設できるようになる。
+    pottery: { label: "陶磁器", cost: 10, prerequisites: [] },
 };
 
 export const CIVICS = {
     codeOfLaws: { label: "法典", cost: 10, prerequisites: [], effect: "すべての都市の食料生産量+1" },
-    emissaries: { label: "使節団", cost: 10, prerequisites: [], effect: "不可侵条約を締結可能" },
+    // 💡 使節団の前提条件に法典を追加。
+    emissaries: { label: "使節団", cost: 10, prerequisites: ["codeOfLaws"], effect: "不可侵条約を締結可能" },
     diplomacy: { label: "外交", cost: 15, prerequisites: ["emissaries"], effect: "同盟を締結可能" },
 };
 
