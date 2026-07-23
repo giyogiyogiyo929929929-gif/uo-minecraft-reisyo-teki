@@ -354,6 +354,15 @@ function awardVictoryPoints(civIds) {
     }
 }
 
+/** 2つの国家IDが、同一国家か、または互いに同盟関係にあるかどうかを判定する。 */
+function isAlliedOrSameCiv(civIdA, civIdB) {
+    if (!civIdA || !civIdB) return false;
+    if (civIdA === civIdB) return true;
+    const handle = getCivStorageHandle(civIdA);
+    if (!handle) return false;
+    return getRelation(handle, civIdB) === "alliance";
+}
+
 /** 渡された国家ID全員が、互いに同盟関係にあるかどうかを判定する。 */
 function areAllMutuallyAllied(civIds) {
     for (let i = 0; i < civIds.length; i++) {
@@ -514,7 +523,7 @@ function processPlayerTurnStart(playerId) {
         if (!city.production) continue;
 
         const amount = cityProductionIncomes[c.key] ?? 0;
-        const result = tickProduction(city, amount, { cityKey: c.key, tiles, connectTradeRoutes });
+        const result = tickProduction(city, amount, { cityKey: c.key, tiles, connectTradeRoutes, isAllied: isAlliedOrSameCiv });
         if (result) summaryReport.push(result.message);
     }
 

@@ -87,6 +87,56 @@ export function getTotalWorkerActionsRemaining(city) {
  * @property {(city: any, ctx: any) => void} onComplete 完成時の効果を適用する関数
  * @property {(city: any) => string} [completeMessage] 完成時のメッセージ生成関数
  */
+/**
+ * 戦闘ユニット生産の完了処理を共通化するヘルパー。
+ * ・都市のマスが空いていれば、そのままそこに新しいユニットを配置する。
+ * ・都市のマスに敵(自国でも同盟国でもない)の戦闘ユニットがいる場合、生産を中止する
+ *   (進行度は消滅させず、呼び出し元でproductionCarryとして保持させる)。
+ * ・都市のマスに自国 or 同盟国の戦闘ユニットがいる場合、周囲8マスのうち空いているマスに
+ *   新しいユニットを配置する。空きマスが無ければ、この場合も生産を中止する。
+ * @param {any} ctx tickProduction から渡されるコンテキスト({ cityKey, tiles, isAllied } など)
+ * @param {(ownerId: string, ownerName: string) => any} createUnit 配置するユニットのデータを作る関数
+ * @returns {{ cancelled: boolean, cancelReason?: "enemyOccupied" | "noRoomNearby", relocated?: boolean } | undefined}
+ *   配置に成功した場合は undefined(通常の完成メッセージを出す)、中止した場合は cancelled:true を返す。
+ */
+function placeProducedCombatUnit(ctx, createUnit) {
+    const tile = ctx?.tiles?.[ctx?.cityKey];
+    if (!tile) return { cancelled: true, cancelReason: "noRoomNearby" };
+
+    const newUnit = createUnit(tile.ownerId, tile.ownerName);
+
+    if (!tile.combatUnit) {
+        tile.combatUnit = newUnit;
+        return undefined;
+    }
+
+    // 💡 都市のマスに既にいる戦闘ユニットが、自国 or 同盟国のものかどうかを判定する。
+    const occupant = tile.combatUnit;
+    const isFriendly = occupant.ownerId === tile.ownerId || !!ctx?.isAllied?.(tile.ownerId, occupant.ownerId);
+
+    if (!isFriendly) {
+        // 💡 敵の戦闘ユニットが都市のマスにいる場合、生産そのものを中止する。
+        return { cancelled: true, cancelReason: "enemyOccupied" };
+    }
+
+    // 💡 自国/同盟のユニットが既にいる場合、都市のマスを取り囲む8マスのうち空いているマスへ配置する。
+    const [txStr, tzStr] = String(ctx.cityKey).split(",");
+    const tx = Number(txStr), tz = Number(tzStr);
+    for (let dz = -1; dz <= 1; dz++) {
+        for (let dx = -1; dx <= 1; dx++) {
+            if (dx === 0 && dz === 0) continue;
+            const neighborTile = ctx.tiles[`${tx + dx},${tz + dz}`];
+            if (neighborTile && !neighborTile.combatUnit) {
+                neighborTile.combatUnit = newUnit;
+                return { cancelled: false, relocated: true };
+            }
+        }
+    }
+
+    // 💡 周囲に空きマスが無ければ、この場合も生産を中止する(進行度は保持される)。
+    return { cancelled: true, cancelReason: "noRoomNearby" };
+}
+
 export const PRODUCTION_DEFS = {
     worker: {
         label: "労働者",
@@ -114,16 +164,11 @@ export const PRODUCTION_DEFS = {
         category: "unit",
         cost: 30,
         requiresEmptyCombatTile: true,
-        onComplete: (city, ctx) => {
-            const tile = ctx?.tiles?.[ctx.cityKey];
-            if (tile) {
-                tile.combatUnit = {
-                    // 💡 attackRange: 近接ユニットのため攻撃距離は移動力と同じ(1)。
-                    id: "warrior", label: "戦士", hp: 100, maxHp: 100, combatStrength: 20,
-                    movement: 1, movementRemaining: 1, attackRange: 1, ownerId: tile.ownerId, ownerName: tile.ownerName,
-                };
-            }
-        },
+        onComplete: (city, ctx) => placeProducedCombatUnit(ctx, (ownerId, ownerName) => ({
+            // 💡 attackRange: 近接ユニットのため攻撃距離は移動力と同じ(1)。
+            id: "warrior", label: "戦士", hp: 100, maxHp: 100, combatStrength: 20,
+            movement: 1, movementRemaining: 1, attackRange: 1, ownerId, ownerName,
+        })),
         completeMessage: (city) => `§e[Warrior]【${city.name}】に戦士を配置しました！ (HP: 100/100、戦闘力: 20)`,
     },
     archer: {
@@ -133,18 +178,13 @@ export const PRODUCTION_DEFS = {
         cost: 50,
         requiresEmptyCombatTile: true,
         requiresTechnology: "archery",
-        onComplete: (city, ctx) => {
-            const tile = ctx?.tiles?.[ctx.cityKey];
-            if (tile) {
-                tile.combatUnit = {
-                    // 💡 弓兵は遠距離戦闘ユニット: 遠距離戦闘力20、近距離戦闘力15の2種類の戦闘力を持つ。
-                    //    combatStrength は互換表示用に近距離戦闘力と同じ値を入れておく。
-                    id: "archer", label: "弓兵", hp: 100, maxHp: 100,
-                    combatStrength: 15, rangedCombatStrength: 20, meleeCombatStrength: 15,
-                    movement: 1, movementRemaining: 1, attackRange: 2, ownerId: tile.ownerId, ownerName: tile.ownerName,
-                };
-            }
-        },
+        onComplete: (city, ctx) => placeProducedCombatUnit(ctx, (ownerId, ownerName) => ({
+            // 💡 弓兵は遠距離戦闘ユニット: 遠距離戦闘力20、近距離戦闘力15の2種類の戦闘力を持つ。
+            //    combatStrength は互換表示用に近距離戦闘力と同じ値を入れておく。
+            id: "archer", label: "弓兵", hp: 100, maxHp: 100,
+            combatStrength: 15, rangedCombatStrength: 20, meleeCombatStrength: 15,
+            movement: 1, movementRemaining: 1, attackRange: 2, ownerId, ownerName,
+        })),
         completeMessage: (city) => `§e[Archer]【${city.name}】に弓兵を配置しました！ (HP: 100/100、遠距離戦闘力: 20、近距離戦闘力: 15)`,
     },
     uoooo: {
@@ -153,15 +193,10 @@ export const PRODUCTION_DEFS = {
         category: "unit",
         cost: 500,
         requiresEmptyCombatTile: true,
-        onComplete: (city, ctx) => {
-            const tile = ctx?.tiles?.[ctx.cityKey];
-            if (tile) {
-                tile.combatUnit = {
-                    id: "uoooo", label: "うおｗ", hp: 100, maxHp: 100, combatStrength: 200,
-                    movement: 10, movementRemaining: 10, attackRange: 20, ownerId: tile.ownerId, ownerName: tile.ownerName,
-                };
-            }
-        },
+        onComplete: (city, ctx) => placeProducedCombatUnit(ctx, (ownerId, ownerName) => ({
+            id: "uoooo", label: "うおｗ", hp: 100, maxHp: 100, combatStrength: 200,
+            movement: 10, movementRemaining: 10, attackRange: 20, ownerId, ownerName,
+        })),
         completeMessage: (city) => `§e[Warrior]【${city.name}】にうおｗを配置しました！ (HP: 100/100、戦闘力: 20)`,
     },
     tradingPost: {
@@ -307,11 +342,29 @@ export function tickProduction(city, productionAmount, ctx) {
     city.production.progress += productionAmount ?? 0;
 
     if (city.production.progress >= city.production.cost) {
+        const completionResult = def.onComplete(city, ctx);
+
+        if (completionResult && completionResult.cancelled) {
+            // 💡 完成条件(必要生産力)は満たしたが、配置できずに中止された場合。
+            //    進行度は消滅させず、全額を productionCarry として次の生産に持ち越す。
+            const progress = city.production.progress;
+            const reasonText = completionResult.cancelReason === "enemyOccupied"
+                ? "都市のマスに敵の戦闘ユニットがいる"
+                : "配置できる空きマスが周囲に無い";
+            const message = `§c⚠【${city.name}】${def.label}の生産が完了しましたが、${reasonText}ため配置できず中止されました。(進行度は保持されます)`;
+
+            city.production = null;
+            city.productionCarry = (city.productionCarry ?? 0) + progress;
+            return { done: true, cancelled: true, message };
+        }
+
         const overflow = city.production.progress - city.production.cost;
-        def.onComplete(city, ctx);
-        const message = def.completeMessage
+        let message = def.completeMessage
             ? def.completeMessage(city)
             : `§e🎉【${city.name}】${def.label}の生産が完了！`;
+        if (completionResult && completionResult.relocated) {
+            message += " §7(都市のマスが自国/同盟ユニットで埋まっていたため、隣接マスに配置されました)";
+        }
 
         city.production = null;
         city.productionCarry = (city.productionCarry ?? 0) + overflow;

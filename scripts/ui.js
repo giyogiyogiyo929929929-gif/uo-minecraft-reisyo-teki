@@ -6,7 +6,7 @@ import { turnInfoText, endTurn, isPlayersTurn, joinGame, endGame, getTurnState, 
 import { PRODUCTION_DEFS, canStartProduction, getTotalWorkerActionsRemaining } from "./production.js";
 import { getDefinitions, getKindLabel, getPointsLabel, getProgressState, hasCompletedProgress, getDefinition } from "./progression.js";
 import { getRelation, sendRequest, getRequestsFor, acceptRequest, rejectRequest, breakRelation, hasDiplomaticAgreement } from "./diplomacy.js";
-import { getAttackRange, getAttackableTargets, getEffectiveCombatStrength } from "./combat.js";
+import { getAttackRange, getAttackableTargets, getEffectiveCombatStrength, isRangedUnit, getEffectiveRangedStrength } from "./combat.js";
 import { getRealPlayer, getControllableCivs, getActiveCivId, setActiveCivId, addVirtualCiv, getCivStorageHandle } from "./civs.js";
 
 function isOperator(player) {
@@ -81,6 +81,19 @@ export async function openMainMenu(player) {
             body.push(`§bマス固有食料産出: §6[Food]x${currentTile.foodYield ?? 1} §b| 生産力: §e[Prod]x${currentTile.productionYield ?? 1}`);
             body.push(`§b所有者: ${currentTile.ownerName ? "§f" + currentTile.ownerName : "§7未所有"}`);
 
+            // 💡 このマスにいる戦闘ユニットの情報(自分のものでも、他国のものでも表示する)
+            if (currentTile.combatUnit) {
+                const unit = currentTile.combatUnit;
+                const unitOwnerText = unit.ownerId === player.id ? "§a自分" : `§c${unit.ownerName ?? "不明"}`;
+                const unitStrengthText = isRangedUnit(unit)
+                    ? `遠距離${getEffectiveRangedStrength(unit)}/近距離${getEffectiveCombatStrength(unit)}`
+                    : `${getEffectiveCombatStrength(unit)}`;
+                const unitRemaining = unit.movementRemaining ?? unit.movement ?? 0;
+                body.push(`§b戦闘ユニット: §f${unit.label ?? unit.id} §7(所有:${unitOwnerText}§7) HP:${Math.max(0, Math.round(unit.hp ?? 0))}/${unit.maxHp ?? 100} §f戦闘力:${unitStrengthText} §f移動:${unitRemaining}/${unit.movement ?? 0} §f攻撃距離:${getAttackRange(unit)}`);
+            } else {
+                body.push(`§7戦闘ユニット: なし`);
+            }
+
             if (currentTile.city) {
                 const city = currentTile.city;
                 const threshold = 10 + (city.population - 1) * 2;
@@ -147,6 +160,7 @@ export async function openMainMenu(player) {
     //    ("使節団"civicの完了を条件にしていたが、ゲーム参加者との関係確認自体は常にできてよいため撤廃)
     if (turn.started) {
         buttons.push({ text: "§b🤝 外交メニュー", action: "diplomacy" });
+        buttons.push({ text: "§f⚔ 自分の戦闘ユニット一覧", action: "myunits" });
     }
     
     if (currentTile && !currentTile.ownerId) {
@@ -212,6 +226,7 @@ export async function openMainMenu(player) {
         case "technology": await openProgressMenu(player, "technology"); break;
         case "civic": await openProgressMenu(player, "civic"); break;
         case "diplomacy": await openDiplomacyMenu(player); break;
+        case "myunits": await openMyUnitsMenu(player); break;
         case "moveunit":
             if (currentTile?.combatUnit?.ownerId === player.id) await openCombatUnitMoveMenu(player, tx, tz);
             break;
@@ -784,4 +799,88 @@ async function openCombatUnitAttackMenu(player, fromTx, fromTz) {
         return;
     }
     (await import("./commands.js")).cmdAttackCombatUnit(player, fromTx, fromTz, action.tx, action.tz);
+}
+
+/**
+ * ⚔ 自分が所有する戦闘ユニットの一覧を表示する。
+ * マップ上のどこにいても、ここから直接そのユニットの移動・攻撃メニューを開ける
+ * (移動・攻撃コマンド自体が座標指定式で、その場にいる必要が無いため)。
+ */
+async function openMyUnitsMenu(player) {
+    const config = getMapConfig();
+    const tiles = config ? getTiles() : {};
+
+    const myUnits = [];
+    for (const key in tiles) {
+        const tile = tiles[key];
+        if (tile.combatUnit && tile.combatUnit.ownerId === player.id) {
+            const [txStr, tzStr] = key.split(",");
+            myUnits.push({ tx: Number(txStr), tz: Number(tzStr), unit: tile.combatUnit, tile });
+        }
+    }
+
+    const body = [`§f保有している戦闘ユニット: §b${myUnits.length} 体`];
+    const buttons = [];
+
+    for (const entry of myUnits) {
+        const unit = entry.unit;
+        const strengthText = isRangedUnit(unit)
+            ? `遠距離${getEffectiveRangedStrength(unit)}/近距離${getEffectiveCombatStrength(unit)}`
+            : `${getEffectiveCombatStrength(unit)}`;
+        const remaining = unit.movementRemaining ?? unit.movement ?? 0;
+        const cityText = entry.tile.city ? ` | 🎪${entry.tile.city.name}` : "";
+        buttons.push({
+            text: `${unit.label ?? unit.id} (${entry.tx},${entry.tz}) HP:${Math.max(0, Math.round(unit.hp ?? 0))}/${unit.maxHp ?? 100} 戦闘力:${strengthText} 移動:${remaining}/${unit.movement ?? 0}${cityText}`,
+            action: { tx: entry.tx, tz: entry.tz },
+        });
+    }
+
+    if (myUnits.length === 0) body.push("§7現在、戦闘ユニットを保有していません。");
+    buttons.push({ text: "戻る", action: null });
+
+    const form = new ActionFormData().title("⚔ 自分の戦闘ユニット一覧").body(body.join("\n"));
+    for (const btn of buttons) form.button(btn.text);
+    const result = await form.show(getRealPlayer(player));
+    if (result.canceled || result.selection === undefined) return;
+
+    const selected = buttons[result.selection]?.action;
+    if (!selected) {
+        await openMainMenu(player);
+        return;
+    }
+    await openUnitActionMenu(player, selected.tx, selected.tz);
+}
+
+/** 一覧から選んだユニットに対して「移動 / 攻撃」を選べる小さなアクションメニュー。 */
+async function openUnitActionMenu(player, tx, tz) {
+    const tile = getTile(tx, tz);
+    const unit = tile?.combatUnit;
+    if (!unit || unit.ownerId !== player.id) { await openMyUnitsMenu(player); return; }
+
+    const strengthText = isRangedUnit(unit)
+        ? `遠距離${getEffectiveRangedStrength(unit)}(基本${unit.rangedCombatStrength ?? unit.combatStrength ?? 0})/近距離${getEffectiveCombatStrength(unit)}(基本${unit.meleeCombatStrength ?? unit.combatStrength ?? 0})`
+        : `${getEffectiveCombatStrength(unit)}(基本${unit.combatStrength ?? 0})`;
+    const remaining = unit.movementRemaining ?? unit.movement ?? 0;
+
+    const body = [
+        `${unit.label ?? unit.id}  位置: (${tx}, ${tz})`,
+        `HP: ${Math.max(0, Math.round(unit.hp ?? 0))}/${unit.maxHp ?? 100}  戦闘力: ${strengthText}`,
+        `攻撃距離: ${getAttackRange(unit)} | 残り移動力: ${remaining}/${unit.movement ?? 0}`,
+    ];
+
+    const buttons = [
+        { text: "§f 移動", action: "move" },
+        { text: "§c⚔ 攻撃", action: "attack" },
+        { text: "戻る", action: null },
+    ];
+
+    const form = new ActionFormData().title(unit.label ?? "戦闘ユニット").body(body.join("\n"));
+    for (const btn of buttons) form.button(btn.text);
+    const result = await form.show(getRealPlayer(player));
+    if (result.canceled || result.selection === undefined) return;
+    const action = buttons[result.selection]?.action;
+
+    if (action === "move") await openCombatUnitMoveMenu(player, tx, tz);
+    else if (action === "attack") await openCombatUnitAttackMenu(player, tx, tz);
+    else await openMyUnitsMenu(player);
 }
