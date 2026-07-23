@@ -462,21 +462,24 @@ export function cmdSettle(player) {
         if (allTiles[key].ownerId === player.id && allTiles[key].city) { hasAnyCity = true; break; }
     }
 
-    const turn = getTurnState();
-    if (!turn.playerRights) turn.playerRights = {};
-    const rights = turn.playerRights[player.id] ?? 0;
-
-    if (hasAnyCity && rights <= 0) {
-        reply(player, "§c開拓する権利がありません。首都で !civ buyrights を実行してください。");
-        return;
-    }
-
     // 💡 首都は生涯で1度だけ自動設置される。一度でも首都を持ったことがあるプレイヤーは、
     //    (占領やミサイル攻撃で首都を失い、都市を1つも持っていない状態になったとしても)
     //    !civ settle で新しい首都が自動的に立つことはない。以後、首都を取り戻すには
     //    既存の都市で「遷都」を生産する必要がある(cmdSettleでは常に通常の都市になる)。
     const hasFoundedCapitalBefore = player.getDynamicProperty("civ:hasFoundedCapital") === true;
     const isCapital = !hasAnyCity && !hasFoundedCapitalBefore;
+
+    const turn = getTurnState();
+    if (!turn.playerRights) turn.playerRights = {};
+    const rights = turn.playerRights[player.id] ?? 0;
+
+    // 💡 「初めての首都」だけが無料。都市を全て失って hasAnyCity が false になっていても、
+    //    既に一度首都を持っていた(=isCapitalがfalseになる)場合は、通常の都市と同様に
+    //    開拓の権利を消費する(無料で無制限に再入植できてしまう抜け穴の修正)。
+    if (!isCapital && rights <= 0) {
+        reply(player, "§c開拓する権利がありません。首都で !civ buyrights を実行してください。");
+        return;
+    }
 
     const initPopulation = isCapital ? 2 : 1;
     const initWorkers = isCapital ? 1 : 0;
