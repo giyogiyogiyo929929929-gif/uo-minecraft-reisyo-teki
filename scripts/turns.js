@@ -6,6 +6,7 @@ import { grantProgressPoints, resetProgress } from "./progression.js";
 import { resetDiplomacy, getRelation } from "./diplomacy.js";
 import { hasCompletedProgress } from "./progression.js";
 import { getCivStorageHandle, resolveCivName } from "./civs.js";
+import { getBuildingAdjacencyYields } from "./adjacency.js";
 
 export { getTurnState, setTurnState };
 
@@ -167,6 +168,15 @@ export function getCityCurrentYields(cityKey, tiles) {
 
     // 穀物庫の効果: 建設したこの都市の食料生産量を+1。
     if (cityTile.city.granary) food += 1;
+
+    // 💡 その他の建造物が持つ「隣接マスに応じたボーナス」をまとめて反映する。
+    //    新しい建造物を追加しても、production.js側にルール(adjacencyBonuses)を書くだけで
+    //    ここのコードを変更せずに自動反映される(adjacency.js参照)。
+    const [cityTx, cityTz] = cityKey.split(",").map(Number);
+    const adjacencyYields = getBuildingAdjacencyYields(cityTx, cityTz, tiles, cityTile.city, PRODUCTION_DEFS);
+    food += adjacencyYields.food ?? 0;
+    production += adjacencyYields.production ?? 0;
+    oil += adjacencyYields.oil ?? 0;
 
     return { food, production: Math.max(1, production), oil }; // 最低生産力は1を保証
 }

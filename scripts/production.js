@@ -23,6 +23,7 @@
 //   city.workers      = number   … 表示・互換用の労働者数(常に workerUnits.length と同期する)
 
 import { hasCompletedProgress, getDefinition } from "./progression.js";
+import { matchesTerrain } from "./adjacency.js";
 
 /** 労働者1人が持つ行動回数。 */
 export const WORKER_ACTIONS_PER_UNIT = 3;
@@ -84,6 +85,12 @@ export function getTotalWorkerActionsRemaining(city) {
  * @property {boolean} [uniquePerCity] true の場合、都市に既に存在する場合は再生産不可
  * @property {(city: any) => boolean} [hasBuilt] uniquePerCity 用: 既に保有済みか判定する関数
  * @property {number} [extraUpkeep] 生産中、都市の食料消費に追加される値
+ * @property {string} [requiresTechnology] 生産に必要な技術ID(technology progression)
+ * @property {boolean} [disallowInCapital] true の場合、首都ではこの建造物を生産できない(遷都用)
+ * @property {Array<any>} [adjacencyBonuses] 隣接マスに応じたボーナスのルール一覧。
+ *   adjacency.js の AdjacencyBonusRule 形式で書く(matchesTerrain/matchesResource/matchesBuilding
+ *   などのヘルパーを使うと簡潔に書ける)。この建造物を持つ都市の産出量計算(turns.js)に
+ *   自動的に反映されるので、ここにルールを追加するだけでよい(反映側のコード変更は不要)。
  * @property {(city: any, ctx: any) => void} onComplete 完成時の効果を適用する関数
  * @property {(city: any) => string} [completeMessage] 完成時のメッセージ生成関数
  */
@@ -230,6 +237,23 @@ export const PRODUCTION_DEFS = {
             city.housing = (city.housing ?? 0) + 2;
         },
         completeMessage: (city) => `§e🎉【${city.name}】穀物庫が完成しました！ (食料生産量+1、住居+2)`,
+    },
+    quarry: {
+        label: "採石場",
+        icon: "[Quarry]",
+        category: "building",
+        cost: 20,
+        uniquePerCity: true,
+        hasBuilt: (city) => !!city.quarry,
+        requiresTechnology: "mining",
+        // 💡 隣接ボーナスシステムの使用例: 周囲8マスの「山」1つにつき生産力+1(上限なし)。
+        //    新しい建造物にも同じ要領でルールを追加するだけで、産出計算(turns.js)側の
+        //    コードは変更せずに反映される。
+        adjacencyBonuses: [
+            { id: "quarryMountain", label: "山からの採石恩恵", match: matchesTerrain("mountain"), yieldPerMatch: { production: 1 } },
+        ],
+        onComplete: (city) => { city.quarry = true; },
+        completeMessage: (city) => `§e🎉【${city.name}】採石場が完成しました！ (隣接する山1つにつき生産力+1)`,
     },
     capital: {
         label: "遷都",

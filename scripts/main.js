@@ -154,8 +154,9 @@ system.runInterval(() => {
                 }
 
                 const tpText = c.tradingPost?.status === "active" ? " §7| §a[Trade]交易所稼働中" : "";
+                const quarryText = c.quarry ? " §7| §7[Quarry]採石場稼働中" : "";
                 const missileText = (c.missiles ?? 0) > 0 ? ` §7| §c[Missile]x${c.missiles}` : "";
-                cityInfoLine = `\n§6【${c.isCapital ? "首都" : "都市"}: ${c.name}】§f 人口:§a${c.population}§f/§e${c.housing} §f| [Worker]${c.workers ?? 0}人 §f| [Food]貯留${c.foodStorage ?? 0} §f| §c飢餓${c.starvationTurns ?? 0}/3${productionText}${tpText}${missileText}`;
+                cityInfoLine = `\n§6【${c.isCapital ? "首都" : "都市"}: ${c.name}】§f 人口:§a${c.population}§f/§e${c.housing} §f| [Worker]${c.workers ?? 0}人 §f| [Food]貯留${c.foodStorage ?? 0} §f| §c飢餓${c.starvationTurns ?? 0}/3${productionText}${tpText}${quarryText}${missileText}`;
             }
 
             // アクションバーへ出力
