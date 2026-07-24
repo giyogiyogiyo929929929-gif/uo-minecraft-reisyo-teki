@@ -704,6 +704,51 @@ function confirmBreakRelation(player, targetCiv) {
         });
 }
 
+/** 1ページあたりの選択肢の最大数。ボタンが多すぎるとフォームを開く際に重くなる(数秒固まる)ため制限する。 */
+const MENU_PAGE_SIZE = 10;
+
+/**
+ * 選択肢の数が多くなりうるメニューを、ページ分割して表示する汎用ヘルパー。
+ * 1画面あたりのボタン数を MENU_PAGE_SIZE 件までに抑えることで、フォームを開く際の
+ * 重さ・数秒間の固まりを軽減する。
+ * @param {any} realPlayer .show() に渡す実プレイヤー本体
+ * @param {string} title フォームのタイトル
+ * @param {string} bodyText フォーム本文(ページ情報は自動で末尾に付与される)
+ * @param {{text: string, action: any}[]} items 選択肢の一覧(ページ分割される対象)
+ * @param {(action: any) => (void|Promise<void>)} onSelect 項目が選ばれた時の処理
+ * @param {() => (void|Promise<void>)} onBack 「戻る」が選ばれた時の処理
+ * @param {number} [page] 表示するページ番号(0始まり)
+ */
+async function showPaginatedMenu(realPlayer, title, bodyText, items, onSelect, onBack, page = 0) {
+    const totalPages = Math.max(1, Math.ceil(items.length / MENU_PAGE_SIZE));
+    const currentPage = Math.max(0, Math.min(page, totalPages - 1));
+    const start = currentPage * MENU_PAGE_SIZE;
+    const pageItems = items.slice(start, start + MENU_PAGE_SIZE);
+
+    const buttons = pageItems.map(item => ({ kind: "item", text: item.text, action: item.action }));
+    if (currentPage > 0) buttons.push({ kind: "prev", text: "§b◀ 前のページ" });
+    if (currentPage < totalPages - 1) buttons.push({ kind: "next", text: "§b次のページ ▶" });
+    buttons.push({ kind: "back", text: "戻る" });
+
+    const pageInfo = totalPages > 1 ? `\n§7(${currentPage + 1}/${totalPages}ページ, 全${items.length}件)` : "";
+    const form = new ActionFormData().title(title).body(`${bodyText}${pageInfo}`);
+    for (const btn of buttons) form.button(btn.text);
+
+    const result = await form.show(realPlayer);
+    if (result.canceled || result.selection === undefined) return;
+
+    const selected = buttons[result.selection];
+    if (selected.kind === "item") {
+        await onSelect(selected.action);
+    } else if (selected.kind === "next") {
+        await showPaginatedMenu(realPlayer, title, bodyText, items, onSelect, onBack, currentPage + 1);
+    } else if (selected.kind === "prev") {
+        await showPaginatedMenu(realPlayer, title, bodyText, items, onSelect, onBack, currentPage - 1);
+    } else {
+        await onBack();
+    }
+}
+
 /** 現在位置の戦闘ユニットが移動できるマスを一覧表示する。 */
 async function openCombatUnitMoveMenu(player, fromTx, fromTz) {
     const source = getTile(fromTx, fromTz);
@@ -711,7 +756,7 @@ async function openCombatUnitMoveMenu(player, fromTx, fromTz) {
     if (!unit || unit.ownerId !== player.id) return;
 
     const remaining = unit.movementRemaining ?? unit.movement ?? 0;
-    const buttons = [];
+    const items = [];
     const body = [`${unit.label ?? "戦闘ユニット"}  HP: ${unit.hp ?? 0}/${unit.maxHp ?? 100}  戦闘力: ${getEffectiveCombatStrength(unit)}(基本${unit.combatStrength ?? 0})`, `残り移動力: ${remaining}`];
     const config = getMapConfig();
     const tiles = getTiles();
@@ -727,30 +772,28 @@ async function openCombatUnitMoveMenu(player, fromTx, fromTz) {
 
                 const tile = tiles[`${tx},${tz}`];
                 if (!tile || tile.combatUnit) continue;
-                const unitText = tile.combatUnit ? `戦闘ユニット: ${tile.combatUnit.label ?? tile.combatUnit.id}` : "戦闘ユニット: なし";
                 const cityText = tile.city
                     ? ` | 都市: ${tile.city.name} (人口:${tile.city.population}/${tile.city.housing})`
                     : "";
-                buttons.push({ text: `(${tx}, ${tz}) | ${unitText}${cityText}`, action: { tx, tz } });
+                items.push({ text: `(${tx}, ${tz})${cityText}`, action: { tx, tz } });
             }
         }
     } else {
         body.push("§7移動力が残っていません。次の自分のターン開始時に回復します。");
     }
 
-    if (buttons.length === 0 && remaining > 0) body.push("§7移動可能なマスがありません。");
-    buttons.push({ text: "戻る", action: null });
+    if (items.length === 0 && remaining > 0) body.push("§7移動可能なマスがありません。");
 
-    const form = new ActionFormData().title("[Warrior] 移動").body(body.join("\n"));
-    for (const button of buttons) form.button(button.text);
-    const result = await form.show(getRealPlayer(player));
-    if (result.canceled || result.selection === undefined) return;
-    const action = buttons[result.selection]?.action;
-    if (!action) {
-        await openMainMenu(player);
-        return;
-    }
-    (await import("./commands.js")).cmdMoveCombatUnit(player, fromTx, fromTz, action.tx, action.tz);
+    await showPaginatedMenu(
+        getRealPlayer(player),
+        "[Warrior] 移動",
+        body.join("\n"),
+        items,
+        async (action) => {
+            (await import("./commands.js")).cmdMoveCombatUnit(player, fromTx, fromTz, action.tx, action.tz);
+        },
+        async () => { await openMainMenu(player); },
+    );
 }
 
 /**
@@ -764,7 +807,7 @@ async function openCombatUnitAttackMenu(player, fromTx, fromTz) {
 
     const remaining = unit.movementRemaining ?? unit.movement ?? 0;
     const range = getAttackRange(unit);
-    const buttons = [];
+    const items = [];
     const body = [
         `${unit.label ?? "戦闘ユニット"}  HP: ${unit.hp ?? 0}/${unit.maxHp ?? 100}  戦闘力: ${getEffectiveCombatStrength(unit)}(基本${unit.combatStrength ?? 0})`,
         `攻撃距離: ${range} | 残り移動力: ${remaining}`,
@@ -777,7 +820,7 @@ async function openCombatUnitAttackMenu(player, fromTx, fromTz) {
         for (const t of attackTargets) {
             const enemyUnit = t.unit;
             const cityText = t.tile.city ? ` | 都市: ${t.tile.city.name}` : "";
-            buttons.push({
+            items.push({
                 text: `⚔ (${t.tx}, ${t.tz}) | ${enemyUnit.label ?? enemyUnit.id} HP:${Math.max(0, Math.round(enemyUnit.hp ?? 0))}/${enemyUnit.maxHp ?? 100} 戦闘力:${getEffectiveCombatStrength(enemyUnit)}${cityText}`,
                 action: { tx: t.tx, tz: t.tz },
             });
@@ -786,19 +829,18 @@ async function openCombatUnitAttackMenu(player, fromTx, fromTz) {
         body.push("§7移動力が残っていないため攻撃できません。次の自分のターン開始時に回復します。");
     }
 
-    if (buttons.length === 0 && remaining > 0) body.push("§7攻撃可能な対象(攻撃距離内の敵ユニット)がありません。");
-    buttons.push({ text: "戻る", action: null });
+    if (items.length === 0 && remaining > 0) body.push("§7攻撃可能な対象(攻撃距離内の敵ユニット)がありません。");
 
-    const form = new ActionFormData().title("[Warrior] 攻撃").body(body.join("\n"));
-    for (const button of buttons) form.button(button.text);
-    const result = await form.show(getRealPlayer(player));
-    if (result.canceled || result.selection === undefined) return;
-    const action = buttons[result.selection]?.action;
-    if (!action) {
-        await openMainMenu(player);
-        return;
-    }
-    (await import("./commands.js")).cmdAttackCombatUnit(player, fromTx, fromTz, action.tx, action.tz);
+    await showPaginatedMenu(
+        getRealPlayer(player),
+        "[Warrior] 攻撃",
+        body.join("\n"),
+        items,
+        async (action) => {
+            (await import("./commands.js")).cmdAttackCombatUnit(player, fromTx, fromTz, action.tx, action.tz);
+        },
+        async () => { await openMainMenu(player); },
+    );
 }
 
 /**
@@ -820,7 +862,7 @@ async function openMyUnitsMenu(player) {
     }
 
     const body = [`§f保有している戦闘ユニット: §b${myUnits.length} 体`];
-    const buttons = [];
+    const items = [];
 
     for (const entry of myUnits) {
         const unit = entry.unit;
@@ -829,26 +871,22 @@ async function openMyUnitsMenu(player) {
             : `${getEffectiveCombatStrength(unit)}`;
         const remaining = unit.movementRemaining ?? unit.movement ?? 0;
         const cityText = entry.tile.city ? ` | 🎪${entry.tile.city.name}` : "";
-        buttons.push({
+        items.push({
             text: `${unit.label ?? unit.id} (${entry.tx},${entry.tz}) HP:${Math.max(0, Math.round(unit.hp ?? 0))}/${unit.maxHp ?? 100} 戦闘力:${strengthText} 移動:${remaining}/${unit.movement ?? 0}${cityText}`,
             action: { tx: entry.tx, tz: entry.tz },
         });
     }
 
     if (myUnits.length === 0) body.push("§7現在、戦闘ユニットを保有していません。");
-    buttons.push({ text: "戻る", action: null });
 
-    const form = new ActionFormData().title("⚔ 自分の戦闘ユニット一覧").body(body.join("\n"));
-    for (const btn of buttons) form.button(btn.text);
-    const result = await form.show(getRealPlayer(player));
-    if (result.canceled || result.selection === undefined) return;
-
-    const selected = buttons[result.selection]?.action;
-    if (!selected) {
-        await openMainMenu(player);
-        return;
-    }
-    await openUnitActionMenu(player, selected.tx, selected.tz);
+    await showPaginatedMenu(
+        getRealPlayer(player),
+        "⚔ 自分の戦闘ユニット一覧",
+        body.join("\n"),
+        items,
+        async (action) => { await openUnitActionMenu(player, action.tx, action.tz); },
+        async () => { await openMainMenu(player); },
+    );
 }
 
 /** 一覧から選んだユニットに対して「移動 / 攻撃」を選べる小さなアクションメニュー。 */
