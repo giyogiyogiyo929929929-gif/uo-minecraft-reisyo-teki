@@ -1,6 +1,6 @@
 // commands.js
 import { world, system, BlockPermutation, PlayerPermissionLevel } from "@minecraft/server";
-import { generateMapJob, TERRAIN_TYPES, worldToTile, TILE_SIZE, RESOURCE_TYPES } from "./mapGen.js";
+import { generateMap, TERRAIN_TYPES, worldToTile, TILE_SIZE, RESOURCE_TYPES, ASSUMED_SIMULATION_RANGE_BLOCKS } from "./mapGen.js";
 import { getMapConfig, setMapConfig, getTile, setTile, resetAll, setTiles, getTiles } from "./state.js";
 import { joinGame, startGame, endTurn, turnInfoText, isPlayersTurn, endGame, getTurnState, setTurnState, getCityCurrentYields, resolveMissileImpact, getPlayerColor, checkAndAnnounceVictory } from "./turns.js";
 import { PRODUCTION_DEFS, canStartProduction, startProduction, cancelProduction, addWorkers, consumeWorkerAction, hasAvailableWorkerAction } from "./production.js";
@@ -214,18 +214,38 @@ function cmdGenerate(player, args) {
     const config = { originX, originZ, ySurface, width, height, tileSize: TILE_SIZE };
     setMapConfig(config);
 
-    reply(player, `§aマップ生成を開始します... (${width} x ${height} マス)`);
+    // 💡 マップの生成範囲(4隅のうち最も遠い点)が、プレイヤーを中心としたシミュレーション範囲
+    //    (読み込まれるチャンクの範囲)を超えるかどうかを判定する。超える場合のみ、生成中に
+    //    小さく分割したtickingareaを一時的に使う(超えないなら、既に読み込まれているはずなので
+    //    不要にtickingareaを使わない)。
+    const mapMaxX = originX + width * TILE_SIZE - 1;
+    const mapMaxZ = originZ + height * TILE_SIZE - 1;
+    const farthestBlocks = Math.max(
+        Math.abs(originX - loc.x), Math.abs(mapMaxX - loc.x),
+        Math.abs(originZ - loc.z), Math.abs(mapMaxZ - loc.z)
+    );
+    const useTickingArea = farthestBlocks > ASSUMED_SIMULATION_RANGE_BLOCKS;
+
+    reply(player, `§aマップ生成を開始します... (${width} x ${height} マス)${useTickingArea ? " §7(シミュレーション範囲外のため、生成中のみ一時的にtickingareaを使用します。安定性重視のため通常より時間がかかります)" : ""}`);
 
     const tiles = {};
-    const job = generateMapJob(dimension, { ...config, seed: Date.now() }, (tx, tz, type, resource, foodYield, productionYield) => {
+    generateMap(dimension, { ...config, seed: Date.now(), useTickingArea }, (tx, tz, type, resource, foodYield, productionYield) => {
         tiles[`${tx},${tz}`] = { type, ownerId: null, ownerName: null, resource: resource ?? null, foodYield, productionYield, city: null, isChopped: false };
-    });
-
-    system.runJob((function* () {
-        yield* job;
+    }).then((result) => {
         setTiles(tiles);
-        world.sendMessage("§a=== マップ生成が完了しました! ===");
-    })());
+        const failedTiles = result?.failedTiles ?? [];
+        if (failedTiles.length > 0) {
+            const coordText = failedTiles.slice(0, 10).map(f => `(${f.tx},${f.tz})`).join(", ");
+            const moreText = failedTiles.length > 10 ? ` 他${failedTiles.length - 10}箇所` : "";
+            world.sendMessage(`§eマップ生成が完了しました(ただし${failedTiles.length}箇所で地形ブロックの反映を確認できませんでした: ${coordText}${moreText})。データ上は登録済みなので、見た目が気になる場合は該当マスを手動で修正してください。`);
+        } else {
+            world.sendMessage("§a=== マップ生成が完了しました! ===");
+        }
+    }).catch((e) => {
+        // 💡 生成中に想定外のエラーが起きても、それまでに出来ているタイルは保存しておく
+        setTiles(tiles);
+        world.sendMessage(`§cマップ生成中にエラーが発生しました。生成済みの範囲まで保存しています: ${e}`);
+    });
 }
 
 function cmdJoin(player) { reply(player, joinGame(player).message); }
