@@ -36,9 +36,17 @@ export const FACILITY_DEFS = {
         // 💡 周囲8マスの「山」1つにつき生産力+1(上限なし)。
         adjacencyBonuses: [
             { id: "quarryMountain", label: "山からの採石恩恵", match: matchesTerrain("mountain"), yieldPerMatch: { production: 1 } },
-            { id: "uou", label: "うおう", match: matcheNationName("うお"), yieldPerMatch: { production: 99999, food: 99999 } },
         ],
         installMessage: (tile, tx, tz) => `§e🎉 (${tx}, ${tz}) に採石場を設置しました！(隣接する山1つにつき生産力+1)`,
+    },
+    uo: {
+        label: "プリズムストーン",
+        icon: "[Pretty]",
+        requiresTechnology: "astrology",
+        adjacencyBonuses: [
+            { id: "uou", label: "うおう", match: matcheNationName("うお"), yieldPerMatch: { production: 99999, food: 99999 } },
+        ],
+        installMessage: (tile, tx, tz) => `§d🎉 (${tx}, ${tz}) でプリズムストーンマイン倉笑笑店が開店！`,
     },
 };
 
