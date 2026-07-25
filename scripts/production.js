@@ -23,7 +23,6 @@
 //   city.workers      = number   … 表示・互換用の労働者数(常に workerUnits.length と同期する)
 
 import { hasCompletedProgress, getDefinition } from "./progression.js";
-import { matchesTerrain } from "./adjacency.js";
 
 /** 労働者1人が持つ行動回数。 */
 export const WORKER_ACTIONS_PER_UNIT = 3;
@@ -237,23 +236,6 @@ export const PRODUCTION_DEFS = {
             city.housing = (city.housing ?? 0) + 2;
         },
         completeMessage: (city) => `§e🎉【${city.name}】穀物庫が完成しました！ (食料生産量+1、住居+2)`,
-    },
-    quarry: {
-        label: "採石場",
-        icon: "[Quarry]",
-        category: "building",
-        cost: 20,
-        uniquePerCity: true,
-        hasBuilt: (city) => !!city.quarry,
-        requiresTechnology: "mining",
-        // 💡 隣接ボーナスシステムの使用例: 周囲8マスの「山」1つにつき生産力+1(上限なし)。
-        //    新しい建造物にも同じ要領でルールを追加するだけで、産出計算(turns.js)側の
-        //    コードは変更せずに反映される。
-        adjacencyBonuses: [
-            { id: "quarryMountain", label: "山からの採石恩恵", match: matchesTerrain("mountain"), yieldPerMatch: { production: 1 } },
-        ],
-        onComplete: (city) => { city.quarry = true; },
-        completeMessage: (city) => `§e🎉【${city.name}】採石場が完成しました！ (隣接する山1つにつき生産力+1)`,
     },
     capital: {
         label: "遷都",

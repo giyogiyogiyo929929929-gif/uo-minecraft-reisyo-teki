@@ -119,6 +119,7 @@ system.runInterval(() => {
             // 領有プレイヤー名と都市名の整形
             const ownerText = tile.ownerName ? `§a${tile.ownerName}` : "§7中立";
             const cityText = tile.city ? ` §e[🎪都市: ${tile.city.name} ([Pop]x${tile.city.population})]` : "";
+            const facilityText = tile.facility ? ` §7[🏗️施設: ${tile.facility.label ?? tile.facility.id}]` : "";
             const combatUnit = tile.combatUnit;
             const combatUnitText = combatUnit
                 ? `§c[Warrior] ${combatUnit.label ?? combatUnit.id} | HP: ${combatUnit.hp ?? 0}/${combatUnit.maxHp ?? 100} | 戦闘力: ${formatCombatStrengthText(combatUnit)} | 移動力: ${combatUnit.movementRemaining ?? combatUnit.movement ?? 0}/${combatUnit.movement ?? 0} | 攻撃距離: ${combatUnit.attackRange ?? combatUnit.movement ?? 0}`
@@ -154,15 +155,14 @@ system.runInterval(() => {
                 }
 
                 const tpText = c.tradingPost?.status === "active" ? " §7| §a[Trade]交易所稼働中" : "";
-                const quarryText = c.quarry ? " §7| §7[Quarry]採石場稼働中" : "";
                 const missileText = (c.missiles ?? 0) > 0 ? ` §7| §c[Missile]x${c.missiles}` : "";
-                cityInfoLine = `\n§6【${c.isCapital ? "首都" : "都市"}: ${c.name}】§f 人口:§a${c.population}§f/§e${c.housing} §f| [Worker]${c.workers ?? 0}人 §f| [Food]貯留${c.foodStorage ?? 0} §f| §c飢餓${c.starvationTurns ?? 0}/3${productionText}${tpText}${quarryText}${missileText}`;
+                cityInfoLine = `\n§6【${c.isCapital ? "首都" : "都市"}: ${c.name}】§f 人口:§a${c.population}§f/§e${c.housing} §f| [Worker]${c.workers ?? 0}人 §f| [Food]貯留${c.foodStorage ?? 0} §f| §c飢餓${c.starvationTurns ?? 0}/3${productionText}${tpText}${missileText}`;
             }
 
             // アクションバーへ出力
             player.onScreenDisplay.setActionBar(
                 `§b🗺️ 補正座標: [${tx}, ${tz}] §7| §f地形: §b${terrainLabel} §7| §f資源: §e${resourceLabel}\n` +
-                `§f領有: ${ownerText}${cityText}\n` +
+                `§f領有: ${ownerText}${cityText}${facilityText}\n` +
                 `§fベース産出: ${yieldText}\n${combatUnitText}` +
                 currentYieldLine +
                 cityInfoLine

@@ -8,6 +8,7 @@ import { getDefinition, getKindLabel, startProgress } from "./progression.js";
 import { hasDiplomaticAgreement, signAgreement } from "./diplomacy.js";
 import { getAttackRange, resolveCombat, tileDistance } from "./combat.js";
 import { addVirtualCiv, getControllableCivs, getActiveCivId, setActiveCivId, getActingPlayer } from "./civs.js";
+import { getFacilityDef, canInstallFacility, installFacility } from "./facilities.js";
 import { openMainMenu } from "./ui.js";
 
 // 💡 都市名の命名プール
@@ -71,6 +72,7 @@ function cmdHelp(player) {
         "§e!civ build <worker|warrior|archer|missile|tradingPost|granary|capital> §f: 生産を開始",
         "§c!civ cancelbuild §f: 進行中の生産を中止(蓄積分は次に引き継ぎ)",
         "§e!civ chop §f: 森林を伐採して住宅上限+1",
+        "§e!civ install <quarry> §f: 足元の空き領有マスに施設を設置(労働者の行動回数を1消費)",
         "§c!civ launch <x> <z> §f: 指定マスへミサイルを発射",
         "§e!civ info §f: 現在の情報を表示",
         "§e!civ menu §f: メニューを開く",
@@ -665,6 +667,64 @@ export function cmdChop(player) {
     return { ok: true };
 }
 
+/**
+ * 施設をこのプレイヤーの足元のマスに設置する。
+ * ・対象マスは自分の領有マスで、都市も施設も無い空きマスである必要がある。
+ * ・設置には、帰属都市の労働者の行動回数を1消費する(cmdChopと同じ考え方)。
+ */
+export function cmdInstallFacility(player, facilityId) {
+    const config = getMapConfig();
+    if (!config) { reply(player, "§cマップ未生成です。"); return { ok: false }; }
+    if (!isPlayersTurn(player)) { reply(player, "§cあなたのターンではありません。"); return { ok: false }; }
+
+    const { tx, tz } = worldToTile(config, Math.floor(player.location.x), Math.floor(player.location.z));
+    if (tx < 0 || tz < 0 || tx >= config.width || tz >= config.height) { reply(player, "§c範囲外です。"); return { ok: false }; }
+
+    const tile = getTile(tx, tz);
+    const check = canInstallFacility(tile, facilityId, player.id, player);
+    if (!check.ok) { reply(player, check.message); return { ok: false }; }
+
+    // 💡 労働者の所属・帰属先都市を決定する(cmdChopと同じロジック)
+    let cityKey = tile.belongsToCityKey;
+    if (!cityKey) {
+        const allTiles = getTiles();
+        let minDist = Infinity;
+        for (const key in allTiles) {
+            const t = allTiles[key];
+            if (t.ownerId === player.id && t.city) {
+                const [cx, cz] = key.split(",");
+                const dist = Math.abs(tx - parseInt(cx, 10)) + Math.abs(tz - parseInt(cz, 10));
+                if (dist < minDist) { minDist = dist; cityKey = key; }
+            }
+        }
+        if (cityKey) tile.belongsToCityKey = cityKey;
+    }
+    if (!cityKey) { reply(player, "§c作業エラー: このマスが帰属する都市が存在しません。"); return { ok: false }; }
+
+    const allTiles = getTiles();
+    const cityTile = allTiles[cityKey];
+    if (!cityTile || !cityTile.city) { reply(player, "§c帰属先の都市が見つかりません。"); return { ok: false }; }
+
+    // 💡 労働者の行動回数チェック(伐採と同じ、労働者1人あたり行動回数WORKER_ACTIONS_PER_UNIT)
+    if (!hasAvailableWorkerAction(cityTile.city)) {
+        reply(player, `§c❌ 労働者が足りません！この作業には帰属都市【${cityTile.city.name}】の労働者が必要です。`);
+        return { ok: false };
+    }
+
+    // 💡 労働者の行動回数を1消費してから設置する
+    consumeWorkerAction(cityTile.city);
+    const [cxStr, czStr] = cityKey.split(",");
+    setTile(parseInt(cxStr, 10), parseInt(czStr, 10), cityTile);
+
+    installFacility(tile, facilityId, player.id, player.name);
+    setTile(tx, tz, tile);
+
+    const def = getFacilityDef(facilityId);
+    const message = def?.installMessage?.(tile, tx, tz) ?? `§e🎉 ${player.name} が (${tx}, ${tz}) に${def?.label ?? facilityId}を設置しました！`;
+    world.sendMessage(message);
+    return { ok: true };
+}
+
 function cmdInfo(player) {
     const config = getMapConfig(); reply(player, turnInfoText()); if (!config) return;
     const { tx, tz } = worldToTile(config, Math.floor(player.location.x), Math.floor(player.location.z));
@@ -705,6 +765,7 @@ export function registerScriptCommands() {
                 case "buyrights": cmdBuyRights(player); break;
                 case "settle": cmdSettle(player); break;
                 case "chop": cmdChop(player); break;
+                case "install": cmdInstallFacility(player, args[0]); break;
                 case "info": cmdInfo(player); break;
                 case "menu": openMainMenu(player); break;
                 // 💡 生産コマンドは統一: !civ build <worker|missile|tradingPost>
@@ -889,19 +950,27 @@ export function cmdCaptureCity(player, tx, tz) {
 
     // 💡 この都市に帰属していた領有マス(belongsToCityKey が一致するマス)も同時に占領する
     let capturedTileCount = 0;
+    let capturedFacilityCount = 0;
     for (const key in tiles) {
         if (key === cityKey) continue;
         const t = tiles[key];
         if (t.ownerId === previousOwnerId && t.belongsToCityKey === cityKey) {
             t.ownerId = player.id;
             t.ownerName = player.name;
+            // 💡 このマスに施設があれば、所有者情報もタイルと一緒に占領側へ引き継ぐ
+            //    (施設そのものは破壊されず、新しいオーナーの資産として残る)
+            if (t.facility) {
+                t.facility.ownerId = player.id;
+                t.facility.ownerName = player.name;
+                capturedFacilityCount++;
+            }
             capturedTileCount++;
         }
     }
 
     setTiles(tiles);
 
-    const extraText = capturedTileCount > 0 ? ` (帰属していた領有マス${capturedTileCount}マスも同時に占領)` : "";
+    const extraText = capturedTileCount > 0 ? ` (帰属していた領有マス${capturedTileCount}マスも同時に占領${capturedFacilityCount > 0 ? `、うち施設${capturedFacilityCount}個を接収` : ""})` : "";
     const capitalText = capturedCapital ? " §c(相手の首都を陥落させました！)" : "";
     world.sendMessage(`§6🏳 ${player.name} が ${previousOwnerName} の【${cityName}】を占領しました！${extraText}${capitalText}`);
     checkAndAnnounceVictory(tiles);

@@ -4,6 +4,7 @@ import { getMapConfig, getTile, getTiles } from "./state.js";
 import { worldToTile, TERRAIN_TYPES, RESOURCE_TYPES } from "./mapGen.js"
 import { turnInfoText, endTurn, isPlayersTurn, joinGame, endGame, getTurnState, calculateCityFoodIncomes, getCityCurrentYields, startGame } from "./turns.js";
 import { PRODUCTION_DEFS, canStartProduction, getTotalWorkerActionsRemaining } from "./production.js";
+import { getFacilityIds, getFacilityDef, canInstallFacility } from "./facilities.js";
 import { getDefinitions, getKindLabel, getPointsLabel, getProgressState, hasCompletedProgress, getDefinition } from "./progression.js";
 import { getRelation, sendRequest, getRequestsFor, acceptRequest, rejectRequest, breakRelation, hasDiplomaticAgreement } from "./diplomacy.js";
 import { getAttackRange, getAttackableTargets, getEffectiveCombatStrength, isRangedUnit, getEffectiveRangedStrength } from "./combat.js";
@@ -92,6 +93,12 @@ export async function openMainMenu(player) {
                 body.push(`§b戦闘ユニット: §f${unit.label ?? unit.id} §7(所有:${unitOwnerText}§7) HP:${Math.max(0, Math.round(unit.hp ?? 0))}/${unit.maxHp ?? 100} §f戦闘力:${unitStrengthText} §f移動:${unitRemaining}/${unit.movement ?? 0} §f攻撃距離:${getAttackRange(unit)}`);
             } else {
                 body.push(`§7戦闘ユニット: なし`);
+            }
+
+            // 💡 このマスに施設が設置されている場合、その情報も表示する
+            if (currentTile.facility) {
+                const facilityOwnerText = currentTile.facility.ownerId === player.id ? "§a自分" : `§c${currentTile.facility.ownerName ?? "不明"}`;
+                body.push(`§b施設: §f${currentTile.facility.label ?? currentTile.facility.id} §7(所有:${facilityOwnerText}§7)`);
             }
 
             if (currentTile.city) {
@@ -191,6 +198,9 @@ export async function openMainMenu(player) {
     if (currentTile && currentTile.ownerId === player.id && (currentTile.type === "forest" || currentTile.type === "rainforest") && !currentTile.isChopped) {
         buttons.push({ text: "§d🪓 このマスの森林を伐採する (住宅上限+1)", action: "chop" });
     }
+    if (currentTile && currentTile.ownerId === player.id && !currentTile.city && !currentTile.facility) {
+        buttons.push({ text: "§7🏗️ 施設を設置する", action: "installfacility" });
+    }
     if (currentTile?.combatUnit?.ownerId === player.id) {
         buttons.push({ text: "§f ユニットの移動", action: "moveunit" });
         buttons.push({ text: "§c⚔ ユニットの攻撃", action: "attackunit" });
@@ -223,6 +233,7 @@ export async function openMainMenu(player) {
         case "buyrights": (await import("./commands.js")).cmdBuyRights(player); break;
         case "settle": (await import("./commands.js")).cmdSettle(player); break;
         case "chop": (await import("./commands.js")).cmdChop(player); break;
+        case "installfacility": await openFacilityInstallMenu(player, tx, tz); break;
         case "technology": await openProgressMenu(player, "technology"); break;
         case "civic": await openProgressMenu(player, "civic"); break;
         case "diplomacy": await openDiplomacyMenu(player); break;
@@ -428,6 +439,44 @@ async function openProductionCategoryMenu(player, tx, tz, category) {
     } else if (action === "back") {
         await openProductionMenu(player, tx, tz);
     }
+}
+
+/**
+ * 🏗️ 施設の設置メニュー。生産キューを使わず、労働者の行動回数を消費して即座に設置する。
+ * (production.js の建造物と違い、都市のマスではなく「今立っている空き領有マス」が対象)
+ */
+async function openFacilityInstallMenu(player, tx, tz) {
+    const tile = getTile(tx, tz);
+    if (!tile) { await openMainMenu(player); return; }
+
+    const body = [`(${tx}, ${tz}) に設置する施設を選んでください。`, "§7設置には帰属都市の労働者の行動回数を1消費します。"];
+    const items = [];
+
+    for (const id of getFacilityIds()) {
+        const def = getFacilityDef(id);
+        const check = canInstallFacility(tile, id, player.id, player);
+        if (!check.ok) {
+            if (def.requiresTechnology && !hasCompletedProgress(player, "technology", def.requiresTechnology)) {
+                const techDef = getDefinition("technology", def.requiresTechnology);
+                body.push(`§7🔒 ${def.icon} ${def.label}: 技術【${techDef?.label ?? def.requiresTechnology}】が必要`);
+            }
+            continue;
+        }
+        items.push({ text: `${def.icon} ${def.label}`, action: id });
+    }
+
+    if (items.length === 0) body.push("§7現在設置できる施設がありません。");
+
+    await showPaginatedMenu(
+        getRealPlayer(player),
+        "🏗️ 施設を設置",
+        body.join("\n"),
+        items,
+        async (facilityId) => {
+            (await import("./commands.js")).cmdInstallFacility(player, facilityId);
+        },
+        async () => { await openMainMenu(player); },
+    );
 }
 
 /**

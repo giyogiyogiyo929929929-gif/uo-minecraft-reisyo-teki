@@ -7,6 +7,7 @@ import { resetDiplomacy, getRelation } from "./diplomacy.js";
 import { hasCompletedProgress } from "./progression.js";
 import { getCivStorageHandle, resolveCivName } from "./civs.js";
 import { getBuildingAdjacencyYields } from "./adjacency.js";
+import { getFacilityAdjacencyYields } from "./facilities.js";
 
 export { getTurnState, setTurnState };
 
@@ -177,6 +178,14 @@ export function getCityCurrentYields(cityKey, tiles) {
     food += adjacencyYields.food ?? 0;
     production += adjacencyYields.production ?? 0;
     oil += adjacencyYields.oil ?? 0;
+
+    // 💡 この都市の領有範囲(assignedTiles)に設置されている施設の隣接ボーナスも合算する。
+    //    労働者の配置(maxWorkers)に関わらず、施設自体は恒久的な設備として無条件に効果を発揮する
+    //    (通常のマス産出量のように「働き手が配置されているか」は問わない)。
+    const facilityYields = getFacilityAdjacencyYields(assignedTiles, tiles);
+    food += facilityYields.food ?? 0;
+    production += facilityYields.production ?? 0;
+    oil += facilityYields.oil ?? 0;
 
     return { food, production: Math.max(1, production), oil }; // 最低生産力は1を保証
 }
