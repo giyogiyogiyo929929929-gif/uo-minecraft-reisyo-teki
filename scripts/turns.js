@@ -5,7 +5,7 @@ import { PRODUCTION_DEFS, tickProduction } from "./production.js";
 import { grantProgressPoints, resetProgress } from "./progression.js";
 import { resetDiplomacy, getRelation } from "./diplomacy.js";
 import { hasCompletedProgress } from "./progression.js";
-import { getCivStorageHandle, resolveCivName } from "./civs.js";
+import { getCivStorageHandle, resolveCivName, isCivControllable } from "./civs.js";
 import { getBuildingAdjacencyYields } from "./adjacency.js";
 import { getFacilityAdjacencyYields } from "./facilities.js";
 
@@ -665,10 +665,43 @@ export function startGame() {
 
     setTurnState(turn);
 
-    processPlayerTurnStart(turn.playerOrder[0]);
-    const name = getPlayerNameById(turn.playerOrder[0]) ?? "未知";
-    world.sendMessage(`§e=== ゲームが開始されました！ 手番: §a${name}§e ===`);
+    // 💡 参加登録した直後にオフラインになっている等、最初の手番が誰も操作できない国家に
+    //    ならないよう、ここでも自動スキップを適用する。
+    const turnAfterSkip = getTurnState();
+    const found = advanceToNextControllablePlayer(turnAfterSkip);
+    setTurnState(turnAfterSkip);
+
+    const firstId = turnAfterSkip.playerOrder[turnAfterSkip.currentIndex];
+    processPlayerTurnStart(firstId);
+    const name = getPlayerNameById(firstId) ?? "不明(オフライン)";
+    if (found) {
+        world.sendMessage(`§e=== ゲームが開始されました！ 手番: §a${name}§e ===`);
+    } else {
+        world.sendMessage(`§e=== ゲームが開始されました！ §c参加者全員がオフラインのため待機中 ===`);
+    }
     return { ok: true, message: "ゲーム開始" };
+}
+
+/**
+ * 現在の手番(turn.currentIndex)から、実際に操作できる(オンラインの)国家が見つかるまで
+ * 手番を進める。誰かが途中でゲームから抜けても、その国家の手番のままゲームが止まって
+ * しまわないようにするための安全策。turn.currentIndex / turn.turnNumber を直接書き換える。
+ * @param {any} turn getTurnState()で取得したターン状態
+ * @returns {boolean} 操作可能な国家が見つかった場合 true。参加者全員が操作不能だった場合 false
+ *   (この場合もcurrentIndexは1周分進んだ状態になるが、それ以上は進めない)
+ */
+function advanceToNextControllablePlayer(turn) {
+    const total = turn.playerOrder.length;
+    if (total === 0) return false;
+
+    for (let i = 0; i < total; i++) {
+        const civId = turn.playerOrder[turn.currentIndex];
+        if (isCivControllable(civId)) return true;
+
+        turn.currentIndex = (turn.currentIndex + 1) % total;
+        if (turn.currentIndex === 0) turn.turnNumber += 1;
+    }
+    return false; // 参加者全員がオフライン等で、1周しても操作可能な国家が見つからなかった
 }
 
 export function endTurn(player) {
@@ -678,14 +711,51 @@ export function endTurn(player) {
 
     turn.currentIndex = (turn.currentIndex + 1) % turn.playerOrder.length;
     if (turn.currentIndex === 0) turn.turnNumber += 1;
+
+    // 💡 進めた先の国家が誰も操作できない(オフライン)場合、操作できる国家が見つかるまで
+    //    自動的にさらに手番を進める(誰かが抜けてゲームが止まってしまうのを防ぐ)。
+    const found = advanceToNextControllablePlayer(turn);
     setTurnState(turn);
 
     const nextId = turn.playerOrder[turn.currentIndex];
     processPlayerTurnStart(nextId);
 
-    const nextName = getPlayerNameById(nextId) ?? "未知";
-    world.sendMessage(`§e>>> ターン ${turn.turnNumber}: §a${nextName}§e のターン <<<`);
+    const nextName = getPlayerNameById(nextId) ?? "不明(オフライン)";
+    if (found) {
+        world.sendMessage(`§e>>> ターン ${turn.turnNumber}: §a${nextName}§e のターン <<<`);
+    } else {
+        world.sendMessage(`§e>>> ターン ${turn.turnNumber}: §c参加者全員がオフラインのため待機中(復帰次第 §a${nextName}§c から再開) <<<`);
+    }
     return { ok: true, message: "ターン終了" };
+}
+
+/**
+ * 🛠 OP用: 現在の手番を強制的に次へ進める。
+ * 通常のendTurn()と違い、呼び出し元がその手番の本人である必要はない
+ * (手番のプレイヤーが応答不能・フリーズしている場合などの保険として使う)。
+ * プレイヤーが退出した瞬間の自動スキップ処理(main.js)からも呼ばれる。
+ */
+export function forceEndTurn() {
+    const turn = getTurnState();
+    if (!turn.started) return { ok: false, message: "§cゲーム未開始です。" };
+    if (turn.playerOrder.length === 0) return { ok: false, message: "§c参加者がいません。" };
+
+    turn.currentIndex = (turn.currentIndex + 1) % turn.playerOrder.length;
+    if (turn.currentIndex === 0) turn.turnNumber += 1;
+
+    const found = advanceToNextControllablePlayer(turn);
+    setTurnState(turn);
+
+    const nextId = turn.playerOrder[turn.currentIndex];
+    processPlayerTurnStart(nextId);
+
+    const nextName = getPlayerNameById(nextId) ?? "不明(オフライン)";
+    if (found) {
+        world.sendMessage(`§e>>> (ターンを強制的にスキップ) ターン ${turn.turnNumber}: §a${nextName}§e のターン <<<`);
+    } else {
+        world.sendMessage(`§e>>> (ターンを強制的にスキップ) ターン ${turn.turnNumber}: §c参加者全員がオフラインのため待機中 <<<`);
+    }
+    return { ok: true, message: "ターンを強制終了しました。" };
 }
 
 export function isPlayersTurn(player) {

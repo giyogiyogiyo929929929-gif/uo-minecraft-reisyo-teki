@@ -2,7 +2,7 @@
 import { world, system, BlockPermutation, PlayerPermissionLevel } from "@minecraft/server";
 import { generateMap, TERRAIN_TYPES, worldToTile, TILE_SIZE, RESOURCE_TYPES, ASSUMED_SIMULATION_RANGE_BLOCKS } from "./mapGen.js";
 import { getMapConfig, setMapConfig, getTile, setTile, resetAll, setTiles, getTiles } from "./state.js";
-import { joinGame, startGame, endTurn, turnInfoText, isPlayersTurn, endGame, getTurnState, setTurnState, getCityCurrentYields, resolveMissileImpact, getPlayerColor, checkAndAnnounceVictory } from "./turns.js";
+import { joinGame, startGame, endTurn, forceEndTurn, turnInfoText, isPlayersTurn, endGame, getTurnState, setTurnState, getCityCurrentYields, resolveMissileImpact, getPlayerColor, checkAndAnnounceVictory } from "./turns.js";
 import { PRODUCTION_DEFS, canStartProduction, startProduction, cancelProduction, addWorkers, consumeWorkerAction, hasAvailableWorkerAction } from "./production.js";
 import { getDefinition, getKindLabel, startProgress } from "./progression.js";
 import { hasDiplomaticAgreement, signAgreement } from "./diplomacy.js";
@@ -66,6 +66,7 @@ function cmdHelp(player) {
         "§e!civ start §f: ゲーム開始(OPのみ)",
         "§c!civ end §f: ゲームをリセット(OPのみ)",
         "§e!civ endturn §f: 自分のターンを終了",
+        "§e!civ forceendturn §f: (OP専用) 手番を強制的にスキップする(応答不能なプレイヤー対策)",
         "§e!civ claim §f: 周囲の土地を領有 (コスト: 人口1)",
         "§e!civ buyrights §f: 開拓権を獲得 (コスト: 首都人口2)",
         "§e!civ settle §f: 都市を建設 (コスト: 開拓権x1)",
@@ -253,6 +254,13 @@ function cmdGenerate(player, args) {
 function cmdJoin(player) { reply(player, joinGame(player).message); }
 function cmdStart(player) { if (isOperator(player)) startGame(); }
 function cmdEndTurn(player) { const result = endTurn(player); if (!result.ok) reply(player, result.message); }
+
+/** 🛠 OP用: 現在の手番を強制的にスキップする(手番のプレイヤーが応答不能な場合の保険)。 */
+function cmdForceEndTurn(player) {
+    if (!isOperator(player)) { reply(player, "§cこのコマンドはOPのみ実行できます。"); return; }
+    const result = forceEndTurn();
+    if (!result.ok) reply(player, result.message);
+}
 
 export function cmdBuyRights(player) {
     if (!isPlayersTurn(player)) { reply(player, "§cあなたのターンではありません。"); return; }
@@ -761,6 +769,7 @@ export function registerScriptCommands() {
                 case "start": cmdStart(player); break;
                 case "end": cmdEndGame(player); break;
                 case "endturn": cmdEndTurn(player); break;
+                case "forceendturn": cmdForceEndTurn(player); break;
                 case "claim": cmdClaim(player); break;
                 case "buyrights": cmdBuyRights(player); break;
                 case "settle": cmdSettle(player); break;

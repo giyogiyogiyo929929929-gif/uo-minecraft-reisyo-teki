@@ -6,7 +6,7 @@ import { registerScriptCommands } from "./commands.js";
 import { openMainMenu } from "./ui.js";
 import { getTurnState, getTiles, getMapConfig } from "./state.js";
 import { worldToTile, TERRAIN_TYPES, RESOURCE_TYPES } from "./mapGen.js";
-import { getCityCurrentYields } from "./turns.js";
+import { getCityCurrentYields, forceEndTurn } from "./turns.js";
 import { PRODUCTION_DEFS } from "./production.js";
 import { getEffectiveCombatStrength, getEffectiveRangedStrength, isRangedUnit } from "./combat.js";
 import { getActingPlayer, resolveCivName } from "./civs.js";
@@ -66,6 +66,23 @@ world.afterEvents.playerSpawn.subscribe((eventData) => {
             }
         } catch (e) {
             // インベントリ操作に失敗しても致命的ではないため無視する
+        }
+    });
+});
+
+// 💡 プレイヤーが退出した瞬間、それがちょうどそのプレイヤーの手番だった場合は
+//    自動的にターンをスキップする(誰も !civ endturn を呼べる人がいなくなり、
+//    ゲームの進行が止まってしまう事故を防ぐ)。
+world.afterEvents.playerLeave.subscribe((eventData) => {
+    const { playerId, playerName } = eventData;
+    const turn = getTurnState();
+    if (!turn?.started || !Array.isArray(turn.playerOrder)) return;
+    if (turn.playerOrder[turn.currentIndex] !== playerId) return;
+
+    system.run(() => {
+        const result = forceEndTurn();
+        if (result.ok) {
+            world.sendMessage(`§7(${playerName} が退出したため、自動的にターンをスキップしました)`);
         }
     });
 });

@@ -2,7 +2,7 @@ import { world, Player, PlayerPermissionLevel } from "@minecraft/server";
 import { ActionFormData, ModalFormData } from "@minecraft/server-ui";
 import { getMapConfig, getTile, getTiles } from "./state.js";
 import { worldToTile, TERRAIN_TYPES, RESOURCE_TYPES } from "./mapGen.js"
-import { turnInfoText, endTurn, isPlayersTurn, joinGame, endGame, getTurnState, calculateCityFoodIncomes, getCityCurrentYields, startGame } from "./turns.js";
+import { turnInfoText, endTurn, forceEndTurn, isPlayersTurn, joinGame, endGame, getTurnState, calculateCityFoodIncomes, getCityCurrentYields, startGame } from "./turns.js";
 import { PRODUCTION_DEFS, canStartProduction, getTotalWorkerActionsRemaining } from "./production.js";
 import { getFacilityIds, getFacilityDef, canInstallFacility } from "./facilities.js";
 import { getDefinitions, getKindLabel, getPointsLabel, getProgressState, hasCompletedProgress, getDefinition } from "./progression.js";
@@ -213,6 +213,7 @@ export async function openMainMenu(player) {
         }
     }
     if (turn.started) { buttons.push({ text: "ターンを終了する", action: "endturn" }); }
+    if (isOp && turn.started) buttons.push({ text: "§6【管理者】手番を強制スキップ", action: "forceendturn" });
     if (isOp) buttons.push({ text: "§c【管理者】ゲームをリセット", action: "endgame" });
     if (isOp) buttons.push({ text: "§d🎭 国家管理(ソロテスト用)", action: "civmanage" });
     buttons.push({ text: "閉じる", action: "close" });
@@ -283,6 +284,7 @@ export async function openMainMenu(player) {
             if (!result.ok) player.sendMessage(result.message);
             break;
         case "endgame": if (isOp) world.sendMessage(endGame().message); break;
+        case "forceendturn": if (isOp) { const r = forceEndTurn(); if (!r.ok) player.sendMessage(r.message); } break;
         case "civmanage": if (isOp) await openCivManagementMenu(getRealPlayer(player)); break;
         default: break;
     }
