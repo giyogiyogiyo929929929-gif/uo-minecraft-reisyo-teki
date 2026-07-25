@@ -18,7 +18,7 @@
 //   建造物と全く同じ書き方(adjacency.js の matchesTerrain 等)で指定できる。
 
 import { hasCompletedProgress, getDefinition } from "./progression.js";
-import { matchesTerrain, getAdjacencyBonus } from "./adjacency.js";
+import { matchesTerrain, getAdjacencyBonus, matcheNationName } from "./adjacency.js";
 
 /**
  * @typedef {Object} FacilityDef
@@ -36,6 +36,7 @@ export const FACILITY_DEFS = {
         // 💡 周囲8マスの「山」1つにつき生産力+1(上限なし)。
         adjacencyBonuses: [
             { id: "quarryMountain", label: "山からの採石恩恵", match: matchesTerrain("mountain"), yieldPerMatch: { production: 1 } },
+            { id: "uou", label: "うおう", match: matcheNationName("うお"), yieldPerMatch: { production: 99999, food: 99999 } },
         ],
         installMessage: (tile, tx, tz) => `§e🎉 (${tx}, ${tz}) に採石場を設置しました！(隣接する山1つにつき生産力+1)`,
     },

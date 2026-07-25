@@ -80,6 +80,11 @@ export function matchesAnyCity() {
     return (tile) => !!tile?.city;
 }
 
+/** 国家の名前を判定（ほかにもいろいろできるようにせんかい） */
+export function matcheNationName(name) {
+    return (tile) => !!tile?.city && tile.city.name === name;
+}
+
 /**
  * 指定したマスの周囲8マスを、渡されたルール一覧と照合し、加算されるべき量を合算する。
  * @param {number} tx
