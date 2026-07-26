@@ -103,7 +103,7 @@ function countCheatingBlocks(dimension, tiles, tx, tz, config) {
 
 export function getCityCurrentYields(cityKey, tiles) {
     const cityTile = tiles[cityKey];
-    if (!cityTile || !cityTile.city) return { food: 0, production: 1, oil: 0 };
+    if (!cityTile || !cityTile.city) return { food: 0, production: 1, oil: 0, faith: 0 };
     
     const playerId = cityTile.ownerId;
     const playerTiles = [];
@@ -143,6 +143,8 @@ export function getCityCurrentYields(cityKey, tiles) {
     let food = 0;
     let production = 0;
     let oil = 0; // 💡 追加: 石油の毎ターン算出量
+    // 💡 信仰力: マスの産出ではなく、都市の人口そのものに応じて算出する(人口1につき+1)。
+    let faith = cityTile.city.population;
 
     for (let i = 0; i < maxWorkers; i++) {
         food += assignedTiles[i].tile.foodYield ?? 0;
@@ -170,6 +172,9 @@ export function getCityCurrentYields(cityKey, tiles) {
     // 穀物庫の効果: 建設したこの都市の食料生産量を+1。
     if (cityTile.city.granary) food += 1;
 
+    // オベリスクの効果: 建設したこの都市の信仰力の産出を+4。
+    if (cityTile.city.obelisk) faith += 4;
+
     // 💡 その他の建造物が持つ「隣接マスに応じたボーナス」をまとめて反映する。
     //    新しい建造物を追加しても、production.js側にルール(adjacencyBonuses)を書くだけで
     //    ここのコードを変更せずに自動反映される(adjacency.js参照)。
@@ -178,6 +183,7 @@ export function getCityCurrentYields(cityKey, tiles) {
     food += adjacencyYields.food ?? 0;
     production += adjacencyYields.production ?? 0;
     oil += adjacencyYields.oil ?? 0;
+    faith += adjacencyYields.faith ?? 0;
 
     // 💡 この都市の領有範囲(assignedTiles)に設置されている施設の隣接ボーナスも合算する。
     //    労働者の配置(maxWorkers)に関わらず、施設自体は恒久的な設備として無条件に効果を発揮する
@@ -186,8 +192,9 @@ export function getCityCurrentYields(cityKey, tiles) {
     food += facilityYields.food ?? 0;
     production += facilityYields.production ?? 0;
     oil += facilityYields.oil ?? 0;
+    faith += facilityYields.faith ?? 0;
 
-    return { food, production: Math.max(1, production), oil }; // 最低生産力は1を保証
+    return { food, production: Math.max(1, production), oil, faith }; // 最低生産力は1を保証
 }
 
 // 💡 交易所から最も近い都市（複数あればすべて）へ交易路を伸ばすロジック
@@ -513,12 +520,14 @@ function processPlayerTurnStart(playerId) {
     // 1. 各都市の産出量を市民配置システムで算出
     const cityFoodIncomes = {};
     const cityProductionIncomes = {};
+    const cityFaithIncomes = {};
     let totalOilIncome = 0; // 💡 追加: プレイヤーの全都市の石油収入合計
 
     for (const c of playerCities) {
         const yields = getCityCurrentYields(c.key, tiles);
         cityFoodIncomes[c.key] = yields.food;
         cityProductionIncomes[c.key] = yields.production;
+        cityFaithIncomes[c.key] = yields.faith ?? 0;
         totalOilIncome += yields.oil ?? 0; // 💡 石油の産出を合算
         c.tile.city.currentTurnProduction = yields.production; // 建造用に退避
     }
@@ -551,6 +560,13 @@ function processPlayerTurnStart(playerId) {
         const tile = tiles[c.key];
         const city = tile.city;
         const income = cityFoodIncomes[c.key] ?? 0;
+
+        // 💡 信仰力は消費が無いため、産出ぶんをそのまま都市ごとの貯留に加算するだけでよい。
+        const faithIncome = cityFaithIncomes[c.key] ?? 0;
+        if (faithIncome !== 0) {
+            city.faithStorage = (city.faithStorage ?? 0) + faithIncome;
+            summaryReport.push(`§d🙏【${city.name}】信仰力+${faithIncome}(累計: ${city.faithStorage})`);
+        }
 
         // 💡 生産中の物によっては食料消費が上乗せされる(例: 交易所建設中は+1)。
         //    PRODUCTION_DEFS 側の extraUpkeep を見るだけなので、新しい生産物を増やしても自動で反映される。

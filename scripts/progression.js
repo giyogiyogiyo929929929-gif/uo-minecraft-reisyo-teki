@@ -3,6 +3,7 @@
 export const TECHNOLOGIES = {
     animalHusbandry: { label: "畜産", cost: 10, prerequisites: [] },
     mining: { label: "採掘", cost: 10, prerequisites: [] },
+    // 💡 占星術: 前提条件なし。取得後、都市にオベリスク(信仰力+4)を建設できるようになる。
     astrology: { label: "占星術", cost: 10, prerequisites: [] },
     // 💡 弓術: 弓兵の生産に必要。前提条件として畜産が必要。
     archery: { label: "弓術", cost: 15, prerequisites: ["animalHusbandry"] },

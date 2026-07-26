@@ -110,7 +110,7 @@ export async function openMainMenu(player) {
 
                 body.push(`\n§6【${city.isCapital ? "首都" : "地方都市"}: ${city.name}】`);
                 body.push(`§f  - 人口: §a${city.population} §f/ 住宅上限: §e${city.housing} §f| [Worker] 労働者: §b${city.workers ?? 0} 人 §7(残り行動:${getTotalWorkerActionsRemaining(city)})`);
-                body.push(`§f  - ⚖️ 現市民の選択総出力: §6[Food]x${currentYields.food} §f/ §e[Prod]x${currentYields.production}`);
+                body.push(`§f  - ⚖️ 現市民の選択総出力: §6[Food]x${currentYields.food} §f/ §e[Prod]x${currentYields.production} §f/ §d🙏x${currentYields.faith ?? 0}`);
                 
                 // 💡 進行中の生産(ユニット/建造物)を汎用的に表示。新しい生産物を増やしても自動で対応する。
                 if (city.production) {
@@ -138,6 +138,7 @@ export async function openMainMenu(player) {
                 }
 
                 body.push(`§f  - 貯留食料: [Food] ${city.foodStorage ?? 0} / 成長まで: ${threshold}`);
+                body.push(`§f  - 貯留信仰力: §d🙏 ${city.faithStorage ?? 0}`);
                 body.push(`§f  - 不足飢餓: §c${city.starvationTurns ?? 0} / 3 ターン`);
 
                 if ((city.missiles ?? 0) > 0) {

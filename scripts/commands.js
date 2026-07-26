@@ -70,7 +70,7 @@ function cmdHelp(player) {
         "§e!civ claim §f: 周囲の土地を領有 (コスト: 人口1)",
         "§e!civ buyrights §f: 開拓権を獲得 (コスト: 首都人口2)",
         "§e!civ settle §f: 都市を建設 (コスト: 開拓権x1)",
-        "§e!civ build <worker|warrior|archer|missile|tradingPost|granary|capital> §f: 生産を開始",
+        "§e!civ build <worker|warrior|archer|missile|tradingPost|granary|obelisk|capital> §f: 生産を開始",
         "§c!civ cancelbuild §f: 進行中の生産を中止(蓄積分は次に引き継ぎ)",
         "§e!civ chop §f: 森林を伐採して住宅上限+1",
         "§e!civ install <quarry> §f: 足元の空き領有マスに施設を設置(労働者の行動回数を1消費)",

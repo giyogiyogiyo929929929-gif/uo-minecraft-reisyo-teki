@@ -237,6 +237,18 @@ export const PRODUCTION_DEFS = {
         },
         completeMessage: (city) => `§e🎉【${city.name}】穀物庫が完成しました！ (食料生産量+1、住居+2)`,
     },
+    obelisk: {
+        label: "オベリスク",
+        icon: "[Obelisk]",
+        category: "building",
+        cost: 60,
+        uniquePerCity: true,
+        hasBuilt: (city) => !!city.obelisk,
+        requiresTechnology: "astrology",
+        // 💡 信仰力+4 は turns.js の getCityCurrentYields 側で city.obelisk を見て加算する。
+        onComplete: (city) => { city.obelisk = true; },
+        completeMessage: (city) => `§e🎉【${city.name}】オベリスクが完成しました！ (信仰力の産出+4)`,
+    },
     capital: {
         label: "遷都",
         icon: "[👑]",

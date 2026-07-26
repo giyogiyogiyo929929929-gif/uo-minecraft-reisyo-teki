@@ -156,7 +156,8 @@ system.runInterval(() => {
                 // 💡 市民配置ロジックを考慮した「今」実際に出ている産出量
                 const yields = getCityCurrentYields(cityKey, tiles);
                 const oilText = yields.oil > 0 ? ` §7| §b🛢️x${yields.oil}` : "";
-                currentYieldLine = `\n§f今の産出(都市全体): §a[Food]x${yields.food} §7| §6[Prod]x${yields.production}${oilText}`;
+                const faithText = (yields.faith ?? 0) > 0 ? ` §7| §d🙏x${yields.faith}` : "";
+                currentYieldLine = `\n§f今の産出(都市全体): §a[Food]x${yields.food} §7| §6[Prod]x${yields.production}${oilText}${faithText}`;
 
                 // 💡 帰属都市そのものの詳細情報
                 const c = cityTile.city;
@@ -173,7 +174,8 @@ system.runInterval(() => {
 
                 const tpText = c.tradingPost?.status === "active" ? " §7| §a[Trade]交易所稼働中" : "";
                 const missileText = (c.missiles ?? 0) > 0 ? ` §7| §c[Missile]x${c.missiles}` : "";
-                cityInfoLine = `\n§6【${c.isCapital ? "首都" : "都市"}: ${c.name}】§f 人口:§a${c.population}§f/§e${c.housing} §f| [Worker]${c.workers ?? 0}人 §f| [Food]貯留${c.foodStorage ?? 0} §f| §c飢餓${c.starvationTurns ?? 0}/3${productionText}${tpText}${missileText}`;
+                const faithStorageText = (c.faithStorage ?? 0) > 0 ? ` §7| §d🙏信仰力${c.faithStorage}` : "";
+                cityInfoLine = `\n§6【${c.isCapital ? "首都" : "都市"}: ${c.name}】§f 人口:§a${c.population}§f/§e${c.housing} §f| [Worker]${c.workers ?? 0}人 §f| [Food]貯留${c.foodStorage ?? 0} §f| §c飢餓${c.starvationTurns ?? 0}/3${productionText}${tpText}${missileText}${faithStorageText}`;
             }
 
             // アクションバーへ出力
