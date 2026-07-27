@@ -8,6 +8,7 @@ import { getTurnState, getTiles, getMapConfig } from "./state.js";
 import { worldToTile, TERRAIN_TYPES, RESOURCE_TYPES } from "./mapGen.js";
 import { getCityCurrentYields, forceEndTurn } from "./turns.js";
 import { PRODUCTION_DEFS } from "./production.js";
+import { getDistrictDef } from "./districts.js";
 import { getEffectiveCombatStrength, getEffectiveRangedStrength, isRangedUnit } from "./combat.js";
 import { getActingPlayer, resolveCivName } from "./civs.js";
 
@@ -137,6 +138,9 @@ system.runInterval(() => {
             const ownerText = tile.ownerName ? `§a${tile.ownerName}` : "§7中立";
             const cityText = tile.city ? ` §e[🎪都市: ${tile.city.name} ([Pop]x${tile.city.population})]` : "";
             const facilityText = tile.facility ? ` §7[🏗️施設: ${tile.facility.label ?? tile.facility.id}]` : "";
+            const districtText = tile.district
+                ? ` §5[🏛️区域: ${tile.district.label ?? tile.district.id}]`
+                : (tile.underDistrictConstruction ? " §5[🏛️区域: 建設中...]" : "");
             const combatUnit = tile.combatUnit;
             const combatUnitText = combatUnit
                 ? `§c[Warrior] ${combatUnit.label ?? combatUnit.id} | HP: ${combatUnit.hp ?? 0}/${combatUnit.maxHp ?? 100} | 戦闘力: ${formatCombatStrengthText(combatUnit)} | 移動力: ${combatUnit.movementRemaining ?? combatUnit.movement ?? 0}/${combatUnit.movement ?? 0} | 攻撃距離: ${combatUnit.attackRange ?? combatUnit.movement ?? 0}`
@@ -175,13 +179,19 @@ system.runInterval(() => {
                 const tpText = c.tradingPost?.status === "active" ? " §7| §a[Trade]交易所稼働中" : "";
                 const missileText = (c.missiles ?? 0) > 0 ? ` §7| §c[Missile]x${c.missiles}` : "";
                 const faithStorageText = (c.faithStorage ?? 0) > 0 ? ` §7| §d🙏信仰力${c.faithStorage}` : "";
-                cityInfoLine = `\n§6【${c.isCapital ? "首都" : "都市"}: ${c.name}】§f 人口:§a${c.population}§f/§e${c.housing} §f| [Worker]${c.workers ?? 0}人 §f| [Food]貯留${c.foodStorage ?? 0} §f| §c飢餓${c.starvationTurns ?? 0}/3${productionText}${tpText}${missileText}${faithStorageText}`;
+                let districtProductionText = "";
+                if (c.districtConstruction) {
+                    const districtDef = getDistrictDef(c.districtConstruction.id);
+                    const districtProgressText = Math.floor(c.districtConstruction.progress * 10) / 10;
+                    districtProductionText = ` §7| §5${districtDef?.icon ?? "[Sacred]"}${districtDef?.label ?? c.districtConstruction.id}区域建設中(${districtProgressText}/${c.districtConstruction.cost})`;
+                }
+                cityInfoLine = `\n§6【${c.isCapital ? "首都" : "都市"}: ${c.name}】§f 人口:§a${c.population}§f/§e${c.housing} §f| [Worker]${c.workers ?? 0}人 §f| [Food]貯留${c.foodStorage ?? 0} §f| §c飢餓${c.starvationTurns ?? 0}/3${productionText}${tpText}${missileText}${faithStorageText}${districtProductionText}`;
             }
 
             // アクションバーへ出力
             player.onScreenDisplay.setActionBar(
                 `§b🗺️ 補正座標: [${tx}, ${tz}] §7| §f地形: §b${terrainLabel} §7| §f資源: §e${resourceLabel}\n` +
-                `§f領有: ${ownerText}${cityText}${facilityText}\n` +
+                `§f領有: ${ownerText}${cityText}${facilityText}${districtText}\n` +
                 `§fベース産出: ${yieldText}\n${combatUnitText}` +
                 currentYieldLine +
                 cityInfoLine

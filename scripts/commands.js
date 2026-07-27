@@ -9,6 +9,7 @@ import { hasDiplomaticAgreement, signAgreement } from "./diplomacy.js";
 import { getAttackRange, resolveCombat, tileDistance } from "./combat.js";
 import { addVirtualCiv, getControllableCivs, getActiveCivId, setActiveCivId, getActingPlayer } from "./civs.js";
 import { getFacilityDef, canInstallFacility, installFacility } from "./facilities.js";
+import { getDistrictDef, canStartDistrict, startDistrictConstruction } from "./districts.js";
 import { openMainMenu } from "./ui.js";
 
 // 💡 都市名の命名プール
@@ -74,6 +75,7 @@ function cmdHelp(player) {
         "§c!civ cancelbuild §f: 進行中の生産を中止(蓄積分は次に引き継ぎ)",
         "§e!civ chop §f: 森林を伐採して住宅上限+1",
         "§e!civ install <quarry> §f: 足元の空き領有マスに施設を設置(労働者の行動回数を1消費)",
+        "§e!civ district <sacredSite> §f: 足元の空き領有マスに区域の建設を開始(帰属都市の生産力を使用)",
         "§c!civ launch <x> <z> §f: 指定マスへミサイルを発射",
         "§e!civ info §f: 現在の情報を表示",
         "§e!civ menu §f: メニューを開く",
@@ -733,6 +735,57 @@ export function cmdInstallFacility(player, facilityId) {
     return { ok: true };
 }
 
+/**
+ * 区域の建設をこのプレイヤーの足元のマスに開始する。
+ * ・対象マスは自分の領有マスで、都市も区域も無い空きマスである必要がある。
+ * ・建設には、帰属都市の生産力を複数ターンかけて使う(施設の即時設置とは異なる)。
+ * ・区域を建設中のあいだ、その都市は新しい建造物を着工できない(ユニットは着工できる)。
+ */
+export function cmdStartDistrict(player, districtId) {
+    const config = getMapConfig();
+    if (!config) { reply(player, "§cマップ未生成です。"); return { ok: false }; }
+    if (!isPlayersTurn(player)) { reply(player, "§cあなたのターンではありません。"); return { ok: false }; }
+
+    const { tx, tz } = worldToTile(config, Math.floor(player.location.x), Math.floor(player.location.z));
+    if (tx < 0 || tz < 0 || tx >= config.width || tz >= config.height) { reply(player, "§c範囲外です。"); return { ok: false }; }
+
+    const tileKey = `${tx},${tz}`;
+    const tile = getTile(tx, tz);
+
+    // 💡 帰属先都市を決定する(cmdChop/cmdInstallFacilityと同じロジック)
+    let cityKey = tile?.belongsToCityKey;
+    if (!cityKey) {
+        const allTiles = getTiles();
+        let minDist = Infinity;
+        for (const key in allTiles) {
+            const t = allTiles[key];
+            if (t.ownerId === player.id && t.city) {
+                const [cx, cz] = key.split(",");
+                const dist = Math.abs(tx - parseInt(cx, 10)) + Math.abs(tz - parseInt(cz, 10));
+                if (dist < minDist) { minDist = dist; cityKey = key; }
+            }
+        }
+    }
+    if (!cityKey) { reply(player, "§c作業エラー: このマスが帰属する都市が存在しません。"); return { ok: false }; }
+
+    const allTiles = getTiles();
+    const cityTile = allTiles[cityKey];
+    if (!cityTile || !cityTile.city) { reply(player, "§c帰属先の都市が見つかりません。"); return { ok: false }; }
+
+    const check = canStartDistrict(tile, districtId, player.id, cityTile.city, player);
+    if (!check.ok) { reply(player, check.message); return { ok: false }; }
+
+    if (!tile.belongsToCityKey) tile.belongsToCityKey = cityKey;
+    startDistrictConstruction(cityTile.city, tile, districtId, tileKey);
+    setTile(tx, tz, tile);
+    const [cxStr, czStr] = cityKey.split(",");
+    setTile(parseInt(cxStr, 10), parseInt(czStr, 10), cityTile);
+
+    const def = getDistrictDef(districtId);
+    world.sendMessage(`§e🏛️ ${player.name} が (${tx}, ${tz}) に、【${cityTile.city.name}】の生産力を使って${def?.label ?? districtId}の建設を開始しました！ (コスト: ${def?.cost ?? "?"})`);
+    return { ok: true };
+}
+
 function cmdInfo(player) {
     const config = getMapConfig(); reply(player, turnInfoText()); if (!config) return;
     const { tx, tz } = worldToTile(config, Math.floor(player.location.x), Math.floor(player.location.z));
@@ -775,6 +828,7 @@ export function registerScriptCommands() {
                 case "settle": cmdSettle(player); break;
                 case "chop": cmdChop(player); break;
                 case "install": cmdInstallFacility(player, args[0]); break;
+                case "district": cmdStartDistrict(player, args[0]); break;
                 case "info": cmdInfo(player); break;
                 case "menu": openMainMenu(player); break;
                 // 💡 生産コマンドは統一: !civ build <worker|missile|tradingPost>
@@ -960,6 +1014,7 @@ export function cmdCaptureCity(player, tx, tz) {
     // 💡 この都市に帰属していた領有マス(belongsToCityKey が一致するマス)も同時に占領する
     let capturedTileCount = 0;
     let capturedFacilityCount = 0;
+    let capturedDistrictCount = 0;
     for (const key in tiles) {
         if (key === cityKey) continue;
         const t = tiles[key];
@@ -973,13 +1028,26 @@ export function cmdCaptureCity(player, tx, tz) {
                 t.facility.ownerName = player.name;
                 capturedFacilityCount++;
             }
+            // 💡 完成済みの区域も、施設と同様にそのまま占領側の資産として引き継ぐ。
+            //    (建設中の区域は turns.js の tickDistrictConstruction が、次ターンの
+            //     処理時に所有者の一致を見て自動的に継続/中止を判定する)
+            if (t.district) {
+                t.district.ownerId = player.id;
+                t.district.ownerName = player.name;
+                capturedDistrictCount++;
+            }
             capturedTileCount++;
         }
     }
 
     setTiles(tiles);
 
-    const extraText = capturedTileCount > 0 ? ` (帰属していた領有マス${capturedTileCount}マスも同時に占領${capturedFacilityCount > 0 ? `、うち施設${capturedFacilityCount}個を接収` : ""})` : "";
+    const captureDetails = [];
+    if (capturedFacilityCount > 0) captureDetails.push(`施設${capturedFacilityCount}個`);
+    if (capturedDistrictCount > 0) captureDetails.push(`区域${capturedDistrictCount}個`);
+    const extraText = capturedTileCount > 0
+        ? ` (帰属していた領有マス${capturedTileCount}マスも同時に占領${captureDetails.length > 0 ? `、うち${captureDetails.join("・")}を接収` : ""})`
+        : "";
     const capitalText = capturedCapital ? " §c(相手の首都を陥落させました！)" : "";
     world.sendMessage(`§6🏳 ${player.name} が ${previousOwnerName} の【${cityName}】を占領しました！${extraText}${capitalText}`);
     checkAndAnnounceVictory(tiles);

@@ -305,6 +305,9 @@ export function canStartProduction(city, id, tile = null, player = null) {
     if (def.disallowInCapital && city.isCapital) {
         return { ok: false, message: "§cこの都市は既に首都です。" };
     }
+    if (def.category === "building" && city.districtConstruction) {
+        return { ok: false, message: "§c区域を建設中はこの都市で新しい建造物を着工できません。" };
+    }
     if (def.requiresTechnology) {
         const hasTech = !!player && hasCompletedProgress(player, "technology", def.requiresTechnology);
         if (!hasTech) {

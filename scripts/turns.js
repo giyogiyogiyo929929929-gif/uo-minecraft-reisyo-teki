@@ -8,6 +8,7 @@ import { hasCompletedProgress } from "./progression.js";
 import { getCivStorageHandle, resolveCivName, isCivControllable } from "./civs.js";
 import { getBuildingAdjacencyYields } from "./adjacency.js";
 import { getFacilityAdjacencyYields } from "./facilities.js";
+import { getDistrictAdjacencyYields, getDistrictPopulationYields, tickDistrictConstruction } from "./districts.js";
 
 export { getTurnState, setTurnState };
 
@@ -193,6 +194,19 @@ export function getCityCurrentYields(cityKey, tiles) {
     production += facilityYields.production ?? 0;
     oil += facilityYields.oil ?? 0;
     faith += facilityYields.faith ?? 0;
+
+    // 💡 区域(district)による隣接ボーナスと、人口比例のボーナスをそれぞれ加算する。
+    const districtAdjacencyYields = getDistrictAdjacencyYields(assignedTiles, tiles);
+    food += districtAdjacencyYields.food ?? 0;
+    production += districtAdjacencyYields.production ?? 0;
+    oil += districtAdjacencyYields.oil ?? 0;
+    faith += districtAdjacencyYields.faith ?? 0;
+
+    const districtPopulationYields = getDistrictPopulationYields(assignedTiles, cityTile.city.population);
+    food += districtPopulationYields.food ?? 0;
+    production += districtPopulationYields.production ?? 0;
+    oil += districtPopulationYields.oil ?? 0;
+    faith += districtPopulationYields.faith ?? 0;
 
     return { food, production: Math.max(1, production), oil, faith }; // 最低生産力は1を保証
 }
@@ -552,6 +566,17 @@ function processPlayerTurnStart(playerId) {
 
         const amount = cityProductionIncomes[c.key] ?? 0;
         const result = tickProduction(city, amount, { cityKey: c.key, tiles, connectTradeRoutes, isAllied: isAlliedOrSameCiv });
+        if (result) summaryReport.push(result.message);
+    }
+
+    // 3.5 各都市の区域(district)建設のターン進行処理。
+    //     通常の生産(city.production)とは別枠(city.districtConstruction)で並行して進む。
+    for (const c of playerCities) {
+        const city = c.tile.city;
+        if (!city.districtConstruction) continue;
+
+        const amount = cityProductionIncomes[c.key] ?? 0;
+        const result = tickDistrictConstruction(city, amount, tiles, c.tile.ownerId);
         if (result) summaryReport.push(result.message);
     }
 

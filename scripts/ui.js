@@ -5,6 +5,7 @@ import { worldToTile, TERRAIN_TYPES, RESOURCE_TYPES } from "./mapGen.js"
 import { turnInfoText, endTurn, forceEndTurn, isPlayersTurn, joinGame, endGame, getTurnState, calculateCityFoodIncomes, getCityCurrentYields, startGame } from "./turns.js";
 import { PRODUCTION_DEFS, canStartProduction, getTotalWorkerActionsRemaining } from "./production.js";
 import { getFacilityIds, getFacilityDef, canInstallFacility } from "./facilities.js";
+import { getDistrictIds, getDistrictDef, canStartDistrict } from "./districts.js";
 import { getDefinitions, getKindLabel, getPointsLabel, getProgressState, hasCompletedProgress, getDefinition } from "./progression.js";
 import { getRelation, sendRequest, getRequestsFor, acceptRequest, rejectRequest, breakRelation, hasDiplomaticAgreement } from "./diplomacy.js";
 import { getAttackRange, getAttackableTargets, getEffectiveCombatStrength, isRangedUnit, getEffectiveRangedStrength } from "./combat.js";
@@ -101,6 +102,14 @@ export async function openMainMenu(player) {
                 body.push(`§b施設: §f${currentTile.facility.label ?? currentTile.facility.id} §7(所有:${facilityOwnerText}§7)`);
             }
 
+            // 💡 このマスに区域が設置(または建設中)の場合、その情報も表示する
+            if (currentTile.district) {
+                const districtOwnerText = currentTile.district.ownerId === player.id ? "§a自分" : `§c${currentTile.district.ownerName ?? "不明"}`;
+                body.push(`§b区域: §f${currentTile.district.label ?? currentTile.district.id} §7(所有:${districtOwnerText}§7)`);
+            } else if (currentTile.underDistrictConstruction) {
+                body.push(`§b区域: §7建設中...`);
+            }
+
             if (currentTile.city) {
                 const city = currentTile.city;
                 const threshold = 10 + (city.population - 1) * 2;
@@ -121,6 +130,13 @@ export async function openMainMenu(player) {
                     }
                 } else {
                     body.push(`§f  - §7現在生産中の物はありません`);
+                }
+
+                // 💡 進行中の区域建設(city.production とは別枠)も表示する。
+                if (city.districtConstruction) {
+                    const districtDef = getDistrictDef(city.districtConstruction.id);
+                    const districtProgressText = Math.floor(city.districtConstruction.progress * 10) / 10;
+                    body.push(`§f  - ${districtDef?.icon ?? "[Sacred]"} ${districtDef?.label ?? city.districtConstruction.id}: §7区域建設中 (${districtProgressText}/${city.districtConstruction.cost})`);
                 }
 
                 if (city.tradingPost?.status === "active") {
@@ -202,6 +218,9 @@ export async function openMainMenu(player) {
     if (currentTile && currentTile.ownerId === player.id && !currentTile.city && !currentTile.facility) {
         buttons.push({ text: "§7🏗️ 施設を設置する", action: "installfacility" });
     }
+    if (currentTile && currentTile.ownerId === player.id && !currentTile.city && !currentTile.district && !currentTile.underDistrictConstruction) {
+        buttons.push({ text: "§5🏛️ 区域を配置する", action: "startdistrict" });
+    }
     if (currentTile?.combatUnit?.ownerId === player.id) {
         buttons.push({ text: "§f ユニットの移動", action: "moveunit" });
         buttons.push({ text: "§c⚔ ユニットの攻撃", action: "attackunit" });
@@ -236,6 +255,7 @@ export async function openMainMenu(player) {
         case "settle": (await import("./commands.js")).cmdSettle(player); break;
         case "chop": (await import("./commands.js")).cmdChop(player); break;
         case "installfacility": await openFacilityInstallMenu(player, tx, tz); break;
+        case "startdistrict": await openDistrictStartMenu(player, tx, tz); break;
         case "technology": await openProgressMenu(player, "technology"); break;
         case "civic": await openProgressMenu(player, "civic"); break;
         case "diplomacy": await openDiplomacyMenu(player); break;
@@ -477,6 +497,64 @@ async function openFacilityInstallMenu(player, tx, tz) {
         items,
         async (facilityId) => {
             (await import("./commands.js")).cmdInstallFacility(player, facilityId);
+        },
+        async () => { await openMainMenu(player); },
+    );
+}
+
+/**
+ * 🏛️ 区域の配置(建設開始)メニュー。都市の生産力を複数ターンかけて使う
+ * (施設と違い、その場では完成しない)。
+ */
+async function openDistrictStartMenu(player, tx, tz) {
+    const tile = getTile(tx, tz);
+    if (!tile) { await openMainMenu(player); return; }
+
+    // 💡 帰属先都市を探す(既に建設中の区域が無いかの判定に必要)
+    const allTiles = getTiles();
+    let cityKey = tile.belongsToCityKey;
+    if (!cityKey) {
+        let minDist = Infinity;
+        for (const key in allTiles) {
+            const t = allTiles[key];
+            if (t.ownerId === player.id && t.city) {
+                const [cx, cz] = key.split(",");
+                const dist = Math.abs(tx - parseInt(cx, 10)) + Math.abs(tz - parseInt(cz, 10));
+                if (dist < minDist) { minDist = dist; cityKey = key; }
+            }
+        }
+    }
+    const city = cityKey ? allTiles[cityKey]?.city : null;
+
+    const body = [`(${tx}, ${tz}) に建設する区域を選んでください。`, "§7建設には帰属都市の生産力を複数ターンかけて使います。"];
+    if (city?.districtConstruction) {
+        const def = getDistrictDef(city.districtConstruction.id);
+        body.push(`§7(帰属都市は既に【${def?.label ?? city.districtConstruction.id}】を建設中のため、新しい区域は開始できません)`);
+    }
+    const items = [];
+
+    for (const id of getDistrictIds()) {
+        const def = getDistrictDef(id);
+        const check = canStartDistrict(tile, id, player.id, city, player);
+        if (!check.ok) {
+            if (def.requiresTechnology && !hasCompletedProgress(player, "technology", def.requiresTechnology)) {
+                const techDef = getDefinition("technology", def.requiresTechnology);
+                body.push(`§7🔒 ${def.icon} ${def.label}: 技術【${techDef?.label ?? def.requiresTechnology}】が必要`);
+            }
+            continue;
+        }
+        items.push({ text: `${def.icon} ${def.label} (コスト:${def.cost})`, action: id });
+    }
+
+    if (items.length === 0) body.push("§7現在建設できる区域がありません。");
+
+    await showPaginatedMenu(
+        getRealPlayer(player),
+        "🏛️ 区域を配置",
+        body.join("\n"),
+        items,
+        async (districtId) => {
+            (await import("./commands.js")).cmdStartDistrict(player, districtId);
         },
         async () => { await openMainMenu(player); },
     );
