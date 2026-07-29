@@ -9,7 +9,11 @@ import { hasDiplomaticAgreement, signAgreement } from "./diplomacy.js";
 import { getAttackRange, resolveCombat, tileDistance } from "./combat.js";
 import { addVirtualCiv, getControllableCivs, getActiveCivId, setActiveCivId, getActingPlayer } from "./civs.js";
 import { getFacilityDef, canInstallFacility, installFacility } from "./facilities.js";
-import { getDistrictDef, canStartDistrict, startDistrictConstruction } from "./districts.js";
+import { getDistrictDef, canStartDistrict, startDistrictConstruction, getDistrictBuildingDef, canStartDistrictBuilding, startDistrictBuildingConstruction } from "./districts.js";
+import {
+    getReligiousUnitDef, hasFoundedReligion, getReligionName, setReligionName,
+    canFoundReligion, foundReligion, calculateProselytizePressure, addReligiousPressure,
+} from "./religion.js";
 import { openMainMenu } from "./ui.js";
 
 // 💡 都市名の命名プール
@@ -76,6 +80,10 @@ function cmdHelp(player) {
         "§e!civ chop §f: 森林を伐採して住宅上限+1",
         "§e!civ install <quarry> §f: 足元の空き領有マスに施設を設置(労働者の行動回数を1消費)",
         "§e!civ district <sacredSite> §f: 足元の空き領有マスに区域の建設を開始(帰属都市の生産力を使用)",
+        "§e!civ districtbuilding <shrine> §f: 足元の区域に専用の建造物を建設開始(帰属都市の生産力を使用)",
+        "§e!civ foundreligion §f: 宗教を創始する(国家全体の信仇力100以上、かつ聖地が必要)",
+        "§e!civ renamereligion <名前> §f: 創始した宗教の名前を変更する",
+        "§e!civ buyreligious <missionary> §f: 都市の信仇力を使って宗教ユニットを購入(社が必要)",
         "§c!civ launch <x> <z> §f: 指定マスへミサイルを発射",
         "§e!civ info §f: 現在の情報を表示",
         "§e!civ menu §f: メニューを開く",
@@ -786,6 +794,214 @@ export function cmdStartDistrict(player, districtId) {
     return { ok: true };
 }
 
+/**
+ * 区域専用の建造物(社など)の建設を、このプレイヤーの足元にある区域のマスで開始する。
+ * ・区域の建設(cmdStartDistrict)と同じ仕組み(都市の生産力・city.districtConstruction)を使う。
+ */
+export function cmdStartDistrictBuilding(player, buildingId) {
+    const config = getMapConfig();
+    if (!config) { reply(player, "§cマップ未生成です。"); return { ok: false }; }
+    if (!isPlayersTurn(player)) { reply(player, "§cあなたのターンではありません。"); return { ok: false }; }
+
+    const { tx, tz } = worldToTile(config, Math.floor(player.location.x), Math.floor(player.location.z));
+    if (tx < 0 || tz < 0 || tx >= config.width || tz >= config.height) { reply(player, "§c範囲外です。"); return { ok: false }; }
+
+    const tileKey = `${tx},${tz}`;
+    const tile = getTile(tx, tz);
+
+    let cityKey = tile?.belongsToCityKey;
+    if (!cityKey) {
+        const allTiles = getTiles();
+        let minDist = Infinity;
+        for (const key in allTiles) {
+            const t = allTiles[key];
+            if (t.ownerId === player.id && t.city) {
+                const [cx, cz] = key.split(",");
+                const dist = Math.abs(tx - parseInt(cx, 10)) + Math.abs(tz - parseInt(cz, 10));
+                if (dist < minDist) { minDist = dist; cityKey = key; }
+            }
+        }
+    }
+    if (!cityKey) { reply(player, "§c作業エラー: このマスが帰属する都市が存在しません。"); return { ok: false }; }
+
+    const allTiles = getTiles();
+    const cityTile = allTiles[cityKey];
+    if (!cityTile || !cityTile.city) { reply(player, "§c帰属先の都市が見つかりません。"); return { ok: false }; }
+
+    const check = canStartDistrictBuilding(tile, buildingId, player.id, cityTile.city);
+    if (!check.ok) { reply(player, check.message); return { ok: false }; }
+
+    if (!tile.belongsToCityKey) tile.belongsToCityKey = cityKey;
+    startDistrictBuildingConstruction(cityTile.city, buildingId, tileKey);
+    const [cxStr, czStr] = cityKey.split(",");
+    setTile(parseInt(cxStr, 10), parseInt(czStr, 10), cityTile);
+
+    const def = getDistrictBuildingDef(buildingId);
+    world.sendMessage(`§e🏛️ ${player.name} が (${tx}, ${tz}) に、【${cityTile.city.name}】の生産力を使って${def?.label ?? buildingId}の建設を開始しました！ (コスト: ${def?.cost ?? "?"})`);
+    return { ok: true };
+}
+
+/** 宗教を創始する(国家全体の信仇力が100に達し、聖地を持っている場合のみ)。 */
+export function cmdFoundReligion(player) {
+    if (!isPlayersTurn(player)) { reply(player, "§cあなたのターンではありません。"); return { ok: false }; }
+
+    const allTiles = getTiles();
+    const playerCities = [];
+    for (const key in allTiles) {
+        if (allTiles[key].ownerId === player.id && allTiles[key].city) {
+            playerCities.push({ key, tile: allTiles[key] });
+        }
+    }
+
+    const check = canFoundReligion(player, player.id, playerCities, allTiles);
+    if (!check.ok) { reply(player, check.message); return { ok: false }; }
+
+    const { name } = foundReligion(player);
+    world.sendMessage(`§d⛪ ${player.name} の国家が宗教【${name}】を創始しました！`);
+    return { ok: true };
+}
+
+/** 宗教の名前を変更する(創始済みの場合のみ)。 */
+export function cmdRenameReligion(player, newName) {
+    const result = setReligionName(player, (newName ?? []).join ? newName.join(" ") : newName);
+    reply(player, result.message);
+    return result;
+}
+
+/**
+ * 宗教ユニットを、都市の貯留信仇力を使って足元のマスに購入する。
+ * ・購入した都市自身のマスに配置する(そのマスに既に宗教ユニットが無いことが条件)。
+ */
+export function cmdBuyReligiousUnit(player, unitId) {
+    const config = getMapConfig();
+    if (!config) { reply(player, "§cマップ未生成です。"); return { ok: false }; }
+    if (!isPlayersTurn(player)) { reply(player, "§cあなたのターンではありません。"); return { ok: false }; }
+    if (!hasFoundedReligion(player)) { reply(player, "§c宗教を創始していないと宗教ユニットは購入できません。"); return { ok: false }; }
+
+    const def = getReligiousUnitDef(unitId);
+    if (!def) { reply(player, "§c不明な宗教ユニットです。"); return { ok: false }; }
+
+    const { tx, tz } = worldToTile(config, Math.floor(player.location.x), Math.floor(player.location.z));
+    const tile = getTile(tx, tz);
+    if (!tile?.city || tile.ownerId !== player.id) { reply(player, "§cあなたの都市の上でのみ購入できます。"); return { ok: false }; }
+    if (def.requiresBuilding && !tile.city[def.requiresBuilding]) {
+        reply(player, `§cこの都市には【${def.label}】の購入に必要な建造物がありません。`);
+        return { ok: false };
+    }
+    if (tile.religiousUnit) { reply(player, "§cこのマスには既に宗教ユニットが存在します。"); return { ok: false }; }
+    if ((tile.city.faithStorage ?? 0) < def.cost) {
+        reply(player, `§c信仇力が足りません。(必要: ${def.cost}、現在: ${Math.floor(tile.city.faithStorage ?? 0)})`);
+        return { ok: false };
+    }
+
+    tile.city.faithStorage -= def.cost;
+    tile.religiousUnit = {
+        id: unitId, label: def.label, ownerId: player.id, ownerName: player.name,
+        hp: def.hp, maxHp: def.maxHp, movement: def.movement, movementRemaining: def.movement,
+        religiousCombatStrength: def.religiousCombatStrength, evangelismPower: def.evangelismPower,
+    };
+    setTile(tx, tz, tile);
+
+    world.sendMessage(`§d🙏 ${player.name} が【${tile.city.name}】の信仇力${def.cost}を使って${def.label}を購入しました！`);
+    return { ok: true };
+}
+
+/** 宗教ユニットを移動する(戦闘ユニットとは別レイヤー。移動先に他の制約はない)。 */
+export function cmdMoveReligiousUnit(player, fromTx, fromTz, toTx, toTz) {
+    const config = getMapConfig();
+    if (!config) { reply(player, "§cマップ未生成です。"); return { ok: false }; }
+    if (!isPlayersTurn(player)) { reply(player, "§cあなたのターンではありません。"); return { ok: false }; }
+
+    const source = getTile(fromTx, fromTz);
+    const target = getTile(toTx, toTz);
+    const unit = source?.religiousUnit;
+    if (!unit || unit.ownerId !== player.id) { reply(player, "§cこのマスに移動可能なあなたの宗教ユニットはいません。"); return { ok: false }; }
+    if (!target) { reply(player, "§c移動先がマップ外です。"); return { ok: false }; }
+    if (target.religiousUnit) { reply(player, "§c移動先には既に宗教ユニットが存在します。"); return { ok: false }; }
+
+    const distance = Math.max(Math.abs(toTx - fromTx), Math.abs(toTz - fromTz));
+    const remaining = unit.movementRemaining ?? unit.movement ?? 0;
+    if (distance < 1 || distance > remaining) { reply(player, "§cそのマスへ移動するには移動力が足りません。"); return { ok: false }; }
+
+    source.religiousUnit = null;
+    unit.movementRemaining = remaining - distance;
+    target.religiousUnit = unit;
+    setTile(fromTx, fromTz, source);
+    setTile(toTx, toTz, target);
+    world.sendMessage(`§d[Missionary] ${player.name} の${unit.label ?? "宗教ユニット"}が (${fromTx}, ${fromTz}) から (${toTx}, ${toTz}) へ移動しました。 (残り移動力: ${unit.movementRemaining})`);
+    return { ok: true };
+}
+
+/** 隣接する都市に布教する(布教力を1消費し、宗教的圧力を加える。布教力が0になると消滅する)。 */
+export function cmdProselytize(player, fromTx, fromTz, targetTx, targetTz) {
+    const config = getMapConfig();
+    if (!config) { reply(player, "§cマップ未生成です。"); return { ok: false }; }
+    if (!isPlayersTurn(player)) { reply(player, "§cあなたのターンではありません。"); return { ok: false }; }
+
+    const source = getTile(fromTx, fromTz);
+    const unit = source?.religiousUnit;
+    if (!unit || unit.ownerId !== player.id) { reply(player, "§cこのマスにあなたの宗教ユニットはいません。"); return { ok: false }; }
+
+    const distance = Math.max(Math.abs(targetTx - fromTx), Math.abs(targetTz - fromTz));
+    if (distance !== 1) { reply(player, "§c布教は隣接する都市に対してのみ行えます。"); return { ok: false }; }
+
+    const targetTile = getTile(targetTx, targetTz);
+    if (!targetTile?.city) { reply(player, "§cそのマスには都市がありません。"); return { ok: false }; }
+    if ((unit.evangelismPower ?? 0) <= 0) { reply(player, "§c布教力が残っていません。"); return { ok: false }; }
+
+    const pressure = calculateProselytizePressure(unit);
+    addReligiousPressure(targetTile.city, player.id, pressure);
+    unit.evangelismPower -= 1;
+
+    const religionName = getReligionName(player) ?? "自国の宗教";
+    let message = `§d🙏 ${player.name} の${unit.label ?? "宗教ユニット"}が【${targetTile.city.name}】で布教し、【${religionName}】の宗教的圧力+${Math.floor(pressure)}！ (残り布教力: ${unit.evangelismPower})`;
+
+    if (unit.evangelismPower <= 0) {
+        source.religiousUnit = null;
+        message += ` §7(布教力を使い果たし、${unit.label ?? "宗教ユニット"}は解散しました)`;
+    }
+    setTile(fromTx, fromTz, source);
+    setTile(targetTx, targetTz, targetTile);
+    world.sendMessage(message);
+    return { ok: true };
+}
+
+/**
+ * 戦闘ユニットで、同じマスにいる敵の宗教ユニットを排除する(異教徒の排除)。
+ * ・戦闘ユニットの移動力が満タンである必要があり、実行すると移動力を全て消費する。
+ * ・宗教ユニットとは無条件で「戦闘」にはならず、一方的に消滅させる。
+ * ・同盟関係にある国家の宗教ユニットは排除できない。
+ */
+export function cmdPurgeHeretic(player, tx, tz) {
+    const config = getMapConfig();
+    if (!config) { reply(player, "§cマップ未生成です。"); return { ok: false }; }
+    if (!isPlayersTurn(player)) { reply(player, "§cあなたのターンではありません。"); return { ok: false }; }
+
+    const tile = getTile(tx, tz);
+    const combatUnit = tile?.combatUnit;
+    const religiousUnit = tile?.religiousUnit;
+    if (!combatUnit || combatUnit.ownerId !== player.id) { reply(player, "§cこのマスにあなたの戦闘ユニットはいません。"); return { ok: false }; }
+    if (!religiousUnit) { reply(player, "§cこのマスに宗教ユニットはいません。"); return { ok: false }; }
+    if (religiousUnit.ownerId === player.id) { reply(player, "§c自分の宗教ユニットは排除できません。"); return { ok: false }; }
+    if (hasDiplomaticAgreement(player.id, religiousUnit.ownerId)) {
+        reply(player, "§c不可侵条約・同盟を結んでいる国家の宗教ユニットは排除できません。");
+        return { ok: false };
+    }
+
+    const remaining = combatUnit.movementRemaining ?? combatUnit.movement ?? 0;
+    const full = combatUnit.movement ?? 0;
+    if (remaining < full) { reply(player, "§c移動力が満タンでないと異教徒を排除できません。(今ターンは既に行動済みです)"); return { ok: false }; }
+
+    const removedLabel = religiousUnit.label ?? "宗教ユニット";
+    const removedOwnerName = religiousUnit.ownerName ?? "不明な国家";
+    tile.religiousUnit = null;
+    combatUnit.movementRemaining = 0;
+    setTile(tx, tz, tile);
+
+    world.sendMessage(`§c⚔ ${player.name} の${combatUnit.label ?? "戦闘ユニット"}が、(${tx}, ${tz}) にいた${removedOwnerName}の${removedLabel}を排除しました！(異教徒の排除)`);
+    return { ok: true };
+}
+
 function cmdInfo(player) {
     const config = getMapConfig(); reply(player, turnInfoText()); if (!config) return;
     const { tx, tz } = worldToTile(config, Math.floor(player.location.x), Math.floor(player.location.z));
@@ -829,6 +1045,10 @@ export function registerScriptCommands() {
                 case "chop": cmdChop(player); break;
                 case "install": cmdInstallFacility(player, args[0]); break;
                 case "district": cmdStartDistrict(player, args[0]); break;
+                case "districtbuilding": cmdStartDistrictBuilding(player, args[0]); break;
+                case "foundreligion": cmdFoundReligion(player); break;
+                case "renamereligion": cmdRenameReligion(player, args); break;
+                case "buyreligious": cmdBuyReligiousUnit(player, args[0]); break;
                 case "info": cmdInfo(player); break;
                 case "menu": openMainMenu(player); break;
                 // 💡 生産コマンドは統一: !civ build <worker|missile|tradingPost>

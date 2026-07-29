@@ -75,6 +75,7 @@ export function canStartDistrict(tile, id, playerId, city, player = null) {
     if (!tile) return { ok: false, message: "§c無効なマスです。" };
     if (tile.ownerId !== playerId) return { ok: false, message: "§cこのマスはあなたの領有地ではありません。" };
     if (tile.city) return { ok: false, message: "§cこのマスには都市があるため区域は配置できません。" };
+    if (tile.facility) return { ok: false, message: `§cこのマスには施設【${tile.facility.label ?? tile.facility.id}】があるため区域は配置できません。` };
     if (tile.district) return { ok: false, message: `§cこのマスには既に区域【${tile.district.label ?? tile.district.id}】が存在します。` };
     if (tile.underDistrictConstruction) return { ok: false, message: "§cこのマスは既に区域を建設中です。" };
     if (city?.districtConstruction) return { ok: false, message: "§c既にこの都市は別の区域を建設中です(同時に1つまで)。" };
@@ -92,8 +93,71 @@ export function canStartDistrict(tile, id, playerId, city, player = null) {
 export function startDistrictConstruction(city, tile, id, tileKey) {
     const def = DISTRICT_DEFS[id];
     if (!def) return null;
-    city.districtConstruction = { id, progress: 0, cost: def.cost, tileKey };
+    city.districtConstruction = { kind: "district", id, progress: 0, cost: def.cost, tileKey };
     tile.underDistrictConstruction = true;
+    return city.districtConstruction;
+}
+
+/**
+ * 区域専用の建造物の定義(特定の区域の上にのみ建てられる、都市の生産力を使う建造物)。
+ * @typedef {Object} DistrictBuildingDef
+ * @property {string} label 表示名
+ * @property {string} icon 表示アイコン
+ * @property {number} cost 完成に必要な生産力の合計値
+ * @property {string} forDistrict どの区域(DISTRICT_DEFSのID)の上に建てられるか
+ * @property {(city: any, tile: any) => void} onComplete 完成時の効果を適用する関数
+ * @property {(tx: number, tz: number) => string} [completeMessage] 完成時のメッセージ生成関数
+ */
+export const DISTRICT_BUILDING_DEFS = {
+    shrine: {
+        label: "社",
+        icon: "[Shrine]",
+        cost: 70,
+        forDistrict: "sacredSite",
+        // 💡 信仰力+2 は turns.js の getCityCurrentYields 側で city.shrine を見て加算する。
+        //    伝道者の購入可否は religion.js の RELIGIOUS_UNIT_DEFS.missionary.requiresBuilding が
+        //    "shrine" を指定しており、city.shrine を見て自動的に判定される。
+        onComplete: (city) => { city.shrine = true; },
+        completeMessage: (tx, tz) => `§e🎉 (${tx}, ${tz})の聖地に社が完成しました！ (信仰力の産出+2、伝道者を購入可能に)`,
+    },
+};
+
+export function getDistrictBuildingDef(id) {
+    return DISTRICT_BUILDING_DEFS[id] ?? null;
+}
+
+export function getDistrictBuildingIds() {
+    return Object.keys(DISTRICT_BUILDING_DEFS);
+}
+
+/**
+ * 指定マスに区域専用の建造物を建設開始できるかどうかを判定する。
+ * @param {any} tile 対象マス(既に対応する区域が完成している必要がある)
+ * @param {string} id 区域専用建造物のID
+ * @param {string} playerId 建設しようとしているプレイヤー/国家のID
+ * @param {any} city 帰属先となる都市のデータ
+ * @returns {{ ok: boolean, message?: string }}
+ */
+export function canStartDistrictBuilding(tile, id, playerId, city) {
+    const def = DISTRICT_BUILDING_DEFS[id];
+    if (!def) return { ok: false, message: "§c不明な建造物です。" };
+    if (!tile) return { ok: false, message: "§c無効なマスです。" };
+    if (tile.ownerId !== playerId) return { ok: false, message: "§cこのマスはあなたの領有地ではありません。" };
+    if (!tile.district) return { ok: false, message: "§cこのマスには区域がありません。" };
+    if (tile.district.id !== def.forDistrict) {
+        const requiredDef = DISTRICT_DEFS[def.forDistrict];
+        return { ok: false, message: `§c【${def.label}】は【${requiredDef?.label ?? def.forDistrict}】にのみ建設できます。` };
+    }
+    if (city?.[id]) return { ok: false, message: `§cこの都市には既に【${def.label}】が存在します。` };
+    if (city?.districtConstruction) return { ok: false, message: "§c既にこの都市は区域(または区域専用の建造物)を建設中です(同時に1つまで)。" };
+    return { ok: true };
+}
+
+/** 区域専用の建造物の建設を開始する。呼び出し側で canStartDistrictBuilding のチェックは済んでいる前提。 */
+export function startDistrictBuildingConstruction(city, id, tileKey) {
+    const def = DISTRICT_BUILDING_DEFS[id];
+    if (!def) return null;
+    city.districtConstruction = { kind: "building", id, progress: 0, cost: def.cost, tileKey };
     return city.districtConstruction;
 }
 
@@ -110,32 +174,41 @@ export function tickDistrictConstruction(city, productionAmount, tiles, ownerId)
     const construction = city.districtConstruction;
     if (!construction) return null;
 
-    const def = DISTRICT_DEFS[construction.id];
+    const isBuilding = construction.kind === "building";
+    const def = isBuilding ? DISTRICT_BUILDING_DEFS[construction.id] : DISTRICT_DEFS[construction.id];
     if (!def) { city.districtConstruction = null; return null; }
 
     const targetTile = tiles[construction.tileKey];
-    // 💡 建設中に対象マスを失った(占領された・都市が建った等)場合は、建設を中止する。
-    if (!targetTile || targetTile.ownerId !== ownerId || targetTile.city) {
+    // 💡 建設中に対象マスを失った(占領された等)場合は、建設を中止する。
+    //    区域専用の建造物の場合は、土台となる区域そのものを失った(占領・別の区域になった等)場合も中止する。
+    const lostTile = !targetTile || targetTile.ownerId !== ownerId || (!isBuilding && targetTile.city);
+    const lostDistrict = isBuilding && (!targetTile?.district || targetTile.district.id !== def.forDistrict);
+    if (lostTile || lostDistrict) {
         city.districtConstruction = null;
-        if (targetTile) delete targetTile.underDistrictConstruction;
-        return { done: true, cancelled: true, message: `§c⚠️ 区域【${def.label}】は建設中に対象のマスを失ったため中止されました。` };
+        if (targetTile && !isBuilding) delete targetTile.underDistrictConstruction;
+        return { done: true, cancelled: true, message: `§c⚠️ 【${def.label}】は建設中に対象を失ったため中止されました。` };
     }
 
     construction.progress += productionAmount ?? 0;
 
     if (construction.progress >= construction.cost) {
-        targetTile.district = { id: construction.id, label: def.label, ownerId: targetTile.ownerId, ownerName: targetTile.ownerName };
-        delete targetTile.underDistrictConstruction;
+        if (isBuilding) {
+            def.onComplete?.(city, targetTile);
+        } else {
+            targetTile.district = { id: construction.id, label: def.label, ownerId: targetTile.ownerId, ownerName: targetTile.ownerName };
+            delete targetTile.underDistrictConstruction;
+        }
         const [txStr, tzStr] = construction.tileKey.split(",");
         const message = def.completeMessage
             ? def.completeMessage(Number(txStr), Number(tzStr))
-            : `§e🎉 区域【${def.label}】が完成しました！`;
+            : `§e🎉【${def.label}】が完成しました！`;
         city.districtConstruction = null;
         return { done: true, message };
     }
 
     const progressText = Math.floor(construction.progress * 10) / 10;
-    return { done: false, message: `§7${def.icon} 区域【${def.label}】を建設中... (${progressText}/${construction.cost})` };
+    const kindLabel = isBuilding ? "建造物" : "区域";
+    return { done: false, message: `§7${def.icon} ${kindLabel}【${def.label}】を建設中... (${progressText}/${construction.cost})` };
 }
 
 /**

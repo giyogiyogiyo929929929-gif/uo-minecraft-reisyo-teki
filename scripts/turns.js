@@ -9,6 +9,7 @@ import { getCivStorageHandle, resolveCivName, isCivControllable } from "./civs.j
 import { getBuildingAdjacencyYields } from "./adjacency.js";
 import { getFacilityAdjacencyYields } from "./facilities.js";
 import { getDistrictAdjacencyYields, getDistrictPopulationYields, tickDistrictConstruction } from "./districts.js";
+import { hasFoundedReligion, getReligionName, getNationalDominantReligion, applySacredSitePressure } from "./religion.js";
 
 export { getTurnState, setTurnState };
 
@@ -175,6 +176,9 @@ export function getCityCurrentYields(cityKey, tiles) {
 
     // オベリスクの効果: 建設したこの都市の信仰力の産出を+4。
     if (cityTile.city.obelisk) faith += 4;
+
+    // 社(区域専用建造物)の効果: 建設したこの都市の信仰力の産出を+2。
+    if (cityTile.city.shrine) faith += 2;
 
     // 💡 その他の建造物が持つ「隣接マスに応じたボーナス」をまとめて反映する。
     //    新しい建造物を追加しても、production.js側にルール(adjacencyBonuses)を書くだけで
@@ -417,6 +421,36 @@ function areAllMutuallyAllied(civIds) {
 }
 
 /**
+ * 宗教勝利の判定。生存している全ての国家の「国家主流宗教」が、いずれか1国家の
+ * 創始した宗教と一致していれば、その国家のIDを返す(誰も条件を満たしていなければnull)。
+ */
+function checkReligiousVictory(aliveIds, tiles) {
+    // 生存している各国家の保有都市一覧を作る([{key, tile}]形式、religion.jsの関数群が要求する形)
+    const citiesByCiv = {};
+    for (const id of aliveIds) citiesByCiv[id] = [];
+    for (const key in tiles) {
+        const t = tiles[key];
+        if (t.city && aliveIds.includes(t.ownerId)) {
+            citiesByCiv[t.ownerId].push({ key, tile: t });
+        }
+    }
+
+    // 各国家の「国家主流宗教」を求めておく
+    const nationalReligion = {};
+    for (const id of aliveIds) {
+        nationalReligion[id] = getNationalDominantReligion(citiesByCiv[id]);
+    }
+
+    // 宗教を創始している国家それぞれについて、生存者全員が自分の宗教を国家主流としているか確認する
+    for (const candidateId of aliveIds) {
+        const handle = getCivStorageHandle(candidateId);
+        if (!handle || !hasFoundedReligion(handle)) continue;
+        if (aliveIds.every(id => nationalReligion[id] === candidateId)) return candidateId;
+    }
+    return null;
+}
+
+/**
  * 🏆 勝利条件の判定。
  * ・生存国家(都市を1つ以上持つ国家)が1つだけになった場合 → その国家のソロ勝利。
  * ・生存国家が2つ以上でも、参加人数が4人以上のゲームにおいて、生存者全員が互いに
@@ -448,6 +482,19 @@ export function checkAndAnnounceVictory(tiles) {
         const winnerName = resolveCivName(aliveIds[0]) ?? "不明な国家";
         awardVictoryPoints(aliveIds);
         world.sendMessage(`§6★★★ 勝利！ §a【${winnerName}】§6が唯一残った国家となりました！(ソロ勝利、勝利ポイント+1) ★★★`);
+        resetAll();
+        return true;
+    }
+
+    // 💡 宗教勝利: 生存している全ての国家の国家主流宗教が、いずれか1国家の宗教と一致していれば、
+    //    その国家の勝利(参加人数の制限は無い)。
+    const religiousWinnerId = checkReligiousVictory(aliveIds, allTiles);
+    if (religiousWinnerId) {
+        const winnerName = resolveCivName(religiousWinnerId) ?? "不明な国家";
+        const winnerHandle = getCivStorageHandle(religiousWinnerId);
+        const religionName = getReligionName(winnerHandle) ?? "その宗教";
+        awardVictoryPoints([religiousWinnerId]);
+        world.sendMessage(`§6★★★ 勝利！ §d【${winnerName}】§6の【${religionName}】が全世界に広まりました！(宗教勝利、勝利ポイント+1) ★★★`);
         resetAll();
         return true;
     }
@@ -517,6 +564,12 @@ function processPlayerTurnStart(playerId) {
         const unit = tiles[key].combatUnit;
         if (unit?.ownerId === playerId) {
             unit.movementRemaining = unit.movement ?? 0;
+            movementRefreshed = true;
+        }
+        // 💡 宗教ユニット(別レイヤー)の移動力も、戦闘ユニットと同様に毎ターン回復させる。
+        const religiousUnit = tiles[key].religiousUnit;
+        if (religiousUnit?.ownerId === playerId) {
+            religiousUnit.movementRemaining = religiousUnit.movement ?? 0;
             movementRefreshed = true;
         }
         if (tiles[key].ownerId === playerId && tiles[key].city) {
@@ -644,6 +697,18 @@ function processPlayerTurnStart(playerId) {
 
     const player = getCivStorageHandle(playerId);
     if (player) {
+        // 💡 聖地(sacredSite)のある都市は、自国が宗教を創始していれば、
+        //    毎ターン自国の宗教の宗教的圧力を+100する(帰属都市ごとに、聖地1つにつき)。
+        if (hasFoundedReligion(player)) {
+            for (const key in tiles) {
+                const t = tiles[key];
+                if (t.ownerId !== playerId || t.district?.id !== "sacredSite") continue;
+                const belongCityKey = t.belongsToCityKey;
+                const cityTile = belongCityKey ? tiles[belongCityKey] : null;
+                if (cityTile?.city) applySacredSitePressure(cityTile.city, playerId);
+            }
+        }
+
         let totalPop = 0;
         for(const c of playerCities) { totalPop += c.tile.city.population; }
 

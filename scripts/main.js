@@ -145,6 +145,10 @@ system.runInterval(() => {
             const combatUnitText = combatUnit
                 ? `§c[Warrior] ${combatUnit.label ?? combatUnit.id} | HP: ${combatUnit.hp ?? 0}/${combatUnit.maxHp ?? 100} | 戦闘力: ${formatCombatStrengthText(combatUnit)} | 移動力: ${combatUnit.movementRemaining ?? combatUnit.movement ?? 0}/${combatUnit.movement ?? 0} | 攻撃距離: ${combatUnit.attackRange ?? combatUnit.movement ?? 0}`
                 : "§7戦闘ユニット: なし";
+            const religiousUnit = tile.religiousUnit;
+            const religiousUnitText = religiousUnit
+                ? `\n§d[Missionary] ${religiousUnit.label ?? religiousUnit.id} | HP: ${religiousUnit.hp ?? 0}/${religiousUnit.maxHp ?? 100} | 布教力: ${religiousUnit.evangelismPower ?? 0} | 移動力: ${religiousUnit.movementRemaining ?? religiousUnit.movement ?? 0}/${religiousUnit.movement ?? 0}`
+                : "";
             
             // 算出量の可視化 ([Food]食料 / [Prod]生産) ※マス自体が持つベース値
             const yieldText = `§a[Food]x${tile.foodYield ?? 0} §7| §6[Prod]x${tile.productionYield ?? 0}`;
@@ -192,7 +196,7 @@ system.runInterval(() => {
             player.onScreenDisplay.setActionBar(
                 `§b🗺️ 補正座標: [${tx}, ${tz}] §7| §f地形: §b${terrainLabel} §7| §f資源: §e${resourceLabel}\n` +
                 `§f領有: ${ownerText}${cityText}${facilityText}${districtText}\n` +
-                `§fベース産出: ${yieldText}\n${combatUnitText}` +
+                `§fベース産出: ${yieldText}\n${combatUnitText}${religiousUnitText}` +
                 currentYieldLine +
                 cityInfoLine
             );

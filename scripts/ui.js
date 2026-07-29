@@ -5,7 +5,11 @@ import { worldToTile, TERRAIN_TYPES, RESOURCE_TYPES } from "./mapGen.js"
 import { turnInfoText, endTurn, forceEndTurn, isPlayersTurn, joinGame, endGame, getTurnState, calculateCityFoodIncomes, getCityCurrentYields, startGame } from "./turns.js";
 import { PRODUCTION_DEFS, canStartProduction, getTotalWorkerActionsRemaining } from "./production.js";
 import { getFacilityIds, getFacilityDef, canInstallFacility } from "./facilities.js";
-import { getDistrictIds, getDistrictDef, canStartDistrict } from "./districts.js";
+import { getDistrictIds, getDistrictDef, canStartDistrict, getDistrictBuildingIds, getDistrictBuildingDef, canStartDistrictBuilding } from "./districts.js";
+import {
+    getReligiousUnitIds, getReligiousUnitDef, hasFoundedReligion, getReligionName,
+    canFoundReligion, getTotalCivFaith, getNationalDominantReligion,
+} from "./religion.js";
 import { getDefinitions, getKindLabel, getPointsLabel, getProgressState, hasCompletedProgress, getDefinition } from "./progression.js";
 import { getRelation, sendRequest, getRequestsFor, acceptRequest, rejectRequest, breakRelation, hasDiplomaticAgreement } from "./diplomacy.js";
 import { getAttackRange, getAttackableTargets, getEffectiveCombatStrength, isRangedUnit, getEffectiveRangedStrength } from "./combat.js";
@@ -110,6 +114,13 @@ export async function openMainMenu(player) {
                 body.push(`§b区域: §7建設中...`);
             }
 
+            // 💡 このマスに宗教ユニットがいる場合、その情報も表示する(戦闘ユニットとは別レイヤー)
+            if (currentTile.religiousUnit) {
+                const ru = currentTile.religiousUnit;
+                const ruOwnerText = ru.ownerId === player.id ? "§a自分" : `§c${ru.ownerName ?? "不明"}`;
+                body.push(`§b宗教ユニット: §f${ru.label ?? ru.id} §7(所有:${ruOwnerText}§7) HP:${Math.max(0, Math.round(ru.hp ?? 0))}/${ru.maxHp ?? 100} 布教力:${ru.evangelismPower ?? 0} 移動:${ru.movementRemaining ?? ru.movement ?? 0}/${ru.movement ?? 0}`);
+            }
+
             if (currentTile.city) {
                 const city = currentTile.city;
                 const threshold = 10 + (city.population - 1) * 2;
@@ -185,6 +196,7 @@ export async function openMainMenu(player) {
     if (turn.started) {
         buttons.push({ text: "§b🤝 外交メニュー", action: "diplomacy" });
         buttons.push({ text: "§f⚔ 自分の戦闘ユニット一覧", action: "myunits" });
+        buttons.push({ text: "§d⛪ 宗教", action: "religion" });
     }
     
     if (currentTile && !currentTile.ownerId) {
@@ -221,6 +233,12 @@ export async function openMainMenu(player) {
     if (currentTile && currentTile.ownerId === player.id && !currentTile.city && !currentTile.district && !currentTile.underDistrictConstruction) {
         buttons.push({ text: "§5🏛️ 区域を配置する", action: "startdistrict" });
     }
+    if (currentTile && currentTile.ownerId === player.id && currentTile.district) {
+        buttons.push({ text: "§5🏛️ 区域専用の建造物を建設する", action: "startdistrictbuilding" });
+    }
+    if (currentTile && currentTile.city && currentTile.ownerId === player.id && hasFoundedReligion(player)) {
+        buttons.push({ text: "§d🙏 宗教ユニットを購入する", action: "buyreligious" });
+    }
     if (currentTile?.combatUnit?.ownerId === player.id) {
         buttons.push({ text: "§f ユニットの移動", action: "moveunit" });
         buttons.push({ text: "§c⚔ ユニットの攻撃", action: "attackunit" });
@@ -231,6 +249,14 @@ export async function openMainMenu(player) {
         if (currentTile.city && currentTile.ownerId && currentTile.ownerId !== player.id && isFullMovement) {
             buttons.push({ text: `§6🏳 【${currentTile.city.name}】を占領する`, action: "capturecity" });
         }
+        // 💡 同じマスに他国の宗教ユニットがいれば、移動力が最大値のときに排除できる(異教徒の排除)。
+        if (currentTile.religiousUnit && currentTile.religiousUnit.ownerId !== player.id && isFullMovement) {
+            buttons.push({ text: `§c✝ 異教徒(${currentTile.religiousUnit.label ?? "宗教ユニット"})を排除する`, action: "purgeheretic" });
+        }
+    }
+    if (currentTile?.religiousUnit?.ownerId === player.id) {
+        buttons.push({ text: "§d[Missionary] 宗教ユニットの移動", action: "movereligious" });
+        buttons.push({ text: "§d🙏 隣接する都市に布教する", action: "proselytize" });
     }
     if (turn.started) { buttons.push({ text: "ターンを終了する", action: "endturn" }); }
     if (isOp && turn.started) buttons.push({ text: "§6【管理者】手番を強制スキップ", action: "forceendturn" });
@@ -256,10 +282,15 @@ export async function openMainMenu(player) {
         case "chop": (await import("./commands.js")).cmdChop(player); break;
         case "installfacility": await openFacilityInstallMenu(player, tx, tz); break;
         case "startdistrict": await openDistrictStartMenu(player, tx, tz); break;
+        case "startdistrictbuilding": await openDistrictBuildingMenu(player, tx, tz); break;
+        case "buyreligious": await openBuyReligiousUnitMenu(player, tx, tz); break;
+        case "movereligious": await openReligiousUnitMoveMenu(player, tx, tz); break;
+        case "proselytize": await openProselytizeMenu(player, tx, tz); break;
         case "technology": await openProgressMenu(player, "technology"); break;
         case "civic": await openProgressMenu(player, "civic"); break;
         case "diplomacy": await openDiplomacyMenu(player); break;
         case "myunits": await openMyUnitsMenu(player); break;
+        case "religion": await openReligionMenu(player); break;
         case "moveunit":
             if (currentTile?.combatUnit?.ownerId === player.id) await openCombatUnitMoveMenu(player, tx, tz);
             break;
@@ -268,6 +299,9 @@ export async function openMainMenu(player) {
             break;
         case "capturecity":
             if (currentTile?.combatUnit?.ownerId === player.id) (await import("./commands.js")).cmdCaptureCity(player, tx, tz);
+            break;
+        case "purgeheretic":
+            if (currentTile?.combatUnit?.ownerId === player.id) (await import("./commands.js")).cmdPurgeHeretic(player, tx, tz);
             break;
 
         // 💡 新機能: 生産メニュー(ユニット/建造物)を開く
@@ -1051,4 +1085,197 @@ async function openUnitActionMenu(player, tx, tz) {
     if (action === "move") await openCombatUnitMoveMenu(player, tx, tz);
     else if (action === "attack") await openCombatUnitAttackMenu(player, tx, tz);
     else await openMyUnitsMenu(player);
+}
+
+/**
+ * ⛪ 宗教メニュー。
+ * ・未創始: 国家全体の信仰力の進捗(現在値/100)と、聖地の有無を表示。条件を満たせば創始できる。
+ * ・創始済み: 宗教名の表示・変更、国家の宗教状況(自国の宗教が国家主流かどうか)を表示。
+ */
+async function openReligionMenu(player) {
+    const realPlayer = getRealPlayer(player);
+    const allTiles = getTiles();
+    const playerCities = [];
+    for (const key in allTiles) {
+        if (allTiles[key].ownerId === player.id && allTiles[key].city) {
+            playerCities.push({ key, tile: allTiles[key] });
+        }
+    }
+
+    if (!hasFoundedReligion(player)) {
+        const totalFaith = getTotalCivFaith(playerCities);
+        const hasSacredSite = Object.values(allTiles).some(t => t.ownerId === player.id && t.district?.id === "sacredSite");
+        const check = canFoundReligion(player, player.id, playerCities, allTiles);
+
+        const body = [
+            `§f国家全体の信仰力: §d🙏 ${Math.floor(totalFaith)} / 100`,
+            `§f聖地: ${hasSacredSite ? "§aあり" : "§cなし"}`,
+        ];
+        if (!check.ok) body.push(`§7${check.message}`);
+
+        const buttons = [];
+        if (check.ok) buttons.push({ text: "⛪ 宗教を創始する", action: "found" });
+        buttons.push({ text: "戻る", action: null });
+
+        const form = new ActionFormData().title("⛪ 宗教").body(body.join("\n"));
+        for (const btn of buttons) form.button(btn.text);
+        const result = await form.show(realPlayer);
+        if (result.canceled || result.selection === undefined) return;
+        const action = buttons[result.selection]?.action;
+
+        if (action === "found") (await import("./commands.js")).cmdFoundReligion(player);
+        else await openMainMenu(player);
+        return;
+    }
+
+    const religionName = getReligionName(player) ?? "無名の宗教";
+    const nationalReligion = getNationalDominantReligion(playerCities);
+    const nationalText = nationalReligion === player.id
+        ? "§a自国の宗教が国家の主流です"
+        : (nationalReligion ? "§c他国の宗教が国家の主流になっています" : "§7まだどの宗教も都市の過半数を占めていません");
+
+    const body = [
+        `§f宗教名: §d${religionName}`,
+        `§f国家の状況: ${nationalText}`,
+        `§f保有都市: ${playerCities.length}`,
+    ];
+
+    const buttons = [
+        { text: "✏️ 宗教の名前を変更する", action: "rename" },
+        { text: "戻る", action: null },
+    ];
+
+    const form = new ActionFormData().title(`⛪ ${religionName}`).body(body.join("\n"));
+    for (const btn of buttons) form.button(btn.text);
+    const result = await form.show(realPlayer);
+    if (result.canceled || result.selection === undefined) return;
+    const action = buttons[result.selection]?.action;
+
+    if (action === "rename") {
+        const renameForm = new ModalFormData().title("宗教の名前を変更").textField("新しい名前", religionName, { defaultValue: religionName });
+        const renameRes = await renameForm.show(realPlayer);
+        if (!renameRes.canceled) {
+            const newName = renameRes.formValues[0];
+            if (newName && newName.trim() !== "") (await import("./commands.js")).cmdRenameReligion(player, newName.trim());
+        }
+    } else {
+        await openMainMenu(player);
+    }
+}
+
+/** 🏛️ 区域専用の建造物(社など)の建設メニュー。区域が完成しているマスで表示する。 */
+async function openDistrictBuildingMenu(player, tx, tz) {
+    const tile = getTile(tx, tz);
+    if (!tile?.district) { await openMainMenu(player); return; }
+
+    const allTiles = getTiles();
+    const cityKey = tile.belongsToCityKey;
+    const city = cityKey ? allTiles[cityKey]?.city : null;
+
+    const body = [`(${tx}, ${tz}) の【${tile.district.label ?? tile.district.id}】に建設する建造物を選んでください。`, "§7建設には帰属都市の生産力を複数ターンかけて使います。"];
+    const items = [];
+
+    for (const id of getDistrictBuildingIds()) {
+        const def = getDistrictBuildingDef(id);
+        const check = canStartDistrictBuilding(tile, id, player.id, city);
+        if (!check.ok) { body.push(`§7${def.icon} ${def.label}: ${check.message}`); continue; }
+        items.push({ text: `${def.icon} ${def.label} (コスト:${def.cost})`, action: id });
+    }
+    if (items.length === 0) body.push("§7現在建設できる建造物がありません。");
+
+    await showPaginatedMenu(
+        getRealPlayer(player), "🏛️ 区域専用の建造物", body.join("\n"), items,
+        async (buildingId) => { (await import("./commands.js")).cmdStartDistrictBuilding(player, buildingId); },
+        async () => { await openMainMenu(player); },
+    );
+}
+
+/** 🙏 都市の信仰力で宗教ユニットを購入するメニュー。社を持つ自分の都市で表示する。 */
+async function openBuyReligiousUnitMenu(player, tx, tz) {
+    const tile = getTile(tx, tz);
+    if (!tile?.city) { await openMainMenu(player); return; }
+
+    const body = [`【${tile.city.name}】の信仰力(${Math.floor(tile.city.faithStorage ?? 0)})で購入する宗教ユニットを選んでください。`];
+    const items = [];
+
+    for (const id of getReligiousUnitIds()) {
+        const def = getReligiousUnitDef(id);
+        if (def.requiresBuilding && !tile.city[def.requiresBuilding]) {
+            body.push(`§7🔒 ${def.icon} ${def.label}: 建造物が必要`);
+            continue;
+        }
+        if (tile.religiousUnit) { body.push(`§7${def.icon} ${def.label}: このマスには既に宗教ユニットがいます`); continue; }
+        if ((tile.city.faithStorage ?? 0) < def.cost) { body.push(`§7${def.icon} ${def.label}: 信仰力が足りません(必要:${def.cost})`); continue; }
+        items.push({ text: `${def.icon} ${def.label} (信仰力:${def.cost})`, action: id });
+    }
+    if (items.length === 0) body.push("§7現在購入できる宗教ユニットがありません。");
+
+    await showPaginatedMenu(
+        getRealPlayer(player), "🙏 宗教ユニットを購入", body.join("\n"), items,
+        async (unitId) => { (await import("./commands.js")).cmdBuyReligiousUnit(player, unitId); },
+        async () => { await openMainMenu(player); },
+    );
+}
+
+/** 現在位置の宗教ユニットが移動できるマスを一覧表示する(戦闘ユニットの移動メニューと同型)。 */
+async function openReligiousUnitMoveMenu(player, fromTx, fromTz) {
+    const source = getTile(fromTx, fromTz);
+    const unit = source?.religiousUnit;
+    if (!unit || unit.ownerId !== player.id) { await openMainMenu(player); return; }
+
+    const remaining = unit.movementRemaining ?? unit.movement ?? 0;
+    const items = [];
+    const body = [`${unit.label ?? "宗教ユニット"}  HP: ${unit.hp ?? 0}/${unit.maxHp ?? 100}  布教力: ${unit.evangelismPower ?? 0}`, `残り移動力: ${remaining}`];
+    const config = getMapConfig();
+    const tiles = getTiles();
+
+    if (remaining > 0 && config) {
+        for (let dz = -remaining; dz <= remaining; dz++) {
+            for (let dx = -remaining; dx <= remaining; dx++) {
+                const distance = Math.max(Math.abs(dx), Math.abs(dz));
+                if (distance === 0 || distance > remaining) continue;
+                const tx = fromTx + dx;
+                const tz = fromTz + dz;
+                if (tx < 0 || tz < 0 || tx >= config.width || tz >= config.height) continue;
+                const tile = tiles[`${tx},${tz}`];
+                if (!tile || tile.religiousUnit) continue;
+                items.push({ text: `(${tx}, ${tz})${tile.city ? ` | 都市: ${tile.city.name}` : ""}`, action: { tx, tz } });
+            }
+        }
+    } else {
+        body.push("§7移動力が残っていません。次の自分のターン開始時に回復します。");
+    }
+
+    await showPaginatedMenu(
+        getRealPlayer(player), "[Missionary] 移動", body.join("\n"), items,
+        async (action) => { (await import("./commands.js")).cmdMoveReligiousUnit(player, fromTx, fromTz, action.tx, action.tz); },
+        async () => { await openMainMenu(player); },
+    );
+}
+
+/** 隣接する都市への布教先を一覧表示する。 */
+async function openProselytizeMenu(player, fromTx, fromTz) {
+    const source = getTile(fromTx, fromTz);
+    const unit = source?.religiousUnit;
+    if (!unit || unit.ownerId !== player.id) { await openMainMenu(player); return; }
+
+    const tiles = getTiles();
+    const items = [];
+    for (let dz = -1; dz <= 1; dz++) {
+        for (let dx = -1; dx <= 1; dx++) {
+            if (dx === 0 && dz === 0) continue;
+            const tx = fromTx + dx, tz = fromTz + dz;
+            const tile = tiles[`${tx},${tz}`];
+            if (tile?.city) items.push({ text: `⛪ (${tx}, ${tz}) | 都市: ${tile.city.name}`, action: { tx, tz } });
+        }
+    }
+
+    const body = [`${unit.label ?? "宗教ユニット"} の布教力: ${unit.evangelismPower ?? 0}`, "§7布教先の都市を選んでください(布教力を1消費します)。"];
+    if (items.length === 0) body.push("§7隣接する都市がありません。");
+
+    await showPaginatedMenu(
+        getRealPlayer(player), "🙏 布教する", body.join("\n"), items,
+        async (action) => { (await import("./commands.js")).cmdProselytize(player, fromTx, fromTz, action.tx, action.tz); },
+        async () => { await openMainMenu(player); },
+    );
 }
