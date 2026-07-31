@@ -81,9 +81,9 @@ function cmdHelp(player) {
         "§e!civ install <quarry> §f: 足元の空き領有マスに施設を設置(労働者の行動回数を1消費)",
         "§e!civ district <sacredSite> §f: 足元の空き領有マスに区域の建設を開始(帰属都市の生産力を使用)",
         "§e!civ districtbuilding <shrine> §f: 足元の区域に専用の建造物を建設開始(帰属都市の生産力を使用)",
-        "§e!civ foundreligion §f: 宗教を創始する(国家全体の信仇力100以上、かつ聖地が必要)",
+        "§e!civ foundreligion §f: 宗教を創始する(国家全体の信仰力100以上、かつ聖地が必要)",
         "§e!civ renamereligion <名前> §f: 創始した宗教の名前を変更する",
-        "§e!civ buyreligious <missionary> §f: 都市の信仇力を使って宗教ユニットを購入(社が必要)",
+        "§e!civ buyreligious <missionary> §f: 都市の信仰力を使って宗教ユニットを購入(社が必要)",
         "§c!civ launch <x> <z> §f: 指定マスへミサイルを発射",
         "§e!civ info §f: 現在の情報を表示",
         "§e!civ menu §f: メニューを開く",
@@ -841,7 +841,7 @@ export function cmdStartDistrictBuilding(player, buildingId) {
     return { ok: true };
 }
 
-/** 宗教を創始する(国家全体の信仇力が100に達し、聖地を持っている場合のみ)。 */
+/** 宗教を創始する(国家全体の信仰力が100に達し、聖地を持っている場合のみ)。 */
 export function cmdFoundReligion(player) {
     if (!isPlayersTurn(player)) { reply(player, "§cあなたのターンではありません。"); return { ok: false }; }
 
@@ -869,7 +869,7 @@ export function cmdRenameReligion(player, newName) {
 }
 
 /**
- * 宗教ユニットを、都市の貯留信仇力を使って足元のマスに購入する。
+ * 宗教ユニットを、都市の貯留信仰力を使って足元のマスに購入する。
  * ・購入した都市自身のマスに配置する(そのマスに既に宗教ユニットが無いことが条件)。
  */
 export function cmdBuyReligiousUnit(player, unitId) {
@@ -890,7 +890,7 @@ export function cmdBuyReligiousUnit(player, unitId) {
     }
     if (tile.religiousUnit) { reply(player, "§cこのマスには既に宗教ユニットが存在します。"); return { ok: false }; }
     if ((tile.city.faithStorage ?? 0) < def.cost) {
-        reply(player, `§c信仇力が足りません。(必要: ${def.cost}、現在: ${Math.floor(tile.city.faithStorage ?? 0)})`);
+        reply(player, `§c信仰力が足りません。(必要: ${def.cost}、現在: ${Math.floor(tile.city.faithStorage ?? 0)})`);
         return { ok: false };
     }
 
@@ -899,10 +899,11 @@ export function cmdBuyReligiousUnit(player, unitId) {
         id: unitId, label: def.label, ownerId: player.id, ownerName: player.name,
         hp: def.hp, maxHp: def.maxHp, movement: def.movement, movementRemaining: def.movement,
         religiousCombatStrength: def.religiousCombatStrength, evangelismPower: def.evangelismPower,
+        hasProselytizedThisTurn: false,
     };
     setTile(tx, tz, tile);
 
-    world.sendMessage(`§d🙏 ${player.name} が【${tile.city.name}】の信仇力${def.cost}を使って${def.label}を購入しました！`);
+    world.sendMessage(`§d🙏 ${player.name} が【${tile.city.name}】の信仰力${def.cost}を使って${def.label}を購入しました！`);
     return { ok: true };
 }
 
@@ -941,6 +942,7 @@ export function cmdProselytize(player, fromTx, fromTz, targetTx, targetTz) {
     const source = getTile(fromTx, fromTz);
     const unit = source?.religiousUnit;
     if (!unit || unit.ownerId !== player.id) { reply(player, "§cこのマスにあなたの宗教ユニットはいません。"); return { ok: false }; }
+    if (unit.hasProselytizedThisTurn) { reply(player, "§cこの宗教ユニットは今ターン既に布教しました。(1ターン1回まで)"); return { ok: false }; }
 
     const distance = Math.max(Math.abs(targetTx - fromTx), Math.abs(targetTz - fromTz));
     if (distance !== 1) { reply(player, "§c布教は隣接する都市に対してのみ行えます。"); return { ok: false }; }
@@ -952,6 +954,7 @@ export function cmdProselytize(player, fromTx, fromTz, targetTx, targetTz) {
     const pressure = calculateProselytizePressure(unit);
     addReligiousPressure(targetTile.city, player.id, pressure);
     unit.evangelismPower -= 1;
+    unit.hasProselytizedThisTurn = true;
 
     const religionName = getReligionName(player) ?? "自国の宗教";
     let message = `§d🙏 ${player.name} の${unit.label ?? "宗教ユニット"}が【${targetTile.city.name}】で布教し、【${religionName}】の宗教的圧力+${Math.floor(pressure)}！ (残り布教力: ${unit.evangelismPower})`;

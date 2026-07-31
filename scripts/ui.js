@@ -1259,19 +1259,24 @@ async function openProselytizeMenu(player, fromTx, fromTz) {
     const unit = source?.religiousUnit;
     if (!unit || unit.ownerId !== player.id) { await openMainMenu(player); return; }
 
-    const tiles = getTiles();
+    const body = [`${unit.label ?? "宗教ユニット"} の布教力: ${unit.evangelismPower ?? 0}`];
     const items = [];
-    for (let dz = -1; dz <= 1; dz++) {
-        for (let dx = -1; dx <= 1; dx++) {
-            if (dx === 0 && dz === 0) continue;
-            const tx = fromTx + dx, tz = fromTz + dz;
-            const tile = tiles[`${tx},${tz}`];
-            if (tile?.city) items.push({ text: `⛪ (${tx}, ${tz}) | 都市: ${tile.city.name}`, action: { tx, tz } });
-        }
-    }
 
-    const body = [`${unit.label ?? "宗教ユニット"} の布教力: ${unit.evangelismPower ?? 0}`, "§7布教先の都市を選んでください(布教力を1消費します)。"];
-    if (items.length === 0) body.push("§7隣接する都市がありません。");
+    if (unit.hasProselytizedThisTurn) {
+        body.push("§7この宗教ユニットは今ターン既に布教しました。(1ターン1回まで。次の自分のターンで再度布教できます)");
+    } else {
+        const tiles = getTiles();
+        for (let dz = -1; dz <= 1; dz++) {
+            for (let dx = -1; dx <= 1; dx++) {
+                if (dx === 0 && dz === 0) continue;
+                const tx = fromTx + dx, tz = fromTz + dz;
+                const tile = tiles[`${tx},${tz}`];
+                if (tile?.city) items.push({ text: `⛪ (${tx}, ${tz}) | 都市: ${tile.city.name}`, action: { tx, tz } });
+            }
+        }
+        body.push("§7布教先の都市を選んでください(布教力を1消費します)。");
+        if (items.length === 0) body.push("§7隣接する都市がありません。");
+    }
 
     await showPaginatedMenu(
         getRealPlayer(player), "🙏 布教する", body.join("\n"), items,

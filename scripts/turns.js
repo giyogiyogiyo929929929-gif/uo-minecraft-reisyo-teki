@@ -566,10 +566,12 @@ function processPlayerTurnStart(playerId) {
             unit.movementRemaining = unit.movement ?? 0;
             movementRefreshed = true;
         }
-        // 💡 宗教ユニット(別レイヤー)の移動力も、戦闘ユニットと同様に毎ターン回復させる。
+        // 💡 宗教ユニット(別レイヤー)の移動力・布教可否も、戦闘ユニットと同様に毎ターン回復させる。
+        //    布教は全ての伝道者につき1ターン1回までなので、このタイミングでフラグを解除する。
         const religiousUnit = tiles[key].religiousUnit;
         if (religiousUnit?.ownerId === playerId) {
             religiousUnit.movementRemaining = religiousUnit.movement ?? 0;
+            religiousUnit.hasProselytizedThisTurn = false;
             movementRefreshed = true;
         }
         if (tiles[key].ownerId === playerId && tiles[key].city) {

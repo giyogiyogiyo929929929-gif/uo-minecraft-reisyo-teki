@@ -147,7 +147,7 @@ system.runInterval(() => {
                 : "§7戦闘ユニット: なし";
             const religiousUnit = tile.religiousUnit;
             const religiousUnitText = religiousUnit
-                ? `\n§d[Missionary] ${religiousUnit.label ?? religiousUnit.id} | HP: ${religiousUnit.hp ?? 0}/${religiousUnit.maxHp ?? 100} | 布教力: ${religiousUnit.evangelismPower ?? 0} | 移動力: ${religiousUnit.movementRemaining ?? religiousUnit.movement ?? 0}/${religiousUnit.movement ?? 0}`
+                ? `\n§d[Missionary] ${religiousUnit.label ?? religiousUnit.id} | HP: ${religiousUnit.hp ?? 0}/${religiousUnit.maxHp ?? 100} | 布教力: ${religiousUnit.evangelismPower ?? 0} | 移動力: ${religiousUnit.movementRemaining ?? religiousUnit.movement ?? 0}/${religiousUnit.movement ?? 0}${religiousUnit.hasProselytizedThisTurn ? " | §7(今ターン布教済み)" : ""}`
                 : "";
             
             // 算出量の可視化 ([Food]食料 / [Prod]生産) ※マス自体が持つベース値
