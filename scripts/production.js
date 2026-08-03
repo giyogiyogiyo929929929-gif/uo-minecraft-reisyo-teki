@@ -205,6 +205,31 @@ export const PRODUCTION_DEFS = {
         })),
         completeMessage: (city) => `§e[Warrior]【${city.name}】にうおｗを配置しました！ (HP: 100/100、戦闘力: 20)`,
     },
+    scout: {
+        label: "斥候",
+        icon: "[Scout]",
+        category: "unit",
+        cost: 20,
+        requiresEmptyCombatTile: true,
+        onComplete: (city, ctx) => placeProducedCombatUnit(ctx, (ownerId, ownerName) => ({
+            id: "scout", label: "斥候", hp: 100, maxHp: 100, combatStrength: 15,
+            movement: 2, movementRemaining: 2, attackRange: 1, ownerId, ownerName,
+        })),
+        completeMessage: (city) => `§e[Scout]【${city.name}】に斥候を配置しました！ (HP: 100/100、戦闘力：15、移動力：2)`,
+    },
+    spearman: {
+        label: "槍兵",
+        icon: "[Spearman]",
+        category: "unit",
+        cost: 40,
+        requiresEmptyCombatTile: true,
+        requiresTechnology: "mining",
+        onComplete: (city, ctx) => placeProducedCombatUnit(ctx, (ownerId, ownerName) => ({
+            id: "spearman", label: "槍兵", hp: 100, maxHp: 100, combatStrength: 25,
+            movement: 1, movementRemaining: 1, attackRange: 1, ownerId, ownerName,
+        })),
+        completeMessage: (city) => `§e[Spearman]【${city.name}】に槍兵を配置しました！ (HP: 100/100、戦闘力：25)`,
+    },
     tradingPost: {
         label: "交易所",
         icon: "[Trade]",
