@@ -37,8 +37,23 @@ export const TECHNOLOGIES = {
     ballistics: { label: "弾道学", cost: 60, prerequisites: ["militaryScience"] },
     // 💡 ロケット工学：ロケット砲の生産に必要。前提条件として弾道学が必要。
     rocketry: { label: "ロケット工学", cost: 70, prerequisites: ["ballistics"] },
-    // 💡 鉄鋼：機関銃の生産に必要。前提条件として交換可能部品が必要。
+    // 💡 鉄鋼：機関銃・戦艦の生産に必要。前提条件として交換可能部品が必要。
     steel: { label: "鉄鋼", cost: 80, prerequisites: ["replaceableParts"] },
+    // === 海軍・航空ユニット用の技術 ===
+    shipbuilding: { label: "造船", cost: 15, prerequisites: [] },
+    celestialNavigation: { label: "天体観測", cost: 25, prerequisites: ["shipbuilding"] },
+    steamPower: { label: "蒸気動力", cost: 45, prerequisites: ["coal"] },
+    electricity: { label: "電気", cost: 55, prerequisites: ["steamPower"] },
+    flight: { label: "飛行", cost: 50, prerequisites: ["physics"] },
+    advancedFlight: { label: "高度飛行", cost: 70, prerequisites: ["flight", "steel"] },
+    radar: { label: "レーダー", cost: 75, prerequisites: ["electricity"] },
+    radio: { label: "無線", cost: 60, prerequisites: ["electricity"] },
+    ammunition: { label: "弾薬", cost: 50, prerequisites: ["gunpowder"] },
+    coal: { label: "炭素理論", cost: 35, prerequisites: ["chemistry"] },
+    chemistry: { label: "化学", cost: 30, prerequisites: ["scientificMethod"] },
+    scientificMethod: { label: "科学的方法", cost: 25, prerequisites: ["education"] },
+    education: { label: "教育", cost: 20, prerequisites: ["writing"] },
+    writing: { label: "文字", cost: 15, prerequisites: [] },
 };
 
 export const CIVICS = {

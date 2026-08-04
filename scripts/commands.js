@@ -1,6 +1,6 @@
 // commands.js
 import { world, system, BlockPermutation, PlayerPermissionLevel } from "@minecraft/server";
-import { generateMap, TERRAIN_TYPES, worldToTile, TILE_SIZE, RESOURCE_TYPES, ASSUMED_SIMULATION_RANGE_BLOCKS } from "./mapGen.js";
+import { generateMap, TERRAIN_TYPES, TERRAIN_CATEGORY, worldToTile, TILE_SIZE, RESOURCE_TYPES, ASSUMED_SIMULATION_RANGE_BLOCKS } from "./mapGen.js";
 import { getMapConfig, setMapConfig, getTile, setTile, resetAll, setTiles, getTiles } from "./state.js";
 import { joinGame, startGame, endTurn, forceEndTurn, turnInfoText, isPlayersTurn, endGame, getTurnState, setTurnState, getCityCurrentYields, resolveMissileImpact, getPlayerColor, checkAndAnnounceVictory } from "./turns.js";
 import { PRODUCTION_DEFS, canStartProduction, startProduction, cancelProduction, addWorkers, consumeWorkerAction, hasAvailableWorkerAction } from "./production.js";
@@ -1113,6 +1113,19 @@ export function cmdMoveCombatUnit(player, fromTx, fromTz, toTx, toTz) {
     if (!unit || unit.ownerId !== player.id) { reply(player, "§cこのマスに移動可能なあなたの戦闘ユニットはいません。"); return { ok: false }; }
     if (!target) { reply(player, "§c移動先がマップ外です。"); return { ok: false }; }
     if (target.combatUnit) { reply(player, "§c移動先にはすでに戦闘ユニットが存在します。"); return { ok: false }; }
+
+    // 💡 ユニットの terrainType に基づき、移動先の地形カテゴリを検証する
+    const unitTerrainType = unit.terrainType ?? "land"; // デフォルトは陸上
+    const targetTerrain = TERRAIN_CATEGORY.land.includes(target.type) ? "land" : 
+                          TERRAIN_CATEGORY.water.includes(target.type) ? "water" : "other";
+    
+    // 陸上ユニットは陸地のみ、海軍ユニットは水タイルのみ、航空ユニットはどこでも移動可能
+    if (unitTerrainType === "land" && targetTerrain !== "land") {
+        reply(player, "§c陸上ユニットは水タイルへ移動できません。"); return { ok: false };
+    }
+    if (unitTerrainType === "sea" && targetTerrain !== "water") {
+        reply(player, "§c海軍ユニットは陸地へ移動できません。"); return { ok: false };
+    }
 
     const distance = Math.max(Math.abs(toTx - fromTx), Math.abs(toTz - fromTz));
     const remaining = unit.movementRemaining ?? unit.movement ?? 0;
