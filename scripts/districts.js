@@ -50,6 +50,19 @@ export const DISTRICT_DEFS = {
         ],
         completeMessage: (tx, tz) => `§e🎉 (${tx}, ${tz}) に聖地が完成しました！`,
     },
+    aerodrome: {
+        label: "飛行場",
+        icon: "[Aero]",
+        cost: 80,
+        requiresTechnology: "flight",
+        // 💡 航空ユニットを最大 4 機まで格納可能
+        airSlots: 4,
+        // 💡 飛行場に隣接する「草原」「森林」1 マスにつき食料 +1(上限 3)。
+        adjacencyBonuses: [
+            { id: "aerodromeFood", label: "草地からの補給恩恵", match: matchesTerrain("grassland", "forest"), yieldPerMatch: { food: 1 }, maxMatches: 3 },
+        ],
+        completeMessage: (tx, tz) => `§e🎉 (${tx}, ${tz}) に飛行場が完成しました！ (航空ユニットを最大 4 機まで格納可能)`,
+    },
 };
 
 export function getDistrictDef(id) {
