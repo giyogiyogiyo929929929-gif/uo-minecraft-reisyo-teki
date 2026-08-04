@@ -35,6 +35,12 @@ export const TERRAIN_TYPES = {
     lake: { label: "湖", weight: 0 }, // 自動変化用
 };
 
+/** 地形タイプのカテゴリ分類。移動ルールの判定に使用する。 */
+export const TERRAIN_CATEGORY = {
+    land: ["grassland", "river", "mountain", "desert", "forest", "rainforest", "cold"],
+    water: ["sea", "pond", "lake"],
+};
+
 // 💎 資源の定義
 export const RESOURCE_TYPES = {
     iron: { label: "鉄", category: "戦略", allowedTerrains: ["mountain", "grassland"], block: "minecraft:iron_ore" },
