@@ -9,6 +9,36 @@ export const TECHNOLOGIES = {
     archery: { label: "弓術", cost: 15, prerequisites: ["animalHusbandry"] },
     // 💡 陶磁器: 前提条件なし。取得後、都市に穀物庫(食料生産量+1、住居+2)を建設できるようになる。
     pottery: { label: "陶磁器", cost: 10, prerequisites: [] },
+    // 💡 鉄加工: 剣士の生産に必要。前提条件として採掘が必要。
+    ironWorking: { label: "鉄加工", cost: 20, prerequisites: ["mining"] },
+    // 💡 乗馬: 騎士の生産に必要。前提条件として畜産が必要。
+    horsebackRiding: { label: "乗馬", cost: 20, prerequisites: ["animalHusbandry"] },
+    // 💡 騎士道: 騎士の生産に必要。前提条件として乗馬が必要。
+    chivalry: { label: "騎士道", cost: 30, prerequisites: ["horsebackRiding"] },
+    // 💡 弩: 弩兵の生産に必要。前提条件として鉄加工が必要。
+    machinery: { label: "機械技術", cost: 35, prerequisites: ["ironWorking"] },
+    // 💡 火薬: マスケット銃兵の生産に必要。前提条件として機械技術が必要。
+    gunpowder: { label: "火薬", cost: 45, prerequisites: ["machinery"] },
+    // 💡 戦術: 騎兵の生産に必要。前提条件として火薬が必要。
+    tactics: { label: "戦術", cost: 55, prerequisites: ["gunpowder"] },
+    // 💡 ライフリング: 来膛銃兵の生産に必要。前提条件として戦術が必要。
+    rifling: { label: "ライフリング", cost: 65, prerequisites: ["tactics"] },
+    // 💡 交換可能部品: 歩兵の生産に必要。前提条件としてライフリングが必要。
+    replaceableParts: { label: "交換可能部品", cost: 75, prerequisites: ["rifling"] },
+    // 💡 総合兵器: 戦車の生産に必要。前提条件として交換可能部品が必要。
+    combinedArms: { label: "総合兵器", cost: 85, prerequisites: ["replaceableParts"] },
+    // 💡 工学：カタパルトの生産に必要。前提条件として採掘が必要。
+    engineering: { label: "工学", cost: 25, prerequisites: ["mining"] },
+    // 💡 物理学：トレビュシェットの生産に必要。前提条件として工学が必要。
+    physics: { label: "物理学", cost: 40, prerequisites: ["engineering"] },
+    // 💡 軍事科学：射石砲の生産に必要。前提条件として物理学が必要。
+    militaryScience: { label: "軍事科学", cost: 50, prerequisites: ["physics"] },
+    // 💡 弾道学：大砲の生産に必要。前提条件として軍事科学が必要。
+    ballistics: { label: "弾道学", cost: 60, prerequisites: ["militaryScience"] },
+    // 💡 ロケット工学：ロケット砲の生産に必要。前提条件として弾道学が必要。
+    rocketry: { label: "ロケット工学", cost: 70, prerequisites: ["ballistics"] },
+    // 💡 鉄鋼：機関銃の生産に必要。前提条件として交換可能部品が必要。
+    steel: { label: "鉄鋼", cost: 80, prerequisites: ["replaceableParts"] },
 };
 
 export const CIVICS = {
