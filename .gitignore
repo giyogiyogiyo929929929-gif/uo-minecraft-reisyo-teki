@@ -1,5 +1,18 @@
-# No changes needed - only source/config files were modified
+```
+# Logs and temp files
+*.log
+*.tmp
+*.swp
 
-# README.md and scripts/production.js are source files that should not be ignored
+# Environment
+.env
+.env.local
+.env.
 
-# Current .gitignore is empty and no build artifacts, dependencies, or temp files detected in changes
+# Editors
+.vscode/
+.idea/
+
+# Original rules preserved
+*.log
+```
