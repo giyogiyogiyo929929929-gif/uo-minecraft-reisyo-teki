@@ -561,6 +561,7 @@ export const PRODUCTION_DEFS = {
         category: "unit",
         cost: 90,
         requiresEmptyCombatTile: true,
+        requiresDistrict: "aerodrome",
         terrainType: "air",
         requiresTechnology: "flight",
         onComplete: (city, ctx) => placeProducedCombatUnit(ctx, (ownerId, ownerName) => ({
@@ -575,6 +576,7 @@ export const PRODUCTION_DEFS = {
         icon: "[Fighter]",
         category: "unit",
         cost: 140,
+        requiresDistrict: "aerodrome",
         requiresEmptyCombatTile: true,
         terrainType: "air",
         requiresTechnology: "advancedFlight",
@@ -589,6 +591,7 @@ export const PRODUCTION_DEFS = {
         label: "爆撃機",
         icon: "[Bomber]",
         category: "unit",
+        requiresDistrict: "aerodrome",
         cost: 180,
         requiresEmptyCombatTile: true,
         terrainType: "air",
@@ -603,6 +606,7 @@ export const PRODUCTION_DEFS = {
     reconPlane: {
         label: "偵察機",
         icon: "[Recon]",
+        requiresDistrict: "aerodrome",
         category: "unit",
         cost: 100,
         requiresEmptyCombatTile: true,
@@ -733,6 +737,21 @@ export function canStartProduction(city, id, tile = null, player = null) {
     }
     if (def.category === "building" && city.districtConstruction) {
         return { ok: false, message: "§c区域を建設中はこの都市で新しい建造物を着工できません。" };
+    }
+    if (def.requiresDistrict) {
+        const allTiles = ctx?.tiles ?? {};
+        let hasDistrict = false;
+        for (const key in allTiles) {
+            const t = allTiles[key];
+            if (t.ownerId === city.ownerId && t.district && t.district.id === def.requiresDistrict) {
+                hasDistrict = true;
+                break;
+            }
+        }
+        if (!hasDistrict) {
+            const districtDef = getDistrictDef(def.requiresDistrict);
+            return { ok: false, message: `§c【${def.label}】の生産には区域【${districtDef?.label ?? def.requiresDistrict}】が必要です。` };
+        }
     }
     if (def.requiresTechnology) {
         const hasTech = !!player && hasCompletedProgress(player, "technology", def.requiresTechnology);
