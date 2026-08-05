@@ -41,6 +41,13 @@ export const TERRAIN_CATEGORY = {
     water: ["sea", "pond", "lake"],
 };
 
+/** 地形タイプからカテゴリ（"land"、"water"、"other"）を返す共通関数。DRY原則に基づき重複ロジックを統合。 */
+export function getTerrainCategory(type) {
+    if (TERRAIN_CATEGORY.land.includes(type)) return "land";
+    if (TERRAIN_CATEGORY.water.includes(type)) return "water";
+    return "other";
+}
+
 // 💎 資源の定義
 export const RESOURCE_TYPES = {
     iron: { label: "鉄", category: "戦略", allowedTerrains: ["mountain", "grassland"], block: "minecraft:iron_ore" },
