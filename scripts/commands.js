@@ -1,6 +1,6 @@
 // commands.js
 import { world, system, BlockPermutation, PlayerPermissionLevel } from "@minecraft/server";
-import { generateMap, TERRAIN_TYPES, TERRAIN_CATEGORY, worldToTile, TILE_SIZE, RESOURCE_TYPES, ASSUMED_SIMULATION_RANGE_BLOCKS } from "./mapGen.js";
+import { generateMap, TERRAIN_TYPES, TERRAIN_CATEGORY, getTerrainCategory, worldToTile, TILE_SIZE, RESOURCE_TYPES, ASSUMED_SIMULATION_RANGE_BLOCKS } from "./mapGen.js";
 import { getMapConfig, setMapConfig, getTile, setTile, resetAll, setTiles, getTiles } from "./state.js";
 import { joinGame, startGame, endTurn, forceEndTurn, turnInfoText, isPlayersTurn, endGame, getTurnState, setTurnState, getCityCurrentYields, resolveMissileImpact, getPlayerColor, checkAndAnnounceVictory } from "./turns.js";
 import { PRODUCTION_DEFS, canStartProduction, startProduction, cancelProduction, addWorkers, consumeWorkerAction, hasAvailableWorkerAction } from "./production.js";
@@ -495,6 +495,12 @@ export function cmdSettle(player) {
     if (!tile) { reply(player, "§cマス情報がありません。"); return; }
     if (tile.ownerId && tile.ownerId !== player.id) { reply(player, "§c他領地には建設できません。"); return; }
     if (tile.city) { reply(player, "§c既に都市が存在します。"); return; }
+    
+    // 💡 都市は陸上でのみ建設可能
+    if (getTerrainCategory(tile.type) !== "land") {
+        reply(player, "§c都市は陸上でのみ建設できます。");
+        return;
+    }
 
     const allTiles = getTiles();
     let hasAnyCity = false;
@@ -699,6 +705,13 @@ export function cmdInstallFacility(player, facilityId) {
     if (tx < 0 || tz < 0 || tx >= config.width || tz >= config.height) { reply(player, "§c範囲外です。"); return { ok: false }; }
 
     const tile = getTile(tx, tz);
+    
+    // 💡 施設は陸上でのみ建設可能
+    if (getTerrainCategory(tile.type) !== "land") {
+        reply(player, "§c施設は陸上でのみ建設できます。");
+        return { ok: false };
+    }
+    
     const check = canInstallFacility(tile, facilityId, player.id, player);
     if (!check.ok) { reply(player, check.message); return { ok: false }; }
 
@@ -761,6 +774,13 @@ export function cmdStartDistrict(player, districtId) {
     const tile = getTile(tx, tz);
 
     // 💡 帰属先都市を決定する(cmdChop/cmdInstallFacilityと同じロジック)
+    // 💡 区域は陸上でのみ建設可能
+    if (getTerrainCategory(tile.type) !== "land") {
+        reply(player, "§c 区域は陸上でのみ建設できます。");
+        return { ok: false };
+    }
+
+
     let cityKey = tile?.belongsToCityKey;
     if (!cityKey) {
         const allTiles = getTiles();
@@ -1116,8 +1136,7 @@ export function cmdMoveCombatUnit(player, fromTx, fromTz, toTx, toTz) {
 
     // 💡 ユニットの terrainType に基づき、移動先の地形カテゴリを検証する
     const unitTerrainType = unit.terrainType ?? "land"; // デフォルトは陸上
-    const targetTerrain = TERRAIN_CATEGORY.land.includes(target.type) ? "land" : 
-                          TERRAIN_CATEGORY.water.includes(target.type) ? "water" : "other";
+    const targetTerrain = getTerrainCategory(target.type);
     
     // 陸上ユニットは陸地のみ、海軍ユニットは水タイルのみ、航空ユニットはどこでも移動可能
     if (unitTerrainType === "land" && targetTerrain !== "land") {
