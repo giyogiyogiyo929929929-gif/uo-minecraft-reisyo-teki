@@ -4,7 +4,7 @@
 import { world, system, ItemStack } from "@minecraft/server";
 import { registerScriptCommands } from "./commands.js";
 import { openMainMenu } from "./ui.js";
-import { getTurnState, getTiles, getMapConfig } from "./state.js";
+import { getTurnState, getTiles, getMapConfig, getStateVersion } from "./state.js";
 import { worldToTile, TERRAIN_TYPES, RESOURCE_TYPES } from "./mapGen.js";
 import { getCityCurrentYields, forceEndTurn } from "./turns.js";
 import { PRODUCTION_DEFS } from "./production.js";
@@ -13,6 +13,38 @@ import { getEffectiveCombatStrength, getEffectiveRangedStrength, isRangedUnit } 
 import { getActingPlayer, resolveCivName } from "./civs.js";
 
 const MENU_ITEM_ID = "minecraft:compass";
+
+// 都市産出量は0.5秒ごとに同じ計算を繰り返す必要がないため短時間キャッシュする。
+// stateVersion が変化した場合は即座に無効化し、マップ状態の変更を反映する。
+const cityYieldCache = new Map();
+let cityYieldCacheVersion = -1;
+let cityYieldCacheTick = -1;
+const CITY_YIELD_CACHE_TICKS = 20; // 最大1秒。手動ブロック変更なども長時間古くならないようにする。
+
+function getCachedCityCurrentYields(cityKey, tiles) {
+    const version = getStateVersion();
+    const currentTick = system.currentTick;
+
+    if (cityYieldCacheVersion !== version || currentTick - cityYieldCacheTick >= CITY_YIELD_CACHE_TICKS) {
+        cityYieldCache.clear();
+        cityYieldCacheVersion = version;
+        cityYieldCacheTick = currentTick;
+    }
+
+    const cached = cityYieldCache.get(cityKey);
+    if (cached) return cached;
+
+    const yields = getCityCurrentYields(cityKey, tiles);
+    cityYieldCache.set(cityKey, yields);
+    return yields;
+}
+
+/** キャッシュを明示的に破棄する。 */
+function clearCityYieldCache() {
+    cityYieldCache.clear();
+    cityYieldCacheVersion = -1;
+    cityYieldCacheTick = -1;
+}
 
 // 修正①：イベント登録は worldLoad に入れず、最初から直接実行する
 registerScriptCommands();
@@ -83,6 +115,7 @@ world.afterEvents.playerLeave.subscribe((eventData) => {
     system.run(() => {
         const result = forceEndTurn();
         if (result.ok) {
+            clearCityYieldCache();
             world.sendMessage(`§7(${playerName} が退出したため、自動的にターンをスキップしました)`);
         }
     });
@@ -162,7 +195,7 @@ system.runInterval(() => {
 
             if (cityTile && cityTile.city) {
                 // 💡 市民配置ロジックを考慮した「今」実際に出ている産出量
-                const yields = getCityCurrentYields(cityKey, tiles);
+                const yields = getCachedCityCurrentYields(cityKey, tiles);
                 const oilText = yields.oil > 0 ? ` §7| §b🛢️x${yields.oil}` : "";
                 const faithText = (yields.faith ?? 0) > 0 ? ` §7| §d🙏x${yields.faith}` : "";
                 currentYieldLine = `\n§f今の産出(都市全体): §a[Food]x${yields.food} §7| §6[Prod]x${yields.production}${oilText}${faithText}`;
@@ -176,7 +209,7 @@ system.runInterval(() => {
                     const def = PRODUCTION_DEFS[c.production.id];
                     if (def) {
                         const progressText = Math.floor(c.production.progress * 10) / 10;
-                        productionText = ` §7| ${def.icon}${def.label}生産中(${progressText}/${c.production.cost})`;
+                        productionText = ` §7| ${def.icon}${def.label}生産中(${progressText}/${def.cost})`;
                     }
                 }
 
@@ -187,7 +220,7 @@ system.runInterval(() => {
                 if (c.districtConstruction) {
                     const districtDef = getDistrictDef(c.districtConstruction.id);
                     const districtProgressText = Math.floor(c.districtConstruction.progress * 10) / 10;
-                    districtProductionText = ` §7| §5${districtDef?.icon ?? "[Sacred]"}${districtDef?.label ?? c.districtConstruction.id}区域建設中(${districtProgressText}/${c.districtConstruction.cost})`;
+                    districtProductionText = ` §7| §5${districtDef?.icon ?? "[Sacred]"}${districtDef?.label ?? c.districtConstruction.id}区域建設中(${districtProgressText}/${districtConstruction.cost})`;
                 }
                 cityInfoLine = `\n§6【${c.isCapital ? "首都" : "都市"}: ${c.name}】§f 人口:§a${c.population}§f/§e${c.housing} §f| [Worker]${c.workers ?? 0}人 §f| [Food]貯留${c.foodStorage ?? 0} §f| §c飢餓${c.starvationTurns ?? 0}/3${productionText}${tpText}${missileText}${faithStorageText}${districtProductionText}`;
             }
