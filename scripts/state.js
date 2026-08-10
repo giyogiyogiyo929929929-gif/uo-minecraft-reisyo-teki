@@ -5,8 +5,26 @@ import { world } from "@minecraft/server";
 
 const KEY_CONFIG = "civ:mapConfig";
 const KEY_TURN = "civ:turn";
-// 💡 分割セーブ用のキーの接頭辞を定義します
 const KEY_TILE_ROW_PREFIX = "civ:tiles_row_";
+
+// Dynamic Property の読み書きを毎回繰り返さないためのメモリキャッシュ。
+// ワールド再読み込み後は最初の getTiles() で保存データから復元する。
+let tilesCache = null;
+let tilesCacheConfigKey = null;
+let tileRowsCache = null;
+let stateVersion = 0;
+
+function makeConfigKey(config) {
+    return config ? JSON.stringify({
+        originX: config.originX,
+        originY: config.originY,
+        originZ: config.originZ,
+        width: config.width,
+        height: config.height,
+        tileSize: config.tileSize,
+        ySurface: config.ySurface,
+    }) : null;
+}
 
 /** マップ設定 { originX, originY, originZ, width, height, tileSize } を取得 */
 export function getMapConfig() {
@@ -21,73 +39,100 @@ export function getMapConfig() {
 
 export function setMapConfig(config) {
     world.setDynamicProperty(KEY_CONFIG, JSON.stringify(config));
+    tilesCache = null;
+    tileRowsCache = null;
+    tilesCacheConfigKey = makeConfigKey(config);
+    stateVersion++;
 }
 
-/** 
- * タイル情報 { "x,z": { type, ownerId, ownerName } } を取得
- * 💡 各行(Z座標)ごとに保存されているデータを合体させて、1つの大きなオブジェクトとして復元します
- */
+/** 初回だけ Dynamic Property の全行を読み込み、以後はメモリ上のオブジェクトを返す。 */
 export function getTiles() {
     const config = getMapConfig();
     if (!config) return {};
-    
-    const tiles = {};
-    const height = config.height;
 
-    for (let tz = 0; tz < height; tz++) {
+    const configKey = makeConfigKey(config);
+    if (tilesCache && tilesCacheConfigKey === configKey) return tilesCache;
+
+    const tiles = {};
+    const rowCache = new Array(config.height).fill(null);
+
+    for (let tz = 0; tz < config.height; tz++) {
         const raw = world.getDynamicProperty(`${KEY_TILE_ROW_PREFIX}${tz}`);
+        let rowTiles = {};
         if (typeof raw === "string") {
             try {
-                const rowTiles = JSON.parse(raw); // 例: { "0": { type... }, "1": { type... } }
-                for (const txStr in rowTiles) {
-                    tiles[`${txStr},${tz}`] = rowTiles[txStr];
-                }
+                rowTiles = JSON.parse(raw);
             } catch {
-                // 破損データは安全に無視
+                rowTiles = {};
             }
         }
+        rowCache[tz] = rowTiles;
+        for (const txStr in rowTiles) {
+            tiles[`${txStr},${tz}`] = rowTiles[txStr];
+        }
     }
-    return tiles;
+
+    tilesCache = tiles;
+    tileRowsCache = rowCache;
+    tilesCacheConfigKey = configKey;
+    return tilesCache;
 }
 
-/** 
- * タイル情報を保存
- * 💡 渡された tiles データをZ座標(行)ごとに分解し、それぞれのキーで個別保存して32KB制限を回避します
- */
+/** キャッシュ済みの行と内容が同一なら Dynamic Property の書き込みを省略する。 */
 export function setTiles(tiles) {
     const config = getMapConfig();
     if (!config) return;
 
-    const height = config.height;
-
-    // 行ごとにデータを分類する器を用意
-    const rows = Array.from({ length: height }, () => ({}));
-
+    const rows = Array.from({ length: config.height }, () => ({}));
     for (const key in tiles) {
         const [txStr, tzStr] = key.split(",");
-        const tx = parseInt(txStr, 10);
         const tz = parseInt(tzStr, 10);
-        
-        if (tz >= 0 && tz < height) {
-            rows[tz][tx] = tiles[key];
+        if (!Number.isInteger(tz) || tz < 0 || tz >= config.height) continue;
+        rows[tz][txStr] = tiles[key];
+    }
+
+    const previousRows = tileRowsCache;
+    for (let tz = 0; tz < config.height; tz++) {
+        const nextRaw = JSON.stringify(rows[tz]);
+        const previousRaw = previousRows?.[tz] == null ? null : JSON.stringify(previousRows[tz]);
+        if (nextRaw !== previousRaw) {
+            world.setDynamicProperty(`${KEY_TILE_ROW_PREFIX}${tz}`, nextRaw);
         }
     }
 
-    // 分類したデータを1行ずつ個別のキーでセーブする
-    for (let tz = 0; tz < height; tz++) {
-        world.setDynamicProperty(`${KEY_TILE_ROW_PREFIX}${tz}`, JSON.stringify(rows[tz]));
-    }
+    tilesCache = tiles;
+    tileRowsCache = rows;
+    tilesCacheConfigKey = makeConfigKey(config);
+    stateVersion++;
 }
 
+/** 単一タイルを取得。全マップの再読み込みは発生しない。 */
 export function getTile(tx, tz) {
-    const tiles = getTiles();
-    return tiles[`${tx},${tz}`] ?? null;
+    return getTiles()[`${tx},${tz}`] ?? null;
 }
 
+/** 単一タイルだけを更新し、その行だけ Dynamic Property に保存する。 */
 export function setTile(tx, tz, data) {
+    const config = getMapConfig();
+    if (!config || tz < 0 || tz >= config.height) return;
+
     const tiles = getTiles();
-    tiles[`${tx},${tz}`] = data;
-    setTiles(tiles);
+    const key = `${tx},${tz}`;
+    tiles[key] = data;
+
+    if (!tileRowsCache) tileRowsCache = Array.from({ length: config.height }, () => ({}));
+    if (!tileRowsCache[tz]) tileRowsCache[tz] = {};
+    tileRowsCache[tz][String(tx)] = data;
+
+    world.setDynamicProperty(`${KEY_TILE_ROW_PREFIX}${tz}`, JSON.stringify(tileRowsCache[tz]));
+    tilesCache = tiles;
+    tilesCacheConfigKey = makeConfigKey(config);
+    stateVersion++;
+}
+
+/** キャッシュの変更世代。将来の計算キャッシュの無効化にも利用できる。 */
+export function getStateVersion() {
+    return stateVersion;
 }
 
 /** ターン情報 { turnNumber, playerOrder: string[], currentIndex, started } */
@@ -107,10 +152,8 @@ export function setTurnState(state) {
     world.setDynamicProperty(KEY_TURN, JSON.stringify(state));
 }
 
-// 💡 リセット時に、保存していた全行のデータをきれいにお掃除します
 export function resetAll() {
     const config = getMapConfig();
-    
     if (config) {
         for (let tz = 0; tz < config.height; tz++) {
             world.setDynamicProperty(`${KEY_TILE_ROW_PREFIX}${tz}`, undefined);
@@ -119,4 +162,8 @@ export function resetAll() {
 
     world.setDynamicProperty(KEY_CONFIG, undefined);
     world.setDynamicProperty(KEY_TURN, undefined);
+    tilesCache = null;
+    tileRowsCache = null;
+    tilesCacheConfigKey = null;
+    stateVersion++;
 }
