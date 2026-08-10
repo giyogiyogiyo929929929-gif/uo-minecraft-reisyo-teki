@@ -12,6 +12,8 @@ const KEY_TILE_ROW_PREFIX = "civ:tiles_row_";
 let tilesCache = null;
 let tilesCacheConfigKey = null;
 let tileRowsCache = null;
+let mapConfigCache = null;
+let mapConfigLoaded = false;
 let stateVersion = 0;
 
 function makeConfigKey(config) {
@@ -28,17 +30,28 @@ function makeConfigKey(config) {
 
 /** マップ設定 { originX, originY, originZ, width, height, tileSize } を取得 */
 export function getMapConfig() {
+    // 0.5秒ごとのUI更新などでDynamic Propertyを毎回読む必要はない。
+    if (mapConfigLoaded) return mapConfigCache;
+
     const raw = world.getDynamicProperty(KEY_CONFIG);
-    if (typeof raw !== "string") return null;
-    try {
-        return JSON.parse(raw);
-    } catch {
+    if (typeof raw !== "string") {
+        mapConfigCache = null;
+        mapConfigLoaded = true;
         return null;
     }
+    try {
+        mapConfigCache = JSON.parse(raw);
+    } catch {
+        mapConfigCache = null;
+    }
+    mapConfigLoaded = true;
+    return mapConfigCache;
 }
 
 export function setMapConfig(config) {
     world.setDynamicProperty(KEY_CONFIG, JSON.stringify(config));
+    mapConfigCache = config;
+    mapConfigLoaded = true;
     tilesCache = null;
     tileRowsCache = null;
     tilesCacheConfigKey = makeConfigKey(config);
@@ -92,18 +105,22 @@ export function setTiles(tiles) {
     }
 
     const previousRows = tileRowsCache;
+    let changed = false;
     for (let tz = 0; tz < config.height; tz++) {
         const nextRaw = JSON.stringify(rows[tz]);
         const previousRaw = previousRows?.[tz] == null ? null : JSON.stringify(previousRows[tz]);
         if (nextRaw !== previousRaw) {
             world.setDynamicProperty(`${KEY_TILE_ROW_PREFIX}${tz}`, nextRaw);
+            changed = true;
         }
     }
 
+    // 実際に状態が変わった場合だけ世代を進める。
+    // これにより計算キャッシュが不要に全破棄されるのを防ぐ。
     tilesCache = tiles;
     tileRowsCache = rows;
     tilesCacheConfigKey = makeConfigKey(config);
-    stateVersion++;
+    if (changed) stateVersion++;
 }
 
 /** 単一タイルを取得。全マップの再読み込みは発生しない。 */
@@ -165,5 +182,7 @@ export function resetAll() {
     tilesCache = null;
     tileRowsCache = null;
     tilesCacheConfigKey = null;
+    mapConfigCache = null;
+    mapConfigLoaded = true;
     stateVersion++;
 }
