@@ -14,6 +14,7 @@ let tilesCacheConfigKey = null;
 let tileRowsCache = null;
 let mapConfigCache = null;
 let mapConfigLoaded = false;
+let turnStateCache = null;
 let stateVersion = 0;
 
 function makeConfigKey(config) {
@@ -154,19 +155,25 @@ export function getStateVersion() {
 
 /** ターン情報 { turnNumber, playerOrder: string[], currentIndex, started } */
 export function getTurnState() {
+    // UI更新やターン判定から何度呼ばれてもDynamic Propertyを読み直さない。
+    if (turnStateCache) return turnStateCache;
+
     const raw = world.getDynamicProperty(KEY_TURN);
     if (typeof raw !== "string") {
-        return { turnNumber: 1, playerOrder: [], currentIndex: 0, started: false };
+        turnStateCache = { turnNumber: 1, playerOrder: [], currentIndex: 0, started: false };
+        return turnStateCache;
     }
     try {
-        return JSON.parse(raw);
+        turnStateCache = JSON.parse(raw);
     } catch {
-        return { turnNumber: 1, playerOrder: [], currentIndex: 0, started: false };
+        turnStateCache = { turnNumber: 1, playerOrder: [], currentIndex: 0, started: false };
     }
+    return turnStateCache;
 }
 
 export function setTurnState(state) {
     world.setDynamicProperty(KEY_TURN, JSON.stringify(state));
+    turnStateCache = state;
 }
 
 export function resetAll() {
@@ -184,5 +191,6 @@ export function resetAll() {
     tilesCacheConfigKey = null;
     mapConfigCache = null;
     mapConfigLoaded = true;
+    turnStateCache = null;
     stateVersion++;
 }
