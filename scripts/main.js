@@ -220,7 +220,7 @@ system.runInterval(() => {
                 if (c.districtConstruction) {
                     const districtDef = getDistrictDef(c.districtConstruction.id);
                     const districtProgressText = Math.floor(c.districtConstruction.progress * 10) / 10;
-                    districtProductionText = ` §7| §5${districtDef?.icon ?? "[Sacred]"}${districtDef?.label ?? c.districtConstruction.id}区域建設中(${districtProgressText}/${districtConstruction.cost})`;
+                    districtProductionText = ` §7| §5${districtDef?.icon ?? "[Sacred]"}${districtDef?.label ?? c.districtConstruction.id}区域建設中(${districtProgressText}/${c.districtConstruction.cost})`;
                 }
                 cityInfoLine = `\n§6【${c.isCapital ? "首都" : "都市"}: ${c.name}】§f 人口:§a${c.population}§f/§e${c.housing} §f| [Worker]${c.workers ?? 0}人 §f| [Food]貯留${c.foodStorage ?? 0} §f| §c飢餓${c.starvationTurns ?? 0}/3${productionText}${tpText}${missileText}${faithStorageText}${districtProductionText}`;
             }
