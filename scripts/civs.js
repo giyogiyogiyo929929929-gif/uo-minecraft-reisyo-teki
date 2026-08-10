@@ -79,13 +79,6 @@ export function resolveCivName(civId) {
     return getVirtualCivById(civId)?.name ?? null;
 }
 
-/**
- * 今この国家を実際に操作できる人間がオンラインかどうかを判定する。
- * ・実プレイヤーの国家なら、本人がオンラインかどうか。
- * ・テスト国家(仮想国家)なら、それを操作している人(controllerId)がオンラインかどうか
- *   (テスト国家自身は実体を持たないため、操作者がいなければ誰も動かせない)。
- * ターンの自動スキップ判定(誰もいない国家の手番を待ち続けてゲームが止まるのを防ぐ)に使う。
- */
 export function isCivControllable(civId) {
     if (world.getAllPlayers().some(p => p.id === civId)) return true;
     const civ = getVirtualCivById(civId);
@@ -116,6 +109,11 @@ export function getRealPlayer(player) {
     return player?.__realPlayer ?? player;
 }
 
+/**
+ * 実プレイヤーをプロトタイプにした薄いラッパーを返す。
+ * ネイティブ Player のメソッドは実体を this として呼び出せるため、
+ * Proxy の不変条件違反を避けつつ、仮想国家のID/名前/保存領域だけを差し替える。
+ */
 export function getActingPlayer(realPlayer) {
     const activeId = getActiveCivId(realPlayer);
     if (activeId === realPlayer.id) return realPlayer;
@@ -123,32 +121,11 @@ export function getActingPlayer(realPlayer) {
     const civ = getVirtualCivById(activeId);
     if (!civ) return realPlayer;
 
-    return new Proxy({}, {
-        get(target, prop) {
-            if (prop === "id") return civ.id;
-            if (prop === "name") return civ.name;
-            if (prop === "__realPlayer") return realPlayer;
-
-            if (prop === "getDynamicProperty") {
-                return (key) => world.getDynamicProperty(`civ:npc:${civ.id}:${key}`);
-            }
-            if (prop === "setDynamicProperty") {
-                return (key, val) => world.setDynamicProperty(`civ:npc:${civ.id}:${key}`, val);
-            }
-
-            const value = Reflect.get(realPlayer, prop);
-            if (typeof value === "function") {
-                return value.bind(realPlayer);
-            }
-            return value;
-        },
-        set(target, prop, value) {
-            realPlayer[prop] = value;
-            return true;
-        },
-        has(target, prop) {
-            if (prop === "id" || prop === "name" || prop === "__realPlayer") return true;
-            return prop in realPlayer;
-        }
-    });
+    const acting = Object.create(realPlayer);
+    Object.defineProperty(acting, "__realPlayer", { value: realPlayer, enumerable: false });
+    Object.defineProperty(acting, "id", { value: civ.id, enumerable: true, configurable: true });
+    Object.defineProperty(acting, "name", { value: civ.name, enumerable: true, configurable: true });
+    acting.getDynamicProperty = (key) => world.getDynamicProperty(`civ:npc:${civ.id}:${key}`);
+    acting.setDynamicProperty = (key, value) => world.setDynamicProperty(`civ:npc:${civ.id}:${key}`, value);
+    return acting;
 }
