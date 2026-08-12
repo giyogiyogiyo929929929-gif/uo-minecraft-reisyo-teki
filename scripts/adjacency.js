@@ -81,28 +81,14 @@ export function matchesAnyCity() {
 }
 
 /**
- * 指定したマスの周囲8マスを、渡されたルール一覧と照合し、加算されるべき量を合算する。
- * @param {number} tx
- * @param {number} tz
- * @param {any} tiles
- * @param {Array<any>} rules AdjacencyBonusRuleの配列(未指定/空なら何も加算しない)
- * @returns {{ [yieldKey: string]: number }} 例: { food: 2, production: 1 }
+ * 隣接マス一覧を既に取得済みの場合に、ルールとの照合と加算を行う内部関数。
+ * getBuildingAdjacencyYields() では同じ都市について建造物ごとにルールを評価するため、
+ * 8近傍の取得を建造物ごとに繰り返さないようにする。
  */
-export function getAdjacencyBonus(tx, tz, tiles, rules) {
-    return getAdjacencyBonusDetailed(tx, tz, tiles, rules).totals;
-}
-
-/**
- * getAdjacencyBonus() の内訳付き版。どのルールが何マス分マッチして、何が加算されたのかを
- * 個別に返すため、UIでの内訳表示やデバッグに使える。
- * @returns {{ totals: {[k:string]:number}, breakdown: Array<{id:string, label:string, matchCount:number, yields:{[k:string]:number}}> }}
- */
-export function getAdjacencyBonusDetailed(tx, tz, tiles, rules) {
+function getAdjacencyBonusDetailedFromNeighbors(neighbors, rules) {
     const totals = {};
     const breakdown = [];
     if (!Array.isArray(rules) || rules.length === 0) return { totals, breakdown };
-
-    const neighbors = getAdjacentTiles(tx, tz, tiles);
 
     for (const rule of rules) {
         if (typeof rule?.match !== "function" || !rule.yieldPerMatch) continue;
@@ -130,6 +116,28 @@ export function getAdjacencyBonusDetailed(tx, tz, tiles, rules) {
 }
 
 /**
+ * 指定したマスの周囲8マスを、渡されたルール一覧と照合し、加算されるべき量を合算する。
+ * @param {number} tx
+ * @param {number} tz
+ * @param {any} tiles
+ * @param {Array<any>} rules AdjacencyBonusRuleの配列(未指定/空なら何も加算しない)
+ * @returns {{ [yieldKey: string]: number }} 例: { food: 2, production: 1 }
+ */
+export function getAdjacencyBonus(tx, tz, tiles, rules) {
+    return getAdjacencyBonusDetailed(tx, tz, tiles, rules).totals;
+}
+
+/**
+ * getAdjacencyBonus() の内訳付き版。どのルールが何マス分マッチして、何が加算されたのかを
+ * 個別に返すため、UIでの内訳表示やデバッグに使える。
+ * @returns {{ totals: {[k:string]:number}, breakdown: Array<{id:string, label:string, matchCount:number, yields:{[k:string]:number}}> }}
+ */
+export function getAdjacencyBonusDetailed(tx, tz, tiles, rules) {
+    const neighbors = getAdjacentTiles(tx, tz, tiles);
+    return getAdjacencyBonusDetailedFromNeighbors(neighbors, rules);
+}
+
+/**
  * 指定した都市が現在保有している建造物すべてについて、隣接ボーナスをまとめて計算する。
  * production.js の PRODUCTION_DEFS を渡すことで、「city[buildingId] が true の建造物」を
  * 自動的に拾い、それぞれの adjacencyBonuses を都市のマス(tx, tz)基準で計算・合算する。
@@ -145,12 +153,15 @@ export function getBuildingAdjacencyYields(tx, tz, tiles, city, productionDefs) 
     const totals = {};
     if (!city || !productionDefs) return totals;
 
+    // 同じ都市については建造物ごとに同じ8近傍を参照するため、1回だけ取得する。
+    const neighbors = getAdjacentTiles(tx, tz, tiles);
+
     for (const buildingId in productionDefs) {
         const def = productionDefs[buildingId];
         if (def?.category !== "building") continue;
         if (!def.adjacencyBonuses || !city[buildingId]) continue;
 
-        const bonus = getAdjacencyBonus(tx, tz, tiles, def.adjacencyBonuses);
+        const bonus = getAdjacencyBonusDetailedFromNeighbors(neighbors, def.adjacencyBonuses).totals;
         for (const key in bonus) {
             totals[key] = (totals[key] ?? 0) + bonus[key];
         }
