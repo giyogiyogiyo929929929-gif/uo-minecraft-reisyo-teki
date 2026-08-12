@@ -4,34 +4,53 @@ import { world } from "@minecraft/server";
 const VIRTUAL_CIVS_PROPERTY = "civ:virtualCivs";
 const ACTIVE_CIV_PROPERTY = "civ:activeCivByController";
 
+// Dynamic Property の読み取りを UI 更新やターン処理のたびに繰り返さないためのキャッシュ。
+// world 再読み込み後は最初の取得で保存値から復元する。
+let virtualCivsCache = null;
+let activeCivMapCache = null;
+
 function getVirtualCivs() {
+    if (virtualCivsCache) return virtualCivsCache;
+
     const raw = world.getDynamicProperty(VIRTUAL_CIVS_PROPERTY);
-    if (typeof raw !== "string") return [];
+    if (typeof raw !== "string") {
+        virtualCivsCache = [];
+        return virtualCivsCache;
+    }
     try {
         const list = JSON.parse(raw);
-        return Array.isArray(list) ? list : [];
+        virtualCivsCache = Array.isArray(list) ? list : [];
     } catch {
-        return [];
+        virtualCivsCache = [];
     }
+    return virtualCivsCache;
 }
 
 function saveVirtualCivs(list) {
     world.setDynamicProperty(VIRTUAL_CIVS_PROPERTY, JSON.stringify(list));
+    virtualCivsCache = list;
 }
 
 function getActiveCivMap() {
+    if (activeCivMapCache) return activeCivMapCache;
+
     const raw = world.getDynamicProperty(ACTIVE_CIV_PROPERTY);
-    if (typeof raw !== "string") return {};
+    if (typeof raw !== "string") {
+        activeCivMapCache = {};
+        return activeCivMapCache;
+    }
     try {
         const map = JSON.parse(raw);
-        return map && typeof map === "object" ? map : {};
+        activeCivMapCache = map && typeof map === "object" ? map : {};
     } catch {
-        return {};
+        activeCivMapCache = {};
     }
+    return activeCivMapCache;
 }
 
 function saveActiveCivMap(map) {
     world.setDynamicProperty(ACTIVE_CIV_PROPERTY, JSON.stringify(map));
+    activeCivMapCache = map;
 }
 
 export function getVirtualCivById(id) {
