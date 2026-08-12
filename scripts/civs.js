@@ -5,8 +5,9 @@ const VIRTUAL_CIVS_PROPERTY = "civ:virtualCivs";
 const ACTIVE_CIV_PROPERTY = "civ:activeCivByController";
 
 // Dynamic Property の読み取りを UI 更新やターン処理のたびに繰り返さないためのキャッシュ。
-// world 再読み込み後は最初の取得で保存値から復元する。
+// ワールド再読み込み後は最初の取得で保存値から復元する。
 let virtualCivsCache = null;
+let virtualCivsByIdCache = null;
 let activeCivMapCache = null;
 
 // 同一tick内で何度も world.getAllPlayers() を呼ぶと、ターン処理やUI更新で
@@ -35,12 +36,21 @@ function getOnlinePlayerById(id) {
     return onlinePlayersByIdCache?.get(id) ?? null;
 }
 
+function rebuildVirtualCivIndex(list) {
+    const index = new Map();
+    for (const civ of list) {
+        if (civ?.id) index.set(civ.id, civ);
+    }
+    virtualCivsByIdCache = index;
+}
+
 function getVirtualCivs() {
     if (virtualCivsCache) return virtualCivsCache;
 
     const raw = world.getDynamicProperty(VIRTUAL_CIVS_PROPERTY);
     if (typeof raw !== "string") {
         virtualCivsCache = [];
+        rebuildVirtualCivIndex(virtualCivsCache);
         return virtualCivsCache;
     }
     try {
@@ -49,12 +59,14 @@ function getVirtualCivs() {
     } catch {
         virtualCivsCache = [];
     }
+    rebuildVirtualCivIndex(virtualCivsCache);
     return virtualCivsCache;
 }
 
 function saveVirtualCivs(list) {
     world.setDynamicProperty(VIRTUAL_CIVS_PROPERTY, JSON.stringify(list));
     virtualCivsCache = list;
+    rebuildVirtualCivIndex(list);
 }
 
 function getActiveCivMap() {
@@ -80,7 +92,8 @@ function saveActiveCivMap(map) {
 }
 
 export function getVirtualCivById(id) {
-    return getVirtualCivs().find(c => c.id === id) ?? null;
+    getVirtualCivs();
+    return virtualCivsByIdCache.get(id) ?? null;
 }
 
 export function addVirtualCiv(controllerPlayer, name) {
@@ -170,6 +183,6 @@ export function getActingPlayer(realPlayer) {
     Object.defineProperty(acting, "id", { value: civ.id, enumerable: true, configurable: true });
     Object.defineProperty(acting, "name", { value: civ.name, enumerable: true, configurable: true });
     acting.getDynamicProperty = (key) => world.getDynamicProperty(`civ:npc:${civ.id}:${key}`);
-    acting.setDynamicProperty = (key, value) => world.setDynamicProperty(`civ:npc:${civ.id}:${key}`, value);
+    acting.setDynamicProperty = (key, value) => world.setDynamicProperty(`civ:npc:${civ.id}:${key}`);
     return acting;
 }
