@@ -35,6 +35,12 @@ const CONFIG = {
     },
 };
 
+// 同じターン中に研究画面・ターン処理などから何度も同じDynamic Propertyを
+// 取得しないよう、プレイヤーID+種別ごとに進行状態をメモリへ保持する。
+// Dynamic Propertyへの保存は saveProgressState() に集約しているため、状態変更時も
+// キャッシュと永続データがずれない。
+const progressStateCache = new Map();
+
 function getConfig(kind) {
     return CONFIG[kind] ?? null;
 }
@@ -43,21 +49,31 @@ function blankState() {
     return { activeId: null, progress: 0, carry: 0, completed: [] };
 }
 
+function getCacheKey(player, kind) {
+    return `${player?.id ?? "unknown"}:${kind}`;
+}
+
 /** 旧来の science/culture 値があれば、初回のみ繰越ポイントとして移行する。 */
 export function getProgressState(player, kind) {
     const config = getConfig(kind);
     if (!config) return blankState();
 
+    const cacheKey = getCacheKey(player, kind);
+    const cached = progressStateCache.get(cacheKey);
+    if (cached) return cached;
+
     const raw = player.getDynamicProperty(config.property);
     if (typeof raw === "string") {
         try {
             const parsed = JSON.parse(raw);
-            return {
+            const state = {
                 activeId: typeof parsed.activeId === "string" ? parsed.activeId : null,
                 progress: Number(parsed.progress) || 0,
                 carry: Number(parsed.carry) || 0,
                 completed: Array.isArray(parsed.completed) ? parsed.completed : [],
             };
+            progressStateCache.set(cacheKey, state);
+            return state;
         } catch {
             // 壊れた保存値は安全な初期状態へ戻す。
         }
@@ -75,6 +91,7 @@ export function saveProgressState(player, kind, state) {
     player.setDynamicProperty(config.property, JSON.stringify(state));
     // 既存の表示用プロパティにも、現在使えるポイントを反映して互換性を保つ。
     player.setDynamicProperty(config.legacyPointsProperty, state.activeId ? state.progress : state.carry);
+    progressStateCache.set(getCacheKey(player, kind), state);
 }
 
 /** 新しいゲーム開始時にプレイヤーの研究進行を初期化する。 */
