@@ -40,6 +40,10 @@ const CONFIG = {
 // Dynamic Propertyへの保存は saveProgressState() に集約しているため、状態変更時も
 // キャッシュと永続データがずれない。
 const progressStateCache = new Map();
+// 直前に永続化した値も保持し、状態が変化していない saveProgressState() では
+// Dynamic Property へのJSON化・書き込みを省略する。
+const progressStateRawCache = new Map();
+const legacyPointsCache = new Map();
 
 function getConfig(kind) {
     return CONFIG[kind] ?? null;
@@ -73,6 +77,9 @@ export function getProgressState(player, kind) {
                 completed: Array.isArray(parsed.completed) ? parsed.completed : [],
             };
             progressStateCache.set(cacheKey, state);
+            progressStateRawCache.set(cacheKey, raw);
+            const legacy = state.activeId ? state.progress : state.carry;
+            legacyPointsCache.set(cacheKey, legacy);
             return state;
         } catch {
             // 壊れた保存値は安全な初期状態へ戻す。
@@ -88,10 +95,22 @@ export function getProgressState(player, kind) {
 export function saveProgressState(player, kind, state) {
     const config = getConfig(kind);
     if (!config) return;
-    player.setDynamicProperty(config.property, JSON.stringify(state));
+
+    const cacheKey = getCacheKey(player, kind);
+    const raw = JSON.stringify(state);
+    if (progressStateRawCache.get(cacheKey) !== raw) {
+        player.setDynamicProperty(config.property, raw);
+        progressStateRawCache.set(cacheKey, raw);
+    }
+
     // 既存の表示用プロパティにも、現在使えるポイントを反映して互換性を保つ。
-    player.setDynamicProperty(config.legacyPointsProperty, state.activeId ? state.progress : state.carry);
-    progressStateCache.set(getCacheKey(player, kind), state);
+    // 値が変わっていない場合はDynamic Propertyへの書き込みを省略する。
+    const legacyPoints = state.activeId ? state.progress : state.carry;
+    if (legacyPointsCache.get(cacheKey) !== legacyPoints) {
+        player.setDynamicProperty(config.legacyPointsProperty, legacyPoints);
+        legacyPointsCache.set(cacheKey, legacyPoints);
+    }
+    progressStateCache.set(cacheKey, state);
 }
 
 /** 新しいゲーム開始時にプレイヤーの研究進行を初期化する。 */
