@@ -2,7 +2,7 @@
 import { world, BlockPermutation } from "@minecraft/server";
 import { getTurnState, setTurnState, resetAll, getTiles, setTiles, getMapConfig, setTile, getStateVersion } from "./state.js";
 import { PRODUCTION_DEFS, tickProduction } from "./production.js";
-import { grantProgressPoints, resetProgress } from "./progression.js";
+import { grantProgressPoints, resetProgress, hasCompletedProgress } from "./progression.js";
 import { resetDiplomacy, getRelation } from "./diplomacy.js";
 import { getCivStorageHandle, resolveCivName, isCivControllable } from "./civs.js";
 import { getBuildingAdjacencyYields } from "./adjacency.js";
@@ -13,18 +13,11 @@ import { hasFoundedReligion, getReligionName, getNationalDominantReligion, apply
 export { getTurnState, setTurnState };
 
 const TILE_SIZE = 5;
-
-// 生産量計算はUI更新などから非常に頻繁に呼ばれるため、状態世代ごとに都市単位でキャッシュする。
-// state.js の setTile/setTiles/setMapConfig が状態世代を進めるので、ゲーム状態が変わったら自動的に無効化される。
 let cityYieldCacheVersion = -1;
 const cityYieldCache = new Map();
 
-// 💡 プレイヤー固有の色。ゲーム開始時(startGame)に一度だけ playerOrder の並び順で確定させ、
-//    turn.playerColors に保存する。旗の設置処理では毎回ここから色を読み取るだけにすることで、
-//    「1ターン中に旗設置関数を複数回呼ぶと色がずれていく」問題を防ぐ。
 export const PLAYER_COLORS = ["red", "blue", "green", "yellow", "purple", "orange", "cyan", "magenta", "light_blue", "lime"];
 
-/** ゲーム開始時に確定したプレイヤーの固有色を取得する。未確定の場合は white を返す。 */
 export function getPlayerColor(playerId) {
     const turn = getTurnState();
     return turn.playerColors?.[playerId] ?? "white";
@@ -34,49 +27,34 @@ function getPlayerNameById(id) {
     return resolveCivName(id);
 }
 
-/**
- * 💡 【ハイブリッド版】mapGenの資源データ ＋ 手動設置ブロックの両方をカウントする関数
- */
 function countCheatingBlocks(dimension, tiles, tx, tz, config) {
     const key = `${tx},${tz}`;
     const tile = tiles[key];
-    
     let extraFood = 0;
     let extraProd = 0;
 
     if (!config) {
-        if (tile && tile.resource) {
-            if (tile.resource === "wheat" || tile.resource === "fish") extraFood += 1;
-            if (["iron", "coal", "diamonds", "gold_ore"].includes(tile.resource)) extraProd += 1;
-        }
+        if (tile?.resource === "wheat" || tile?.resource === "fish") extraFood += 1;
+        if (["iron", "coal", "diamonds", "gold_ore"].includes(tile?.resource)) extraProd += 1;
         return { extraFood, extraProd };
     }
 
-    if (tile && tile.resource) {
-        if (tile.resource === "wheat" || tile.resource === "fish") extraFood += 1;
-        if (["iron", "coal", "diamonds", "gold_ore"].includes(tile.resource)) extraProd += 1;
-    }
+    if (tile?.resource === "wheat" || tile?.resource === "fish") extraFood += 1;
+    if (["iron", "coal", "diamonds", "gold_ore"].includes(tile?.resource)) extraProd += 1;
 
     const baseX = config.originX + tx * TILE_SIZE;
     const baseZ = config.originZ + tz * TILE_SIZE;
-
     for (let x = 0; x < TILE_SIZE; x++) {
         for (let z = 0; z < TILE_SIZE; z++) {
             for (let yOffset = 0; yOffset <= 2; yOffset++) {
-                const block = dimension.getBlock({
-                    x: baseX + x,
-                    y: config.ySurface + yOffset,
-                    z: baseZ + z
-                });
+                const block = dimension.getBlock({ x: baseX + x, y: config.ySurface + yOffset, z: baseZ + z });
                 if (!block) continue;
-
                 if (block.typeId.includes("wheat") || block.typeId === "minecraft:hay_block") extraFood += 1;
                 if (block.typeId === "minecraft:iron_ore" || block.typeId === "minecraft:gold_ore") extraProd += 1;
                 if (block.typeId === "minecraft:magma") extraProd += 100;
             }
         }
     }
-
     return { extraFood, extraProd };
 }
 
@@ -92,11 +70,10 @@ export function getCityCurrentYields(cityKey, tiles) {
 
     const cached = cityYieldCache.get(cityKey);
     if (cached) return cached;
-    
+
     const playerId = cityTile.ownerId;
     const playerTiles = [];
     const playerCities = [];
-
     for (const key in tiles) {
         const t = tiles[key];
         if (t.ownerId === playerId) {
@@ -137,7 +114,6 @@ export function getCityCurrentYields(cityKey, tiles) {
 
     const config = getMapConfig();
     const dimension = world.getDimension("overworld");
-
     for (const t of assignedTiles) {
         const cheatIncomes = countCheatingBlocks(dimension, tiles, t.tx, t.tz, config);
         food += cheatIncomes.extraFood;
@@ -180,12 +156,10 @@ export function getCityCurrentYields(cityKey, tiles) {
     return result;
 }
 
-// 💡 交易所から最も近い都市（複数あればすべて）へ交易路を伸ばすロジック
 export function connectTradeRoutes(ownerKey, city, tiles) {
     const [oxStr, ozStr] = ownerKey.split(",");
     const ox = parseInt(oxStr, 10);
     const oz = parseInt(ozStr, 10);
-
     let minDist = Infinity;
     let nearestCityKeys = [];
 
@@ -197,33 +171,22 @@ export function connectTradeRoutes(ownerKey, city, tiles) {
             const tx = parseInt(txStr, 10);
             const tz = parseInt(tzStr, 10);
             const dist = Math.abs(ox - tx) + Math.abs(oz - tz);
-
-            if (dist < minDist) {
-                minDist = dist;
-                nearestCityKeys = [key];
-            } else if (dist === minDist) {
-                nearestCityKeys.push(key);
-            }
+            if (dist < minDist) { minDist = dist; nearestCityKeys = [key]; }
+            else if (dist === minDist) nearestCityKeys.push(key);
         }
     }
 
     city.tradingPost.routes = [];
     if (nearestCityKeys.length === 0) return;
-
     for (const targetKey of nearestCityKeys) {
-        const targetTile = tiles[targetKey];
-        const targetCity = targetTile.city;
-
+        const targetCity = tiles[targetKey].city;
         let baseTurns = minDist;
         let bonus = 2;
-        const targetHasTradingPost = targetCity.tradingPost && targetCity.tradingPost.status === "active";
-
-        if (targetHasTradingPost) {
+        if (targetCity.tradingPost?.status === "active") {
             if (baseTurns === 1) bonus = 4;
             else baseTurns = Math.max(1, Math.floor(baseTurns / 2));
         }
-
-        city.tradingPost.routes.push({ targetKey: targetKey, remainingTurns: baseTurns, bonus: bonus });
+        city.tradingPost.routes.push({ targetKey, remainingTurns: baseTurns, bonus });
     }
 }
 
@@ -231,7 +194,6 @@ export function calculateCityFoodIncomes(playerId) {
     const tiles = getTiles();
     const playerCities = [];
     const playerTiles = [];
-
     for (const key in tiles) {
         const tile = tiles[key];
         if (tile.ownerId === playerId) {
@@ -274,14 +236,13 @@ export function calculateCityFoodIncomes(playerId) {
 
     for (const key in tiles) {
         const t = tiles[key];
-        if (t.city && t.city.tradingPost && t.city.tradingPost.status === "active" && t.city.tradingPost.routes) {
+        if (t.city?.tradingPost?.status === "active" && t.city.tradingPost.routes) {
             for (const route of t.city.tradingPost.routes) {
                 if (t.ownerId === playerId) incomes[key] = (incomes[key] ?? 0) + route.bonus;
-                if (tiles[route.targetKey] && tiles[route.targetKey].ownerId === playerId) incomes[route.targetKey] = (incomes[route.targetKey] ?? 0) + route.bonus;
+                if (tiles[route.targetKey]?.ownerId === playerId) incomes[route.targetKey] = (incomes[route.targetKey] ?? 0) + route.bonus;
             }
         }
     }
-
     return incomes;
 }
 
@@ -307,9 +268,7 @@ export function destroyCity(tiles, cityKey, config, dimension) {
                     else if (dist === minDist) nearestKeys.push(k2);
                 }
             }
-            if (nearestKeys.includes(cityKey)) {
-                t.ownerId = null; t.ownerName = null; t.city = null;
-            }
+            if (nearestKeys.includes(cityKey)) { t.ownerId = null; t.ownerName = null; t.city = null; }
         }
     }
     if (dimension) {
@@ -366,10 +325,8 @@ function checkReligiousVictory(aliveIds, tiles) {
         const t = tiles[key];
         if (t.city && aliveIds.includes(t.ownerId)) citiesByCiv[t.ownerId].push({ key, tile: t });
     }
-
     const nationalReligion = {};
     for (const id of aliveIds) nationalReligion[id] = getNationalDominantReligion(citiesByCiv[id]);
-
     for (const candidateId of aliveIds) {
         const handle = getCivStorageHandle(candidateId);
         if (!handle || !hasFoundedReligion(handle)) continue;
@@ -382,11 +339,9 @@ export function checkAndAnnounceVictory(tiles) {
     const turn = getTurnState();
     if (!turn.started || !Array.isArray(turn.playerOrder) || turn.playerOrder.length === 0) return false;
     if (turn.playerOrder.length < 2) return false;
-
     const allTiles = tiles ?? getTiles();
     const aliveIds = getAliveCivIds(turn, allTiles);
     if (aliveIds.length === 0) return false;
-
     const notYetStarted = turn.playerOrder.filter(id => !hasEverFoundedCapital(id));
     if (notYetStarted.length > 0) return false;
 
@@ -416,7 +371,6 @@ export function checkAndAnnounceVictory(tiles) {
         resetAll();
         return true;
     }
-
     return false;
 }
 
@@ -425,42 +379,32 @@ export function resolveMissileImpact(config, targetTx, targetTz) {
     const centerX = config.originX + targetTx * TILE_SIZE + 2;
     const centerZ = config.originZ + targetTz * TILE_SIZE + 2;
     const centerY = config.ySurface + 2;
-
     try { dimension.spawnParticle("minecraft:huge_explosion_emitter", { x: centerX, y: centerY, z: centerZ }); } catch (e) {}
     try { dimension.playSound("random.explode", { x: centerX, y: centerY, z: centerZ }, { volume: 4, pitch: 0.8 }); } catch (e) {}
 
     const tiles = getTiles();
     const targetKey = `${targetTx},${targetTz}`;
     const targetTile = tiles[targetKey];
-
     if (!targetTile || !targetTile.city) return `§7[Missile] (${targetTx}, ${targetTz}) に着弾しましたが、そこに都市はありませんでした。`;
-
     const cityName = targetTile.city.name;
     const ownerName = targetTile.ownerName ?? "不明";
-
     destroyCity(tiles, targetKey, config, dimension);
     setTiles(tiles);
     checkAndAnnounceVictory(tiles);
-
     return `§c💥 【${cityName}】(${ownerName})がミサイル攻撃により破壊されました！`;
 }
 
 function processPlayerTurnStart(playerId) {
     const config = getMapConfig();
     if (!config) return;
-
     const tiles = getTiles();
     if (checkAndAnnounceVictory(tiles)) return;
 
     const playerCities = [];
     let movementRefreshed = false;
-
     for (const key in tiles) {
         const unit = tiles[key].combatUnit;
-        if (unit?.ownerId === playerId) {
-            unit.movementRemaining = unit.movement ?? 0;
-            movementRefreshed = true;
-        }
+        if (unit?.ownerId === playerId) { unit.movementRemaining = unit.movement ?? 0; movementRefreshed = true; }
         const religiousUnit = tiles[key].religiousUnit;
         if (religiousUnit?.ownerId === playerId) {
             religiousUnit.movementRemaining = religiousUnit.movement ?? 0;
@@ -476,7 +420,6 @@ function processPlayerTurnStart(playerId) {
 
     const summaryReport = [];
     const dimension = world.getDimension("overworld");
-
     const cityFoodIncomes = {};
     const cityProductionIncomes = {};
     const cityFaithIncomes = {};
@@ -526,14 +469,11 @@ function processPlayerTurnStart(playerId) {
             city.faithStorage = (city.faithStorage ?? 0) + faithIncome;
             summaryReport.push(`§d🙏【${city.name}】信仰力+${faithIncome}(累計: ${city.faithStorage})`);
         }
-
         const activeProductionDef = city.production ? PRODUCTION_DEFS[city.production.id] : null;
         const upkeepExtra = activeProductionDef?.extraUpkeep ?? 0;
-
         city.foodStorage = (city.foodStorage ?? 0) + income;
         const consumption = city.population + upkeepExtra;
         city.foodStorage -= consumption;
-
         let growSuccess = false;
         let housingBlock = false;
 
@@ -555,11 +495,8 @@ function processPlayerTurnStart(playerId) {
             city.starvationTurns = 0;
             const growthThreshold = 10 + (city.population - 1) * 2;
             if (city.foodStorage >= growthThreshold) {
-                if (city.population < city.housing) {
-                    city.population += 1; city.foodStorage -= growthThreshold; growSuccess = true;
-                } else {
-                    city.foodStorage = growthThreshold - 1; housingBlock = true;
-                }
+                if (city.population < city.housing) { city.population += 1; city.foodStorage -= growthThreshold; growSuccess = true; }
+                else { city.foodStorage = growthThreshold - 1; housingBlock = true; }
             }
             let msg = `§7[${city.name}]§f 選択マスからの収穫:+${income} [Food] | 消費:-${consumption} 🍖 | 貯留: ${city.foodStorage}/${growthThreshold}`;
             if (growSuccess) msg += ` 🎉§a人口が ${city.population} に増加！`;
@@ -570,7 +507,6 @@ function processPlayerTurnStart(playerId) {
     }
 
     setTiles(tiles);
-
     if (checkAndAnnounceVictory(tiles)) return;
 
     const player = getCivStorageHandle(playerId);
@@ -584,10 +520,8 @@ function processPlayerTurnStart(playerId) {
                 if (cityTile?.city) applySacredSitePressure(cityTile.city, playerId);
             }
         }
-
         let totalPop = 0;
         for (const c of playerCities) totalPop += c.tile.city.population;
-
         const technologyResult = grantProgressPoints(player, "technology", totalPop);
         const civicResult = grantProgressPoints(player, "civic", totalPop);
         if (technologyResult) summaryReport.unshift(technologyResult);
@@ -598,7 +532,6 @@ function processPlayerTurnStart(playerId) {
             player.setDynamicProperty("strategic_oil", newOilTotal);
             summaryReport.unshift(`§b 石油収入: +${totalOilIncome} 個を獲得！ (現在の在庫: ${newOilTotal} 個)`);
         }
-
         player.sendMessage("§6=== 💡 都市のターン報告 ===");
         summaryReport.forEach(msg => player.sendMessage(msg));
         player.sendMessage("§6========================");
@@ -618,17 +551,12 @@ export function startGame() {
     const turn = getTurnState();
     if (turn.started) return { ok: false, message: "§c既に開始されています。" };
     if (turn.playerOrder.length === 0) return { ok: false, message: "§c参加者がいません。" };
-
     turn.started = true;
     turn.currentIndex = 0;
     turn.turnNumber = 1;
     turn.playerRights = {};
-
     turn.playerColors = {};
-    turn.playerOrder.forEach((playerId, idx) => {
-        turn.playerColors[playerId] = PLAYER_COLORS[idx % PLAYER_COLORS.length];
-    });
-
+    turn.playerOrder.forEach((playerId, idx) => { turn.playerColors[playerId] = PLAYER_COLORS[idx % PLAYER_COLORS.length]; });
     for (const playerId of turn.playerOrder) {
         const handle = getCivStorageHandle(playerId);
         if (!handle) continue;
@@ -637,13 +565,10 @@ export function startGame() {
         resetDiplomacy(handle);
         handle.setDynamicProperty("civ:hasFoundedCapital", false);
     }
-
     setTurnState(turn);
-
     const turnAfterSkip = getTurnState();
     const found = advanceToNextControllablePlayer(turnAfterSkip);
     setTurnState(turnAfterSkip);
-
     const firstId = turnAfterSkip.playerOrder[turnAfterSkip.currentIndex];
     processPlayerTurnStart(firstId);
     const name = getPlayerNameById(firstId) ?? "不明(オフライン)";
@@ -655,11 +580,9 @@ export function startGame() {
 function advanceToNextControllablePlayer(turn) {
     const total = turn.playerOrder.length;
     if (total === 0) return false;
-
     for (let i = 0; i < total; i++) {
         const civId = turn.playerOrder[turn.currentIndex];
         if (isCivControllable(civId)) return true;
-
         turn.currentIndex = (turn.currentIndex + 1) % total;
         if (turn.currentIndex === 0) turn.turnNumber += 1;
     }
@@ -670,16 +593,12 @@ export function endTurn(player) {
     const turn = getTurnState();
     if (!turn.started) return { ok: false, message: "§cゲーム未開始です。" };
     if (player.id !== turn.playerOrder[turn.currentIndex]) return { ok: false, message: "§c手番ではありません。" };
-
     turn.currentIndex = (turn.currentIndex + 1) % turn.playerOrder.length;
     if (turn.currentIndex === 0) turn.turnNumber += 1;
-
     const found = advanceToNextControllablePlayer(turn);
     setTurnState(turn);
-
     const nextId = turn.playerOrder[turn.currentIndex];
     processPlayerTurnStart(nextId);
-
     const nextName = getPlayerNameById(nextId) ?? "不明(オフライン)";
     if (found) world.sendMessage(`§e>>> ターン ${turn.turnNumber}: §a${nextName}§e のターン <<<`);
     else world.sendMessage(`§e>>> ターン ${turn.turnNumber}: §c参加者全員がオフラインのため待機中(復帰次第 §a${nextName}§c から再開) <<<`);
@@ -690,16 +609,12 @@ export function forceEndTurn() {
     const turn = getTurnState();
     if (!turn.started) return { ok: false, message: "§cゲーム未開始です。" };
     if (turn.playerOrder.length === 0) return { ok: false, message: "§c参加者がいません。" };
-
     turn.currentIndex = (turn.currentIndex + 1) % turn.playerOrder.length;
     if (turn.currentIndex === 0) turn.turnNumber += 1;
-
     const found = advanceToNextControllablePlayer(turn);
     setTurnState(turn);
-
     const nextId = turn.playerOrder[turn.currentIndex];
     processPlayerTurnStart(nextId);
-
     const nextName = getPlayerNameById(nextId) ?? "不明(オフライン)";
     if (found) world.sendMessage(`§e>>> (ターンを強制的にスキップ) ターン ${turn.turnNumber}: §a${nextName}§e のターン <<<`);
     else world.sendMessage(`§e>>> (ターンを強制的にスキップ) ターン ${turn.turnNumber}: §c参加者全員がオフラインのため待機中 <<<`);
