@@ -12,6 +12,7 @@ const KEY_TILE_ROW_PREFIX = "civ:tiles_row_";
 let tilesCache = null;
 let tilesCacheConfigKey = null;
 let tileRowsCache = null;
+let tileRowsRawCache = null;
 let mapConfigCache = null;
 let mapConfigLoaded = false;
 let turnStateCache = null;
@@ -55,6 +56,7 @@ export function setMapConfig(config) {
     mapConfigLoaded = true;
     tilesCache = null;
     tileRowsCache = null;
+    tileRowsRawCache = null;
     tilesCacheConfigKey = makeConfigKey(config);
     stateVersion++;
 }
@@ -69,16 +71,21 @@ export function getTiles() {
 
     const tiles = {};
     const rowCache = new Array(config.height).fill(null);
+    const rowRawCache = new Array(config.height).fill(null);
 
     for (let tz = 0; tz < config.height; tz++) {
         const raw = world.getDynamicProperty(`${KEY_TILE_ROW_PREFIX}${tz}`);
         let rowTiles = {};
         if (typeof raw === "string") {
+            rowRawCache[tz] = raw;
             try {
                 rowTiles = JSON.parse(raw);
             } catch {
                 rowTiles = {};
+                rowRawCache[tz] = JSON.stringify(rowTiles);
             }
+        } else {
+            rowRawCache[tz] = JSON.stringify(rowTiles);
         }
         rowCache[tz] = rowTiles;
         for (const txStr in rowTiles) {
@@ -88,6 +95,7 @@ export function getTiles() {
 
     tilesCache = tiles;
     tileRowsCache = rowCache;
+    tileRowsRawCache = rowRawCache;
     tilesCacheConfigKey = configKey;
     return tilesCache;
 }
@@ -105,12 +113,13 @@ export function setTiles(tiles) {
         rows[tz][txStr] = tiles[key];
     }
 
-    const previousRows = tileRowsCache;
+    const previousRawRows = tileRowsRawCache;
+    const nextRawRows = new Array(config.height);
     let changed = false;
     for (let tz = 0; tz < config.height; tz++) {
         const nextRaw = JSON.stringify(rows[tz]);
-        const previousRaw = previousRows?.[tz] == null ? null : JSON.stringify(previousRows[tz]);
-        if (nextRaw !== previousRaw) {
+        nextRawRows[tz] = nextRaw;
+        if (nextRaw !== previousRawRows?.[tz]) {
             world.setDynamicProperty(`${KEY_TILE_ROW_PREFIX}${tz}`, nextRaw);
             changed = true;
         }
@@ -120,6 +129,7 @@ export function setTiles(tiles) {
     // これにより計算キャッシュが不要に全破棄されるのを防ぐ。
     tilesCache = tiles;
     tileRowsCache = rows;
+    tileRowsRawCache = nextRawRows;
     tilesCacheConfigKey = makeConfigKey(config);
     if (changed) stateVersion++;
 }
@@ -139,13 +149,18 @@ export function setTile(tx, tz, data) {
     tiles[key] = data;
 
     if (!tileRowsCache) tileRowsCache = Array.from({ length: config.height }, () => ({}));
+    if (!tileRowsRawCache) tileRowsRawCache = Array.from({ length: config.height }, () => null);
     if (!tileRowsCache[tz]) tileRowsCache[tz] = {};
     tileRowsCache[tz][String(tx)] = data;
 
-    world.setDynamicProperty(`${KEY_TILE_ROW_PREFIX}${tz}`, JSON.stringify(tileRowsCache[tz]));
+    const rowRaw = JSON.stringify(tileRowsCache[tz]);
+    if (rowRaw !== tileRowsRawCache[tz]) {
+        world.setDynamicProperty(`${KEY_TILE_ROW_PREFIX}${tz}`, rowRaw);
+        tileRowsRawCache[tz] = rowRaw;
+        stateVersion++;
+    }
     tilesCache = tiles;
     tilesCacheConfigKey = makeConfigKey(config);
-    stateVersion++;
 }
 
 /** キャッシュの変更世代。将来の計算キャッシュの無効化にも利用できる。 */
@@ -188,6 +203,7 @@ export function resetAll() {
     world.setDynamicProperty(KEY_TURN, undefined);
     tilesCache = null;
     tileRowsCache = null;
+    tileRowsRawCache = null;
     tilesCacheConfigKey = null;
     mapConfigCache = null;
     mapConfigLoaded = true;
