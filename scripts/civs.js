@@ -1,5 +1,5 @@
 // civs.js
-import { world } from "@minecraft/server";
+import { world, system } from "@minecraft/server";
 
 const VIRTUAL_CIVS_PROPERTY = "civ:virtualCivs";
 const ACTIVE_CIV_PROPERTY = "civ:activeCivByController";
@@ -8,6 +8,22 @@ const ACTIVE_CIV_PROPERTY = "civ:activeCivByController";
 // world 再読み込み後は最初の取得で保存値から復元する。
 let virtualCivsCache = null;
 let activeCivMapCache = null;
+
+// 同一tick内で何度も world.getAllPlayers() を呼ぶと、ターン処理やUI更新で
+// 同じオンラインプレイヤー一覧を繰り返し取得することになるため、tick単位で共有する。
+// プレイヤーの参加・退出はtick境界をまたいで反映されるため、長時間の古い状態を保持しない。
+let onlinePlayersCache = null;
+let onlinePlayersCacheTick = -1;
+
+function getOnlinePlayers() {
+    const currentTick = system.currentTick;
+    if (onlinePlayersCache && onlinePlayersCacheTick === currentTick) {
+        return onlinePlayersCache;
+    }
+    onlinePlayersCache = world.getAllPlayers();
+    onlinePlayersCacheTick = currentTick;
+    return onlinePlayersCache;
+}
 
 function getVirtualCivs() {
     if (virtualCivsCache) return virtualCivsCache;
@@ -92,21 +108,21 @@ export function setActiveCivId(realPlayer, civId) {
 }
 
 export function resolveCivName(civId) {
-    for (const p of world.getAllPlayers()) {
+    for (const p of getOnlinePlayers()) {
         if (p.id === civId) return p.name;
     }
     return getVirtualCivById(civId)?.name ?? null;
 }
 
 export function isCivControllable(civId) {
-    if (world.getAllPlayers().some(p => p.id === civId)) return true;
+    if (getOnlinePlayers().some(p => p.id === civId)) return true;
     const civ = getVirtualCivById(civId);
-    if (civ) return world.getAllPlayers().some(p => p.id === civ.controllerId);
+    if (civ) return getOnlinePlayers().some(p => p.id === civ.controllerId);
     return false;
 }
 
 export function getCivStorageHandle(civId) {
-    const realPlayer = world.getAllPlayers().find(p => p.id === civId);
+    const realPlayer = getOnlinePlayers().find(p => p.id === civId);
     if (realPlayer) return realPlayer;
 
     const civ = getVirtualCivById(civId);
@@ -118,7 +134,7 @@ export function getCivStorageHandle(civId) {
         getDynamicProperty: (key) => world.getDynamicProperty(`civ:npc:${civId}:${key}`),
         setDynamicProperty: (key, value) => world.setDynamicProperty(`civ:npc:${civId}:${key}`, value),
         sendMessage: (text) => {
-            const controller = civ.controllerId ? world.getAllPlayers().find(p => p.id === civ.controllerId) : null;
+            const controller = civ.controllerId ? getOnlinePlayers().find(p => p.id === civ.controllerId) : null;
             controller?.sendMessage(`§7[${civ.name}] §r${text}`);
         },
     };
