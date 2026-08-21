@@ -18,13 +18,17 @@
 //   建造物と全く同じ書き方(adjacency.js の matchesTerrain 等)で指定できる。
 
 import { hasCompletedProgress, getDefinition } from "./progression.js";
-import { matchesTerrain, getAdjacencyBonus } from "./adjacency.js";
+import { matchesTerrainWeighted, getAdjacencyBonus } from "./adjacency.js";
+import { RESOURCE_TYPES } from "./mapGen.js";
 
 /**
  * @typedef {Object} FacilityDef
  * @property {string} label 表示名
  * @property {string} icon 表示アイコン
  * @property {string} [requiresTechnology] 設置に必要な技術ID(technology progression)
+ * @property {string} [requiresResource] 設置できるマスの資源を限定する(tile.resourceと一致が必要)
+ * @property {Record<string, number>} [flatYields] この施設があるだけで(隣接マスに関係なく)
+ *   都市に毎ターン加算される産出量(例: { iron: 2, production: 4 })
  * @property {Array<any>} [adjacencyBonuses] 隣接マスに応じたボーナスのルール一覧(adjacency.js参照)
  * @property {(tile: any, tx: number, tz: number) => string} [installMessage] 設置完了時のメッセージ生成関数
  */
@@ -33,11 +37,19 @@ export const FACILITY_DEFS = {
         label: "採石場",
         icon: "[Quarry]",
         requiresTechnology: "mining",
-        // 💡 周囲8マスの「山」1つにつき生産力+1(上限なし)。
+        // 💡 周囲8マスの「山」1つにつき生産力+1(山脈はその2倍の+2、上限なし)。
         adjacencyBonuses: [
-            { id: "quarryMountain", label: "山からの採石恩恵", match: matchesTerrain("mountain"), yieldPerMatch: { production: 1 } },
+            { id: "quarryMountain", label: "山・山脈からの採石恩恵", match: matchesTerrainWeighted({ mountain: 1, mountainRange: 2 }), yieldPerMatch: { production: 1 } },
         ],
-        installMessage: (tile, tx, tz) => `§e🎉 (${tx}, ${tz}) に採石場を設置しました！(隣接する山1つにつき生産力+1)`,
+        installMessage: (tile, tx, tz) => `§e🎉 (${tx}, ${tz}) に採石場を設置しました！(隣接する山1つにつき生産力+1、山脈は+2)`,
+    },
+    blacksmith: {
+        label: "鍛冶場",
+        icon: "[Blacksmith]",
+        requiresTechnology: "smelting",
+        requiresResource: "iron",
+        flatYields: { iron: 2, production: 4 },
+        installMessage: (tile, tx, tz) => `§e🎉 (${tx}, ${tz}) に鍛冶場を設置しました！(毎ターン鉄+2、生産力+4)`,
     },
 };
 
@@ -66,6 +78,10 @@ export function canInstallFacility(tile, id, playerId, player = null) {
     if (tile.facility) return { ok: false, message: `§cこのマスには既に施設【${tile.facility.label ?? tile.facility.id}】が存在します。` };
     if (tile.district) return { ok: false, message: `§cこのマスには区域【${tile.district.label ?? tile.district.id}】があるため施設は設置できません。` };
     if (tile.underDistrictConstruction) return { ok: false, message: "§cこのマスは区域を建設中のため施設は設置できません。" };
+    if (def.requiresResource && tile.resource !== def.requiresResource) {
+        const resourceLabel = RESOURCE_TYPES[def.requiresResource]?.label ?? def.requiresResource;
+        return { ok: false, message: `§c【${def.label}】は資源【${resourceLabel}】があるマスにのみ設置できます。` };
+    }
     if (def.requiresTechnology) {
         const hasTech = !!player && hasCompletedProgress(player, "technology", def.requiresTechnology);
         if (!hasTech) {
@@ -107,6 +123,30 @@ export function getFacilityAdjacencyYields(assignedTiles, tiles) {
         const bonus = getAdjacencyBonus(t.tx, t.tz, tiles, def.adjacencyBonuses);
         for (const key in bonus) {
             totals[key] = (totals[key] ?? 0) + bonus[key];
+        }
+    }
+
+    return totals;
+}
+
+/**
+ * 都市に帰属するマスの一覧から、施設が設置されているものを見つけ、隣接マスに関係なく
+ * その施設があるだけで得られる産出量(flatYields)を合算する。
+ * @param {Array<{tx:number, tz:number, tile:any}>} assignedTiles その都市に帰属するマスの一覧
+ * @returns {{ [yieldKey: string]: number }}
+ */
+export function getFacilityFlatYields(assignedTiles) {
+    const totals = {};
+    if (!Array.isArray(assignedTiles)) return totals;
+
+    for (const t of assignedTiles) {
+        const facility = t.tile?.facility;
+        if (!facility) continue;
+        const def = FACILITY_DEFS[facility.id];
+        if (!def?.flatYields) continue;
+
+        for (const key in def.flatYields) {
+            totals[key] = (totals[key] ?? 0) + def.flatYields[key];
         }
     }
 

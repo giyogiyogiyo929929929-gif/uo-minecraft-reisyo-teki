@@ -1,20 +1,22 @@
 // commands.js
-import { world, system, BlockPermutation, PlayerPermissionLevel } from "@minecraft/server";
-import { generateMap, TERRAIN_TYPES, worldToTile, TILE_SIZE, RESOURCE_TYPES, ASSUMED_SIMULATION_RANGE_BLOCKS } from "./mapGen.js";
+import { world, system, BlockPermutation, PlayerPermissionLevel, CustomCommandStatus, CustomCommandParamType, CommandPermissionLevel } from "@minecraft/server";
+import { generateMap, TERRAIN_TYPES, worldToTile, TILE_SIZE, RESOURCE_TYPES, ASSUMED_SIMULATION_RANGE_BLOCKS, isImpassableTerrain } from "./mapGen.js";
 import { getMapConfig, setMapConfig, getTile, setTile, resetAll, setTiles, getTiles } from "./state.js";
 import { joinGame, startGame, endTurn, forceEndTurn, turnInfoText, isPlayersTurn, endGame, getTurnState, setTurnState, getCityCurrentYields, resolveMissileImpact, getPlayerColor, checkAndAnnounceVictory } from "./turns.js";
-import { PRODUCTION_DEFS, canStartProduction, startProduction, cancelProduction, addWorkers, consumeWorkerAction, hasAvailableWorkerAction } from "./production.js";
-import { getDefinition, getKindLabel, startProgress } from "./progression.js";
+import { PRODUCTION_DEFS, canStartProduction, startProduction, cancelProduction, addWorkers, consumeWorkerAction, hasAvailableWorkerAction, getProductionIds } from "./production.js";
+import { getDefinition, getKindLabel, startProgress, getDefinitions } from "./progression.js";
 import { hasDiplomaticAgreement, signAgreement } from "./diplomacy.js";
-import { getAttackRange, resolveCombat, tileDistance } from "./combat.js";
+import { getAttackRange, resolveCombat, tileDistance, canUnitEnterTile } from "./combat.js";
 import { addVirtualCiv, getControllableCivs, getActiveCivId, setActiveCivId, getActingPlayer } from "./civs.js";
-import { getFacilityDef, canInstallFacility, installFacility } from "./facilities.js";
-import { getDistrictDef, canStartDistrict, startDistrictConstruction, getDistrictBuildingDef, canStartDistrictBuilding, startDistrictBuildingConstruction } from "./districts.js";
+import { getFacilityDef, canInstallFacility, installFacility, getFacilityIds } from "./facilities.js";
+import { getDistrictDef, canStartDistrict, startDistrictConstruction, getDistrictBuildingDef, canStartDistrictBuilding, startDistrictBuildingConstruction, getDistrictIds, getDistrictBuildingIds } from "./districts.js";
 import {
     getReligiousUnitDef, hasFoundedReligion, getReligionName, setReligionName,
     canFoundReligion, foundReligion, calculateProselytizePressure, addReligiousPressure,
+    getReligiousUnitIds,
 } from "./religion.js";
 import { openMainMenu } from "./ui.js";
+import { removeUnitLabelAt, clearAllUnitLabels } from "./unitLabels.js";
 
 // 💡 都市名の命名プール
 const CITY_NAMES_POOL = [
@@ -66,30 +68,31 @@ world.beforeEvents.chatSend.subscribe(async (ev) => {
 function cmdHelp(player) {
     reply(player, [
         "§6--- Civ Tactics コマンド一覧 ---",
-        "§e!civ generate <幅> <高さ> §f: マップ生成(OPのみ)",
-        "§e!civ join §f: ゲームに参加",
-        "§e!civ start §f: ゲーム開始(OPのみ)",
-        "§c!civ end §f: ゲームをリセット(OPのみ)",
-        "§e!civ endturn §f: 自分のターンを終了",
-        "§e!civ forceendturn §f: (OP専用) 手番を強制的にスキップする(応答不能なプレイヤー対策)",
-        "§e!civ claim §f: 周囲の土地を領有 (コスト: 人口1)",
-        "§e!civ buyrights §f: 開拓権を獲得 (コスト: 首都人口2)",
-        "§e!civ settle §f: 都市を建設 (コスト: 開拓権x1)",
-        "§e!civ build <worker|warrior|archer|missile|tradingPost|granary|obelisk|capital> §f: 生産を開始",
-        "§c!civ cancelbuild §f: 進行中の生産を中止(蓄積分は次に引き継ぎ)",
-        "§e!civ chop §f: 森林を伐採して住宅上限+1",
-        "§e!civ install <quarry> §f: 足元の空き領有マスに施設を設置(労働者の行動回数を1消費)",
-        "§e!civ district <sacredSite> §f: 足元の空き領有マスに区域の建設を開始(帰属都市の生産力を使用)",
-        "§e!civ districtbuilding <shrine> §f: 足元の区域に専用の建造物を建設開始(帰属都市の生産力を使用)",
-        "§e!civ foundreligion §f: 宗教を創始する(国家全体の信仰力100以上、かつ聖地が必要)",
-        "§e!civ renamereligion <名前> §f: 創始した宗教の名前を変更する",
-        "§e!civ buyreligious <missionary> §f: 都市の信仰力を使って宗教ユニットを購入(社が必要)",
-        "§c!civ launch <x> <z> §f: 指定マスへミサイルを発射",
-        "§e!civ info §f: 現在の情報を表示",
-        "§e!civ menu §f: メニューを開く",
-        "§d!civ addciv [名前] §f: ソロテスト用の国家を追加(OPのみ)",
-        "§d!civ switchciv [番号] §f: 操作中の国家を切り替える",
-        "§d!civ civs §f: 操作できる国家の一覧を表示",
+        "§7(スラッシュコマンド入力時、コマンド名・引数はタブ補完/候補表示が効きます)",
+        "§e/civ:generate <幅> <高さ> §f: マップ生成(OPのみ)",
+        "§e/civ:join §f: ゲームに参加",
+        "§e/civ:start §f: ゲーム開始(OPのみ)",
+        "§c/civ:end §f: ゲームをリセット(OPのみ)",
+        "§e/civ:endturn §f: 自分のターンを終了",
+        "§e/civ:forceendturn §f: (OP専用) 手番を強制的にスキップする(応答不能なプレイヤー対策)",
+        "§e/civ:claim §f: 周囲の土地を領有 (コスト: 人口1)",
+        "§e/civ:buyrights §f: 開拓権を獲得 (コスト: 首都人口2)",
+        "§e/civ:settle §f: 都市を建設 (コスト: 開拓権x1)",
+        "§e/civ:build <worker|warrior|archer|battleship|missile|tradingPost|granary|obelisk|capital> §f: 生産を開始",
+        "§c/civ:cancelbuild §f: 進行中の生産を中止(蓄積分は次に引き継ぎ)",
+        "§e/civ:chop §f: 森林を伐採して住宅上限+1",
+        "§e/civ:install <quarry|blacksmith> §f: 足元の空き領有マスに施設を設置(労働者の行動回数を1消費)",
+        "§e/civ:district <sacredSite|industrialZone> §f: 足元の空き領有マスに区域の建設を開始(帰属都市の生産力を使用)",
+        "§e/civ:districtbuilding <shrine> §f: 足元の区域に専用の建造物を建設開始(帰属都市の生産力を使用)",
+        "§e/civ:foundreligion §f: 宗教を創始する(国家全体の信仰力100以上、かつ聖地が必要)",
+        "§e/civ:renamereligion <名前> §f: 創始した宗教の名前を変更する",
+        "§e/civ:buyreligious <missionary> §f: 都市の信仰力を使って宗教ユニットを購入(社が必要)",
+        "§c/civ:launch <x> <z> §f: 指定マスへミサイルを発射",
+        "§e/civ:info §f: 現在の情報を表示",
+        "§e/civ:menu §f: メニューを開く",
+        "§d/civ:addciv [名前] §f: ソロテスト用の国家を追加(OPのみ)",
+        "§d/civ:switchciv [番号] §f: 操作中の国家を切り替える",
+        "§d/civ:civs §f: 操作できる国家の一覧を表示",
     ].join("\n"));
 }
 
@@ -105,13 +108,13 @@ function cmdAddCiv(realPlayer, name) {
     if (turn.started) { reply(realPlayer, "§cゲーム開始後は国家を追加できません。ゲーム開始前に追加してください。"); return; }
 
     const civ = addVirtualCiv(realPlayer, name);
-    reply(realPlayer, `§aテスト国家【${civ.name}】を追加しました。§e!civ switchciv§aで操作を切り替え、§e!civ join§aで参加させてください。`);
+    reply(realPlayer, `§aテスト国家【${civ.name}】を追加しました。§e/civ:switchciv§aで操作を切り替え、§e/civ:join§aで参加させてください。`);
 }
 
 /** 操作中の国家を切り替える(自分自身、または自分が追加したテスト国家のみ)。 */
 function cmdSwitchCiv(realPlayer, arg) {
     const civs = getControllableCivs(realPlayer);
-    if (civs.length <= 1) { reply(realPlayer, "§c切り替えられる国家がありません。§e!civ addciv§cでテスト国家を追加してください。"); return; }
+    if (civs.length <= 1) { reply(realPlayer, "§c切り替えられる国家がありません。§e/civ:addciv§cでテスト国家を追加してください。"); return; }
 
     let target = null;
     if (arg) {
@@ -122,7 +125,7 @@ function cmdSwitchCiv(realPlayer, arg) {
     if (!target) {
         const activeId = getActiveCivId(realPlayer);
         reply(realPlayer, [
-            "§e操作中の国家を切り替えます。番号を指定してください(例: !civ switchciv 2):",
+            "§e操作中の国家を切り替えます。番号を指定してください(例: /civ:switchciv 2):",
             ...civs.map((c, i) => `${i + 1}. ${c.name}${c.id === activeId ? " §a(操作中)" : ""}${c.isVirtual ? " §7(テスト国家)" : ""}`),
         ].join("\n"));
         return;
@@ -224,6 +227,7 @@ function cmdGenerate(player, args) {
     const ySurface = Math.floor(loc.y) - 1;
 
     resetAll();
+    clearAllUnitLabels();
     const config = { originX, originZ, ySurface, width, height, tileSize: TILE_SIZE };
     setMapConfig(config);
 
@@ -495,6 +499,7 @@ export function cmdSettle(player) {
     if (!tile) { reply(player, "§cマス情報がありません。"); return; }
     if (tile.ownerId && tile.ownerId !== player.id) { reply(player, "§c他領地には建設できません。"); return; }
     if (tile.city) { reply(player, "§c既に都市が存在します。"); return; }
+    if (isImpassableTerrain(tile.type)) { reply(player, "§c山脈マスには都市を建設できません。"); return; }
 
     const allTiles = getTiles();
     let hasAnyCity = false;
@@ -504,7 +509,7 @@ export function cmdSettle(player) {
 
     // 💡 首都は生涯で1度だけ自動設置される。一度でも首都を持ったことがあるプレイヤーは、
     //    (占領やミサイル攻撃で首都を失い、都市を1つも持っていない状態になったとしても)
-    //    !civ settle で新しい首都が自動的に立つことはない。以後、首都を取り戻すには
+    //    /civ:settle で新しい首都が自動的に立つことはない。以後、首都を取り戻すには
     //    既存の都市で「遷都」を生産する必要がある(cmdSettleでは常に通常の都市になる)。
     const hasFoundedCapitalBefore = player.getDynamicProperty("civ:hasFoundedCapital") === true;
     const isCapital = !hasAnyCity && !hasFoundedCapitalBefore;
@@ -517,7 +522,7 @@ export function cmdSettle(player) {
     //    既に一度首都を持っていた(=isCapitalがfalseになる)場合は、通常の都市と同様に
     //    開拓の権利を消費する(無料で無制限に再入植できてしまう抜け穴の修正)。
     if (!isCapital && rights <= 0) {
-        reply(player, "§c開拓する権利がありません。首都で !civ buyrights を実行してください。");
+        reply(player, "§c開拓する権利がありません。首都で /civ:buyrights を実行してください。");
         return;
     }
 
@@ -556,6 +561,14 @@ export function cmdSettle(player) {
     if (hasEnemyNeighbor) {
         housing = Math.max(0, housing - 1);
         waterText += " ＆ §c国境隣接ペナルティ住宅-1";
+    }
+
+    // 💡 首都は必ず一定水準以上のマス産出量を持つようにする。ランダム生成の結果、
+    //    首都を建てたマスの基礎産出量(食料・生産力それぞれ)が2以下だった場合は3まで引き上げる
+    //    (弱い立地に首都を建ててしまい詰むのを防ぐための最低保証。他の通常マスはそのまま)。
+    if (isCapital) {
+        if ((tile.foodYield ?? 0) <= 2) tile.foodYield = 3;
+        if ((tile.productionYield ?? 0) <= 2) tile.productionYield = 3;
     }
 
     // 💡 新機能: ランダムに選んだ都市名に座標を添えてユニーク命名
@@ -1054,7 +1067,7 @@ export function registerScriptCommands() {
                 case "buyreligious": cmdBuyReligiousUnit(player, args[0]); break;
                 case "info": cmdInfo(player); break;
                 case "menu": openMainMenu(player); break;
-                // 💡 生産コマンドは統一: !civ build <worker|missile|tradingPost>
+                // 💡 生産コマンドは統一: /civ:build <worker|missile|tradingPost>
                 case "build": cmdStartProduction(player, args[0]); break;
                 case "buildworker": cmdStartProduction(player, "worker"); break; // 互換用エイリアス
                 case "buildmissile": cmdStartProduction(player, "missile"); break; // 互換用エイリアス
@@ -1065,13 +1078,164 @@ export function registerScriptCommands() {
                 case "launch": {
                     const ltx = parseInt(args[0], 10);
                     const ltz = parseInt(args[1], 10);
-                    if (isNaN(ltx) || isNaN(ltz)) { reply(player, "§c使用法: !civ launch <x> <z>"); break; }
+                    if (isNaN(ltx) || isNaN(ltz)) { reply(player, "§c使用法: /civ:launch <x> <z>"); break; }
                     cmdLaunchMissile(player, ltx, ltz);
                     break;
                 }
                 default: cmdHelp(player);
             }
         });
+    });
+}
+
+/**
+ * 本物のカスタムスラッシュコマンド(例: /civ:settle、/civ:build worker)を登録する。
+ * registerScriptCommands() の /scriptevent civ:cmd ... 経由の呼び出しとは独立した、
+ * 追加の入り口。コマンド名の入力補完・引数候補が効くバニラのコマンドUIをそのまま使える。
+ *
+ * 【登録タイミングの制約】
+ * カスタムコマンドは system.beforeEvents.startup イベント内でのみ登録できるため、
+ * このイベントの購読自体は他のイベントに依存せず、スクリプト読み込み時に直接呼ぶ必要がある
+ * (main.js が読み込み時に同期的に呼び出す)。
+ *
+ * 【権限について】
+ * permissionLevel は全コマンドで Any にし、OPのみ実行可能かどうかの判定は既存の
+ * 各cmd*関数の内部にある isOperator(player) チェックにそのまま任せる(コマンド一覧に
+ * 出るが実行時にメッセージで弾かれる、という従来と同じ挙動を保つ)。
+ *
+ * 【reload時の制約について】
+ * カスタムコマンドの登録内容(引数の型など)は、一度ワールドが読み込まれると
+ * 「/reload」だけでは更新できない(既存コマンドの再登録が
+ * "cannot change parameters for '<id>' during reload" で失敗する、既知のエンジン側の制約)。
+ * この失敗を無視して先に進めないと、1つのコマンドの登録失敗で以降すべてのコマンドが
+ * 登録されなくなってしまうため、コマンド/列挙型の登録は1つずつ try/catch で独立させている。
+ * 定義を変えた場合は、/reload ではなくワールドを一度抜けて入り直す(またはワールド新規作成)
+ * ことで反映される。
+ */
+export function registerCustomCommands() {
+    system.beforeEvents.startup.subscribe((init) => {
+        const registry = init.customCommandRegistry;
+
+        const registerEnumSafe = (name, values) => {
+            try {
+                registry.registerEnum(name, values);
+            } catch (e) {
+                console.warn?.(`[civ] 列挙型 ${name} の登録に失敗しました(reload時は正常な場合があります。ワールドを一度抜けて入り直してください): ${e}`);
+            }
+        };
+
+        // 💡 <id|...> のように選べる引数は、PRODUCTION_DEFS などの定義から自動生成する。
+        //    新しい生産物/施設/区域などを増やしても、ここのコードは変更不要。
+        registerEnumSafe("civ:productionId", getProductionIds());
+        registerEnumSafe("civ:facilityId", getFacilityIds());
+        registerEnumSafe("civ:districtId", getDistrictIds());
+        registerEnumSafe("civ:districtBuildingId", getDistrictBuildingIds());
+        registerEnumSafe("civ:religiousUnitId", getReligiousUnitIds());
+        registerEnumSafe("civ:technologyId", Object.keys(getDefinitions("technology")));
+        registerEnumSafe("civ:civicId", Object.keys(getDefinitions("civic")));
+
+        /**
+         * コマンド実行者が実プレイヤーであることを確認し、実際の処理を次のtickに委譲する
+         * (scriptEventReceive版と同じく system.run() 経由で実行し、早期実行時の制約を避ける)。
+         * fn には (realPlayer, player) が渡される。player は「現在操作中の国家」(civs.js)。
+         */
+        function runCivCommand(origin, fn) {
+            const realPlayer = origin?.sourceEntity;
+            if (!realPlayer || realPlayer.typeId !== "minecraft:player") {
+                return { status: CustomCommandStatus.Failure, message: "§cこのコマンドはプレイヤーからのみ実行できます。" };
+            }
+            system.run(() => fn(realPlayer, getActingPlayer(realPlayer)));
+            return { status: CustomCommandStatus.Success };
+        }
+
+        const cmd = (name, description, params, callback) => {
+            try {
+                registry.registerCommand(
+                    { name: `civ:${name}`, description, permissionLevel: CommandPermissionLevel.Any, ...params },
+                    callback,
+                );
+            } catch (e) {
+                // 💡 1つの登録失敗で以降のコマンドが軒並み登録されなくなるのを防ぐため、
+                //    ここで握りつぶして次のコマンドの登録に進む(詳細は関数コメント参照)。
+                console.warn?.(`[civ] コマンド civ:${name} の登録に失敗しました(reload時は正常な場合があります。ワールドを一度抜けて入り直してください): ${e}`);
+            }
+        };
+
+        cmd("generate", "マップを生成する(OPのみ)", {
+            mandatoryParameters: [
+                { name: "width", type: CustomCommandParamType.Integer },
+                { name: "height", type: CustomCommandParamType.Integer },
+            ],
+        }, (origin, width, height) => runCivCommand(origin, (r, player) => cmdGenerate(player, [String(width), String(height)])));
+
+        cmd("join", "ゲームに参加する", {}, (origin) => runCivCommand(origin, (r, player) => cmdJoin(player)));
+        cmd("start", "ゲームを開始する(OPのみ)", {}, (origin) => runCivCommand(origin, (r, player) => cmdStart(player)));
+        cmd("end", "ゲームをリセットする(OPのみ)", {}, (origin) => runCivCommand(origin, (r, player) => cmdEndGame(player)));
+        cmd("endturn", "自分のターンを終了する", {}, (origin) => runCivCommand(origin, (r, player) => cmdEndTurn(player)));
+        cmd("forceendturn", "手番を強制的にスキップする(OPのみ)", {}, (origin) => runCivCommand(origin, (r, player) => cmdForceEndTurn(player)));
+        cmd("claim", "周囲の土地を領有する(コスト: 人口1)", {}, (origin) => runCivCommand(origin, (r, player) => cmdClaim(player)));
+        cmd("buyrights", "開拓権を獲得する(コスト: 首都人口2)", {}, (origin) => runCivCommand(origin, (r, player) => cmdBuyRights(player)));
+        cmd("settle", "都市を建設する(コスト: 開拓権x1)", {}, (origin) => runCivCommand(origin, (r, player) => cmdSettle(player)));
+        cmd("chop", "足元の森林を伐採して住宅上限+1する", {}, (origin) => runCivCommand(origin, (r, player) => cmdChop(player)));
+
+        cmd("install", "足元の空き領有マスに施設を設置する", {
+            mandatoryParameters: [{ name: "civ:facilityId", type: CustomCommandParamType.Enum }],
+        }, (origin, facilityId) => runCivCommand(origin, (r, player) => cmdInstallFacility(player, facilityId)));
+
+        cmd("district", "足元の空き領有マスで区域の建設を開始する", {
+            mandatoryParameters: [{ name: "civ:districtId", type: CustomCommandParamType.Enum }],
+        }, (origin, districtId) => runCivCommand(origin, (r, player) => cmdStartDistrict(player, districtId)));
+
+        cmd("districtbuilding", "足元の区域に専用の建造物の建設を開始する", {
+            mandatoryParameters: [{ name: "civ:districtBuildingId", type: CustomCommandParamType.Enum }],
+        }, (origin, buildingId) => runCivCommand(origin, (r, player) => cmdStartDistrictBuilding(player, buildingId)));
+
+        cmd("foundreligion", "宗教を創始する", {}, (origin) => runCivCommand(origin, (r, player) => cmdFoundReligion(player)));
+
+        cmd("renamereligion", "創始した宗教の名前を変更する", {
+            mandatoryParameters: [{ name: "name", type: CustomCommandParamType.String }],
+        }, (origin, name) => runCivCommand(origin, (r, player) => cmdRenameReligion(player, name)));
+
+        cmd("buyreligious", "都市の信仰力を使って宗教ユニットを購入する", {
+            mandatoryParameters: [{ name: "civ:religiousUnitId", type: CustomCommandParamType.Enum }],
+        }, (origin, unitId) => runCivCommand(origin, (r, player) => cmdBuyReligiousUnit(player, unitId)));
+
+        cmd("info", "現在の情報を表示する", {}, (origin) => runCivCommand(origin, (r, player) => cmdInfo(player)));
+        cmd("menu", "メインメニューを開く", {}, (origin) => runCivCommand(origin, (r, player) => openMainMenu(player)));
+
+        cmd("build", "生産(ユニット/建造物)を開始する", {
+            mandatoryParameters: [{ name: "civ:productionId", type: CustomCommandParamType.Enum }],
+        }, (origin, productionId) => runCivCommand(origin, (r, player) => cmdStartProduction(player, productionId)));
+
+        cmd("cancelbuild", "進行中の生産を中止する(蓄積分は次に引き継ぎ)", {}, (origin) => runCivCommand(origin, (r, player) => cmdCancelProduction(player)));
+
+        cmd("research", "技術の研究を開始する", {
+            mandatoryParameters: [{ name: "civ:technologyId", type: CustomCommandParamType.Enum }],
+        }, (origin, techId) => runCivCommand(origin, (r, player) => cmdStartProgress(player, "technology", techId)));
+
+        cmd("civic", "社会制度の研究を開始する", {
+            mandatoryParameters: [{ name: "civ:civicId", type: CustomCommandParamType.Enum }],
+        }, (origin, civicId) => runCivCommand(origin, (r, player) => cmdStartProgress(player, "civic", civicId)));
+
+        cmd("launch", "指定マスへミサイルを発射する", {
+            mandatoryParameters: [
+                { name: "x", type: CustomCommandParamType.Integer },
+                { name: "z", type: CustomCommandParamType.Integer },
+            ],
+        }, (origin, x, z) => runCivCommand(origin, (r, player) => cmdLaunchMissile(player, x, z)));
+
+        // 💡 国家の追加・切替・一覧は「実プレイヤー」自身の操作(現在操作中の国家に関係なく常に本人扱い)。
+        cmd("addciv", "ソロテスト用の国家を追加する(OPのみ)", {
+            optionalParameters: [{ name: "name", type: CustomCommandParamType.String }],
+        }, (origin, name) => runCivCommand(origin, (realPlayer) => cmdAddCiv(realPlayer, name)));
+
+        cmd("switchciv", "操作中の国家を切り替える", {
+            optionalParameters: [{ name: "index", type: CustomCommandParamType.Integer }],
+        }, (origin, index) => runCivCommand(origin, (realPlayer) => cmdSwitchCiv(realPlayer, index !== undefined ? String(index) : undefined)));
+
+        cmd("civs", "操作できる国家の一覧を表示する", {}, (origin) => runCivCommand(origin, (realPlayer) => cmdListCivs(realPlayer)));
+
+        cmd("help", "コマンド一覧を表示する", {}, (origin) => runCivCommand(origin, (r, player) => cmdHelp(player)));
     });
 }
 
@@ -1113,6 +1277,10 @@ export function cmdMoveCombatUnit(player, fromTx, fromTz, toTx, toTz) {
     if (!unit || unit.ownerId !== player.id) { reply(player, "§cこのマスに移動可能なあなたの戦闘ユニットはいません。"); return { ok: false }; }
     if (!target) { reply(player, "§c移動先がマップ外です。"); return { ok: false }; }
     if (target.combatUnit) { reply(player, "§c移動先にはすでに戦闘ユニットが存在します。"); return { ok: false }; }
+    if (!canUnitEnterTile(unit, target)) {
+        reply(player, unit.domain === "naval" ? "§c海軍ユニットは水上マス(海・川・池・湖)にしか移動できません。" : "§c陸軍ユニットは陸地マスにしか移動できません(水上・山脈マスには移動できません)。");
+        return { ok: false };
+    }
 
     const distance = Math.max(Math.abs(toTx - fromTx), Math.abs(toTz - fromTz));
     const remaining = unit.movementRemaining ?? unit.movement ?? 0;
@@ -1173,6 +1341,7 @@ export function cmdAttackCombatUnit(player, fromTx, fromTz, toTx, toTz) {
     if (result.defenderDestroyed) {
         lines.push(`§c💀 ${defenderLabel}は撃破されました！`);
         target.combatUnit = null;
+        removeUnitLabelAt(toTx, toTz);
     } else {
         lines.push(`§7 └ ${defenderLabel} 残りHP: ${Math.max(0, Math.round(defender.hp))}/${defender.maxHp ?? 100}`);
         if (result.counterSkippedReason === "outOfDefenderRange") {
@@ -1182,6 +1351,7 @@ export function cmdAttackCombatUnit(player, fromTx, fromTz, toTx, toTz) {
             if (result.attackerDestroyed) {
                 lines.push(`§c💀 ${attackerLabel}は反撃により撃破されました！`);
                 source.combatUnit = null;
+                removeUnitLabelAt(fromTx, fromTz);
             } else {
                 lines.push(`§7 └ ${attackerLabel} 残りHP: ${Math.max(0, Math.round(attacker.hp))}/${attacker.maxHp ?? 100}`);
             }

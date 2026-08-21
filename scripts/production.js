@@ -15,6 +15,11 @@
 //   3. progress が cost に到達したら完成。onComplete() を呼び、超過分は productionCarry として次回に持ち越す。
 //   4. cancelProduction() で生産を中止した場合も、その時点の progress は productionCarry として持ち越される(消滅しない)。
 //
+// 【陸軍/海軍について】
+// 戦闘ユニットは domain: "land"(陸軍) / "naval"(海軍) を持つ(未指定は陸軍扱い)。
+// 陸軍ユニットは都市のマス(常に陸地)にそのまま配置できるが、海軍ユニットは都市に隣接する
+// 水上マス(海・川・池・湖)にのみ配置できる。placeProducedNavalUnit() がその配置を担う。
+//
 // 【労働者(worker)について】
 // 労働者は「行動回数」を持つ(1人につき WORKER_ACTIONS_PER_UNIT 回)。伐採などの労働者を消費する
 // アクションは、労働者を1人まるごと消費するのではなく、その行動回数を1減らすだけにする。行動回数が
@@ -23,6 +28,7 @@
 //   city.workers      = number   … 表示・互換用の労働者数(常に workerUnits.length と同期する)
 
 import { hasCompletedProgress, getDefinition } from "./progression.js";
+import { isWaterTerrain } from "./mapGen.js";
 
 /** 労働者1人が持つ行動回数。 */
 export const WORKER_ACTIONS_PER_UNIT = 3;
@@ -143,6 +149,36 @@ function placeProducedCombatUnit(ctx, createUnit) {
     return { cancelled: true, cancelReason: "noRoomNearby" };
 }
 
+/**
+ * 海軍ユニット生産の完了処理。都市自身のマスは常に陸地なので、そこには配置せず、
+ * 都市に隣接する8マスのうち「水上マス(海・川・池・湖)かつ戦闘ユニットが空いている」マスへ配置する。
+ * 隣接する水上マスが無い、またはすべて埋まっている場合は生産を中止する(進行度は保持される)。
+ * @param {any} ctx tickProduction から渡されるコンテキスト({ cityKey, tiles } など)
+ * @param {(ownerId: string, ownerName: string) => any} createUnit 配置するユニットのデータを作る関数
+ * @returns {{ cancelled: boolean, cancelReason?: "noNavalTile" } | undefined}
+ */
+function placeProducedNavalUnit(ctx, createUnit) {
+    const tile = ctx?.tiles?.[ctx?.cityKey];
+    if (!tile) return { cancelled: true, cancelReason: "noNavalTile" };
+
+    const newUnit = createUnit(tile.ownerId, tile.ownerName);
+
+    const [txStr, tzStr] = String(ctx.cityKey).split(",");
+    const tx = Number(txStr), tz = Number(tzStr);
+    for (let dz = -1; dz <= 1; dz++) {
+        for (let dx = -1; dx <= 1; dx++) {
+            if (dx === 0 && dz === 0) continue;
+            const neighborTile = ctx.tiles[`${tx + dx},${tz + dz}`];
+            if (neighborTile && isWaterTerrain(neighborTile.type) && !neighborTile.combatUnit) {
+                neighborTile.combatUnit = newUnit;
+                return undefined;
+            }
+        }
+    }
+
+    return { cancelled: true, cancelReason: "noNavalTile" };
+}
+
 export const PRODUCTION_DEFS = {
     worker: {
         label: "労働者",
@@ -171,9 +207,9 @@ export const PRODUCTION_DEFS = {
         cost: 30,
         requiresEmptyCombatTile: true,
         onComplete: (city, ctx) => placeProducedCombatUnit(ctx, (ownerId, ownerName) => ({
-            // 💡 attackRange: 近接ユニットのため攻撃距離は移動力と同じ(1)。
+            // 💡 attackRange: 近接ユニットのため攻撃距離は移動力と同じ(1)。domain: 陸軍ユニット。
             id: "warrior", label: "戦士", hp: 100, maxHp: 100, combatStrength: 20,
-            movement: 1, movementRemaining: 1, attackRange: 1, ownerId, ownerName,
+            movement: 1, movementRemaining: 1, attackRange: 1, domain: "land", ownerId, ownerName,
         })),
         completeMessage: (city) => `§e[Warrior]【${city.name}】に戦士を配置しました！ (HP: 100/100、戦闘力: 20)`,
     },
@@ -186,10 +222,10 @@ export const PRODUCTION_DEFS = {
         requiresTechnology: "archery",
         onComplete: (city, ctx) => placeProducedCombatUnit(ctx, (ownerId, ownerName) => ({
             // 💡 弓兵は遠距離戦闘ユニット: 遠距離戦闘力20、近距離戦闘力15の2種類の戦闘力を持つ。
-            //    combatStrength は互換表示用に近距離戦闘力と同じ値を入れておく。
+            //    combatStrength は互換表示用に近距離戦闘力と同じ値を入れておく。domain: 陸軍ユニット。
             id: "archer", label: "弓兵", hp: 100, maxHp: 100,
             combatStrength: 15, rangedCombatStrength: 20, meleeCombatStrength: 15,
-            movement: 1, movementRemaining: 1, attackRange: 2, ownerId, ownerName,
+            movement: 1, movementRemaining: 1, attackRange: 2, domain: "land", ownerId, ownerName,
         })),
         completeMessage: (city) => `§e[Archer]【${city.name}】に弓兵を配置しました！ (HP: 100/100、遠距離戦闘力: 20、近距離戦闘力: 15)`,
     },
@@ -201,9 +237,23 @@ export const PRODUCTION_DEFS = {
         requiresEmptyCombatTile: true,
         onComplete: (city, ctx) => placeProducedCombatUnit(ctx, (ownerId, ownerName) => ({
             id: "uoooo", label: "うおｗ", hp: 100, maxHp: 100, combatStrength: 200,
-            movement: 10, movementRemaining: 10, attackRange: 20, ownerId, ownerName,
+            movement: 10, movementRemaining: 10, attackRange: 20, domain: "land", ownerId, ownerName,
         })),
         completeMessage: (city) => `§e[Warrior]【${city.name}】にうおｗを配置しました！ (HP: 100/100、戦闘力: 20)`,
+    },
+    battleship: {
+        label: "軍艦",
+        icon: "[Battleship]",
+        category: "unit",
+        cost: 60,
+        // 💡 都市自身のマスではなく、隣接する水上マス(海・川・池・湖)に配置される海軍ユニット。
+        //    隣接する水上マスが無い(内陸の都市)場合は生産完了時に中止される。
+        onComplete: (city, ctx) => placeProducedNavalUnit(ctx, (ownerId, ownerName) => ({
+            // 💡 domain: 海軍ユニット。水上マスにしか進入できない。
+            id: "battleship", label: "軍艦", hp: 100, maxHp: 100, combatStrength: 25,
+            movement: 2, movementRemaining: 2, attackRange: 2, domain: "naval", ownerId, ownerName,
+        })),
+        completeMessage: (city) => `§e[Battleship]【${city.name}】に軍艦を配置しました！ (HP: 100/100、戦闘力: 25)`,
     },
     tradingPost: {
         label: "交易所",
@@ -371,6 +421,8 @@ export function tickProduction(city, productionAmount, ctx) {
             const progress = city.production.progress;
             const reasonText = completionResult.cancelReason === "enemyOccupied"
                 ? "都市のマスに敵の戦闘ユニットがいる"
+                : completionResult.cancelReason === "noNavalTile"
+                ? "隣接する海・川などの水上マスが無い(または空きが無い)"
                 : "配置できる空きマスが周囲に無い";
             const message = `§c⚠【${city.name}】${def.label}の生産が完了しましたが、${reasonText}ため配置できず中止されました。(進行度は保持されます)`;
 

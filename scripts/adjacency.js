@@ -32,8 +32,10 @@
 //   {
 //     id: string,                          … 識別用ID(内訳表示・デバッグ用)
 //     label: string,                       … 表示名
-//     match: (neighborTile) => boolean,    … 隣接マス1つがこの条件を満たすか判定する関数
-//     yieldPerMatch: { [key: string]: number }, … 条件を満たす隣接マス1つにつき加算する量
+//     match: (neighborTile) => boolean | number, … 隣接マス1つがこの条件を満たすか判定する関数。
+//                                             真偽値の代わりに数値を返すと、その数値を「重み」として扱う
+//                                             (例: 山脈は山の2倍の重み、のように地形ごとに倍率を変えたい場合)。
+//     yieldPerMatch: { [key: string]: number }, … 条件を満たす隣接マス1つ(重み1)につき加算する量
 //     maxMatches?: number,                 … 加算対象にする隣接マス数の上限(省略時は上限なし、最大8)
 //     oncePerTile?: boolean,               … true なら「1つでも条件を満たせば固定量を1回だけ加算」
 //                                             (maxMatches より優先される)
@@ -42,9 +44,12 @@
 //
 // 【条件判定用のヘルパー】
 //   matchesTerrain(...types)       … 指定した地形タイプのいずれかであれば true
+//   matchesTerrainWeighted(map)   … 地形タイプごとに異なる重みを設定できる版(例: { mountain: 1, mountainRange: 2 })
 //   matchesResource(...resources) … 指定した資源のいずれかがあれば true
 //   matchesBuilding(buildingId)   … 指定した建造物(city[buildingId] が true)を持つ都市マスなら true
 //   matchesAnyCity()               … 何らかの都市があるマスなら true
+//   matchesFacility(facilityId)   … 指定した施設(facility.id)を持つマスなら true(省略時は施設なら何でも true)
+//   matchesDistrict(districtId)   … 指定した区域(district.id)を持つマスなら true(省略時は区域なら何でも true)
 //   これらで表現しきれない条件は、match に直接カスタム関数を書けばよい。
 
 /** 指定したマスを取り囲む8マス(存在する範囲のみ)のタイルデータ一覧を返す。 */
@@ -65,6 +70,19 @@ export function matchesTerrain(...types) {
     return (tile) => !!tile && types.includes(tile.type);
 }
 
+/**
+ * 地形タイプごとに異なる重み(倍率)を指定できる版。例: 山脈は山の2倍の恩恵にしたい場合、
+ * matchesTerrainWeighted({ mountain: 1, mountainRange: 2 }) のように書く。
+ * 戻り値の関数は、マッチしない地形なら false、マッチする地形なら重み(数値)を返す。
+ */
+export function matchesTerrainWeighted(weightMap) {
+    return (tile) => {
+        if (!tile) return false;
+        const weight = weightMap[tile.type];
+        return weight ? weight : false;
+    };
+}
+
 /** 指定した資源一覧のいずれかにマッチする判定関数を作る。例: matchesResource("oil", "iron") */
 export function matchesResource(...resources) {
     return (tile) => !!tile && !!tile.resource && resources.includes(tile.resource);
@@ -81,6 +99,22 @@ export function matchesAnyCity() {
 }
 
 /**
+ * 指定した施設(facility)を持つマスにマッチする判定関数を作る。
+ * IDを省略すると、施設の種類を問わず「何らかの施設があるマス」にマッチする。
+ */
+export function matchesFacility(facilityId) {
+    return (tile) => facilityId ? tile?.facility?.id === facilityId : !!tile?.facility;
+}
+
+/**
+ * 指定した区域(district)を持つマスにマッチする判定関数を作る。
+ * IDを省略すると、区域の種類を問わず「何らかの区域があるマス」にマッチする。
+ */
+export function matchesDistrict(districtId) {
+    return (tile) => districtId ? tile?.district?.id === districtId : !!tile?.district;
+}
+
+/**
  * 隣接マス一覧を既に取得済みの場合に、ルールとの照合と加算を行う内部関数。
  * getBuildingAdjacencyYields() では同じ都市について建造物ごとにルールを評価するため、
  * 8近傍の取得を建造物ごとに繰り返さないようにする。
@@ -94,14 +128,18 @@ function getAdjacencyBonusDetailedFromNeighbors(neighbors, rules) {
         if (typeof rule?.match !== "function" || !rule.yieldPerMatch) continue;
 
         let matchCount = 0;
+        let weightSum = 0;
         for (const neighbor of neighbors) {
-            if (rule.match(neighbor)) matchCount++;
+            const result = rule.match(neighbor);
+            if (!result) continue;
+            matchCount++;
+            weightSum += typeof result === "number" ? result : 1;
         }
         if (matchCount === 0) continue;
 
         const effectiveCount = rule.oncePerTile
             ? 1
-            : (typeof rule.maxMatches === "number" ? Math.min(matchCount, rule.maxMatches) : matchCount);
+            : (typeof rule.maxMatches === "number" ? Math.min(weightSum, rule.maxMatches) : weightSum);
 
         const ruleYields = {};
         for (const key in rule.yieldPerMatch) {

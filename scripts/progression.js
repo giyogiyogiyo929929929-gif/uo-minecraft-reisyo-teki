@@ -9,6 +9,10 @@ export const TECHNOLOGIES = {
     archery: { label: "弓術", cost: 15, prerequisites: ["animalHusbandry"] },
     // 💡 陶磁器: 前提条件なし。取得後、都市に穀物庫(食料生産量+1、住居+2)を建設できるようになる。
     pottery: { label: "陶磁器", cost: 10, prerequisites: [] },
+    // 💡 製錬技術: 前提は採掘。取得後、鉄のあるマスに施設「鍛冶場」を建設できるようになる。
+    smelting: { label: "製錬技術", cost: 100, prerequisites: ["mining"] },
+    // 💡 徒弟制度: 前提は製錬技術。取得後、区域「工業地帯」を配置できるようになる。
+    apprenticeship: { label: "徒弟制度", cost: 300, prerequisites: ["smelting"] },
 };
 
 export const CIVICS = {

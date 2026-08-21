@@ -8,11 +8,24 @@ const TICKING_Y_BELOW = 4;
 const TICKING_Y_ABOVE = 9;
 const TICKING_AREA_NAME_PREFIX = "civ_addon_gen_area";
 
+// 💡 isWater: 海軍ユニットのみ進入できる水上地形。impassable: どのユニットも進入できない地形
+//    (山脈。自然生成はされず、生成後処理で山マスが連結した箇所にのみ置き換わる)。
 export const TERRAIN_TYPES = {
-    grassland: { label: "草原", weight: 22 }, river: { label: "川", weight: 8 }, sea: { label: "海", weight: 10 },
+    grassland: { label: "草原", weight: 22 }, river: { label: "川", weight: 8, isWater: true }, sea: { label: "海", weight: 10, isWater: true },
     mountain: { label: "山", weight: 10 }, desert: { label: "砂漠", weight: 12 }, forest: { label: "森林", weight: 16 },
-    rainforest: { label: "熱帯雨林", weight: 10 }, cold: { label: "寒冷地", weight: 12 }, pond: { label: "池", weight: 0 }, lake: { label: "湖", weight: 0 },
+    rainforest: { label: "熱帯雨林", weight: 10 }, cold: { label: "寒冷地", weight: 12 }, pond: { label: "池", weight: 0, isWater: true }, lake: { label: "湖", weight: 0, isWater: true },
+    mountainRange: { label: "山脈", weight: 0, impassable: true },
 };
+
+/** 指定した地形タイプが、海軍ユニットのみ進入できる水上地形かどうか。 */
+export function isWaterTerrain(type) {
+    return !!TERRAIN_TYPES[type]?.isWater;
+}
+
+/** 指定した地形タイプが、どのユニットも進入できない地形(山脈)かどうか。 */
+export function isImpassableTerrain(type) {
+    return !!TERRAIN_TYPES[type]?.impassable;
+}
 
 export const RESOURCE_TYPES = {
     iron: { label: "鉄", category: "戦略", allowedTerrains: ["mountain", "grassland"], block: "minecraft:iron_ore" },
@@ -33,6 +46,7 @@ const RESOURCE_KEYS = Object.keys(RESOURCE_TYPES);
 const SURFACE_BLOCK_BY_TYPE = {
     grassland: "minecraft:grass_block", forest: "minecraft:grass_block", desert: "minecraft:sand", mountain: "minecraft:stone",
     river: "minecraft:water", pond: "minecraft:water", lake: "minecraft:water", sea: "minecraft:water", cold: "minecraft:snow", rainforest: "minecraft:podzol",
+    mountainRange: "minecraft:stone",
 };
 
 function pickWeightedType(rng) {
@@ -52,7 +66,7 @@ function calculateFoodYield(terrainType, resource, rng) {
     const roll = rng();
     if (terrainType === "grassland") base = roll < 0.6 ? 3 : (roll < 0.9 ? 2 : 1);
     else if (terrainType === "desert" || terrainType === "cold") base = roll < 0.7 ? 1 : (roll < 0.9 ? 2 : 3);
-    else if (terrainType === "mountain") base = roll < 0.6 ? 1 : (roll < 0.9 ? 2 : 3);
+    else if (terrainType === "mountain" || terrainType === "mountainRange") base = roll < 0.6 ? 1 : (roll < 0.9 ? 2 : 3);
     else base = roll < 0.3 ? 1 : (roll < 0.8 ? 2 : 3);
     if (resource === "wheat" || resource === "fish") base += 2;
     return Math.min(5, base);
@@ -135,6 +149,8 @@ function* shapeTile(dimension,baseX,ySurface,baseZ,type,resource) {
         case "grassland": setCol(dimension,x,ySurface,z,grass,dirt); break;
         case "desert": setCol(dimension,x,ySurface,z,sand,sandstone); break;
         case "mountain": { setCol(dimension,x,ySurface,z,stone,andesite,3); const dist=Math.abs(dx-2)+Math.abs(dz-2),peak=Math.max(0,3-dist); for(let h=1;h<=peak;h++) safeSetBlock(dimension,x,ySurface+h,z,h===peak?stone:andesite); break; }
+        // 💡 山脈: 通常の山より一回り高く険しい見た目にして、進入不可の障害物であることを視覚的にも示す。
+        case "mountainRange": { setCol(dimension,x,ySurface,z,stone,andesite,4); const dist=Math.abs(dx-2)+Math.abs(dz-2),peak=Math.max(0,5-dist); for(let h=1;h<=peak;h++) safeSetBlock(dimension,x,ySurface+h,z,h===peak?stone:andesite); break; }
         case "river": case "pond": case "lake": setCol(dimension,x,ySurface,z,water,sand,1); safeSetBlock(dimension,x,ySurface-2,z,clay); break;
         case "sea": setCol(dimension,x,ySurface,z,water,sand,1); safeSetBlock(dimension,x,ySurface-2,z,prismarine); break;
         case "cold": setCol(dimension,x,ySurface,z,snow,packedIce,2); break;
@@ -170,6 +186,9 @@ export async function generateMap(dimension,{originX,ySurface,originZ,width,heig
     for(let tz=0;tz<height;tz++)for(let tx=0;tx<width;tx++)if(grid[tz][tx]==="river"&&!connectedRiver[tz][tx])grid[tz][tx]="pond";
     const visitedPond=Array.from({length:height},()=>Array(width).fill(false));
     for(let tz=0;tz<height;tz++)for(let tx=0;tx<width;tx++)if(grid[tz][tx]==="pond"&&!visitedPond[tz][tx]){const component=[],pQueue=[{x:tx,z:tz}];let pQueueHead=0;visitedPond[tz][tx]=true;while(pQueueHead<pQueue.length){const curr=pQueue[pQueueHead++];component.push(curr);for(const d of [{x:1,z:0},{x:-1,z:0},{x:0,z:1},{x:0,z:-1}]){const nx=curr.x+d.x,nz=curr.z+d.z;if(grid[nz]?.[nx]==="pond"&&!visitedPond[nz][nx]){visitedPond[nz][nx]=true;pQueue.push({x:nx,z:nz});}}}if(component.length>=3)for(const p of component)grid[p.z][p.x]="lake";}
+    // 💡 山マスが2つ以上(隣接4方向で)連結している箇所は「山脈」に変換し、ユニットが進入不可の障害物にする。
+    const visitedMountain=Array.from({length:height},()=>Array(width).fill(false));
+    for(let tz=0;tz<height;tz++)for(let tx=0;tx<width;tx++)if(grid[tz][tx]==="mountain"&&!visitedMountain[tz][tx]){const component=[],mQueue=[{x:tx,z:tz}];let mQueueHead=0;visitedMountain[tz][tx]=true;while(mQueueHead<mQueue.length){const curr=mQueue[mQueueHead++];component.push(curr);for(const d of [{x:1,z:0},{x:-1,z:0},{x:0,z:1},{x:0,z:-1}]){const nx=curr.x+d.x,nz=curr.z+d.z;if(grid[nz]?.[nx]==="mountain"&&!visitedMountain[nz][nx]){visitedMountain[nz][nx]=true;mQueue.push({x:nx,z:nz});}}}if(component.length>=2)for(const p of component)grid[p.z][p.x]="mountainRange";}
     const failedTiles=[];
     for(let bandTz=0;bandTz<height;bandTz+=TICKING_BAND_TILES){const bandTzEnd=Math.min(height,bandTz+TICKING_BAND_TILES);for(let bandTx=0;bandTx<width;bandTx+=TICKING_BAND_TILES){const bandTxEnd=Math.min(width,bandTx+TICKING_BAND_TILES);if(useTickingArea){const minBX=originX+bandTx*TILE_SIZE-2,maxBX=originX+bandTxEnd*TILE_SIZE+2,minBZ=originZ+bandTz*TILE_SIZE-2,maxBZ=originZ+bandTzEnd*TILE_SIZE+2;await setBandTickingArea(dimension,minBX,minBZ,maxBX,maxBZ,ySurface);await waitForBandLoaded(dimension,minBX,minBZ,maxBX,maxBZ,ySurface);}await runJobAsync(function*(){for(let tz=bandTz;tz<bandTzEnd;tz++)for(let tx=bandTx;tx<bandTxEnd;tx++){const type=grid[tz][tx],resource=pickRandomResource(type,rng),foodYield=calculateFoodYield(type,resource,rng);let productionYield=Math.floor(rng()*3)+1;if(resource&&RESOURCE_TYPES[resource]?.category==="戦略")productionYield+=2;const baseX=originX+tx*TILE_SIZE,baseZ=originZ+tz*TILE_SIZE;yield*shapeTile(dimension,baseX,ySurface,baseZ,type,resource);if(isTilePlaced(dimension,baseX,ySurface,baseZ,type))onTileDone(tx,tz,type,resource,foodYield,productionYield);else failedTiles.push({tx,tz,type,resource,foodYield,productionYield,baseX,baseZ});}});}}
     const permanentlyFailedTiles=[];

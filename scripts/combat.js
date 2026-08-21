@@ -1,6 +1,12 @@
 // combat.js
 // 戦闘ユニット同士の戦闘（攻撃距離の判定・ダメージ計算）を管理するモジュール。
 //
+// 【陸軍/海軍の区分】
+// ・戦闘ユニットは unit.domain で陸軍("land")か海軍("naval")かを区別する(未指定の場合は陸軍扱い)。
+// ・陸軍ユニットは陸地マス(isWaterでもimpassableでもないマス)にのみ進入できる。
+// ・海軍ユニットは水上マス(isWaterなマス。川・海・池・湖)にのみ進入できる。
+// ・山脈マス(impassable)には、陸軍・海軍を問わずどのユニットも進入できない。
+//
 // 【ルール】
 // ・攻撃距離は、そのユニットの移動力(movement)と同じ範囲を使う(attackRange を明示的に
 //   持たせている場合はそちらを優先。将来、移動力と攻撃距離が異なるユニットを追加したくなった
@@ -30,6 +36,8 @@
 //   このペナルティは常に「現在のHP」から算出する派生値であり、combatStrength等の基礎値自体は
 //   書き換えない。ダメージを受けた直後の反撃にも即座に反映される。
 
+import { isWaterTerrain, isImpassableTerrain } from "./mapGen.js";
+
 const DAMAGE_MIN = 24;
 const DAMAGE_MAX = 36;
 const DAMAGE_EXPONENT_SCALE = 0.04;
@@ -42,6 +50,28 @@ const RANGED_UNIT_ATTACK_RANGE_THRESHOLD = 2;
 /** ユニットの攻撃距離を取得する。明示的な attackRange が無ければ移動力(movement)と同じ範囲を使う。 */
 export function getAttackRange(unit) {
     return unit?.attackRange ?? unit?.movement ?? 0;
+}
+
+/** このユニットが海軍ユニット(domain: "naval")かどうか。 */
+export function isNavalUnit(unit) {
+    return unit?.domain === "naval";
+}
+
+/** このユニットが陸軍ユニットかどうか(domainが未指定の場合も陸軍として扱う)。 */
+export function isLandUnit(unit) {
+    return !isNavalUnit(unit);
+}
+
+/**
+ * 指定した戦闘ユニットが、指定したタイルへ進入できるかどうかを判定する。
+ * ・山脈マス(impassable)は陸軍・海軍を問わず進入不可。
+ * ・陸軍ユニットは水上マス(isWater)に進入不可、海軍ユニットは水上マス以外に進入不可。
+ */
+export function canUnitEnterTile(unit, tile) {
+    if (!tile) return false;
+    if (isImpassableTerrain(tile.type)) return false;
+    const water = isWaterTerrain(tile.type);
+    return isNavalUnit(unit) ? water : !water;
 }
 
 /**

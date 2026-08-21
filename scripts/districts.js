@@ -22,7 +22,7 @@
 //   - perPopulationYields: この区域を持つ都市に、人口1につき追加で加算されるボーナス。
 
 import { hasCompletedProgress, getDefinition } from "./progression.js";
-import { matchesTerrain, getAdjacencyBonus } from "./adjacency.js";
+import { matchesTerrainWeighted, matchesFacility, matchesDistrict, matchesAnyCity, getAdjacencyBonus } from "./adjacency.js";
 
 /**
  * @typedef {Object} DistrictDef
@@ -32,6 +32,8 @@ import { matchesTerrain, getAdjacencyBonus } from "./adjacency.js";
  * @property {string} [requiresTechnology] 配置に必要な技術ID(technology progression)
  * @property {Record<string, number>} [perPopulationYields] この区域を持つ都市に、人口1につき
  *   追加で加算される産出量(例: { faith: 2 })
+ * @property {Record<string, number>} [flatYields] この区域があるだけで(隣接マスに関係なく)
+ *   都市に毎ターン加算される産出量(例: { production: 3 })
  * @property {Array<any>} [adjacencyBonuses] この区域のマスを基準にした隣接ボーナスのルール一覧
  *   (adjacency.js 参照)
  * @property {(tx: number, tz: number) => string} [completeMessage] 完成時のメッセージ生成関数
@@ -44,11 +46,27 @@ export const DISTRICT_DEFS = {
         requiresTechnology: "astrology",
         // 💡 この区域を持つ都市は、人口1につき信仰力+2(通常の人口ぶんの信仰力とは別に追加)。
         perPopulationYields: { faith: 2 },
-        // 💡 聖地に隣接する「山」「森林」1マスにつき信仰力+1(上限なし)。
+        // 💡 聖地に隣接する「山」「森林」1マスにつき信仰力+1(山脈はその2倍の+2、上限なし)。
         adjacencyBonuses: [
-            { id: "sacredSiteNature", label: "山・森からの神聖な恩恵", match: matchesTerrain("mountain", "forest"), yieldPerMatch: { faith: 1 } },
+            { id: "sacredSiteNature", label: "山・山脈・森からの神聖な恩恵", match: matchesTerrainWeighted({ mountain: 1, mountainRange: 2, forest: 1 }), yieldPerMatch: { faith: 1 } },
         ],
         completeMessage: (tx, tz) => `§e🎉 (${tx}, ${tz}) に聖地が完成しました！`,
+    },
+    industrialZone: {
+        label: "工業地帯",
+        icon: "[Industrial]",
+        cost: 60,
+        requiresTechnology: "apprenticeship",
+        // 💡 工業地帯があるだけで、都市の生産力+3(隣接マスに関係なく毎ターン)。
+        flatYields: { production: 3 },
+        adjacencyBonuses: [
+            { id: "industrialQuarry", label: "採石場からの恩恵", match: matchesFacility("quarry"), yieldPerMatch: { production: 1 } },
+            { id: "industrialMountain", label: "山・山脈からの恩恵", match: matchesTerrainWeighted({ mountain: 1, mountainRange: 2 }), yieldPerMatch: { production: 1 } },
+            { id: "industrialOtherDistrict", label: "他の区域からの恩恵", match: matchesDistrict(), yieldPerMatch: { production: 0.5 } },
+            { id: "industrialBlacksmith", label: "鍛冶場からの恩恵", match: matchesFacility("blacksmith"), yieldPerMatch: { production: 2 } },
+            { id: "industrialCity", label: "都市からの恩恵", match: matchesAnyCity(), yieldPerMatch: { production: 0.5 } },
+        ],
+        completeMessage: (tx, tz) => `§e🎉 (${tx}, ${tz}) に工業地帯が完成しました！`,
     },
 };
 
@@ -255,6 +273,29 @@ export function getDistrictAdjacencyYields(assignedTiles, tiles) {
         const bonus = getAdjacencyBonus(t.tx, t.tz, tiles, def.adjacencyBonuses);
         for (const key in bonus) {
             totals[key] = (totals[key] ?? 0) + bonus[key];
+        }
+    }
+
+    return totals;
+}
+
+/**
+ * 都市が持つ区域から、隣接マスに関係なく「区域があるだけで」得られる産出量(flatYields)を合算する。
+ * @param {Array<{tx:number, tz:number, tile:any}>} assignedTiles その都市に帰属するマスの一覧
+ * @returns {{ [yieldKey: string]: number }}
+ */
+export function getDistrictFlatYields(assignedTiles) {
+    const totals = {};
+    if (!Array.isArray(assignedTiles)) return totals;
+
+    for (const t of assignedTiles) {
+        const district = t.tile?.district;
+        if (!district) continue;
+        const def = DISTRICT_DEFS[district.id];
+        if (!def?.flatYields) continue;
+
+        for (const key in def.flatYields) {
+            totals[key] = (totals[key] ?? 0) + def.flatYields[key];
         }
     }
 

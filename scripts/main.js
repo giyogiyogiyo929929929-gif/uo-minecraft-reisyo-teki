@@ -2,7 +2,7 @@
 // アドオンのエントリポイント。
 
 import { world, system, ItemStack } from "@minecraft/server";
-import { registerScriptCommands } from "./commands.js";
+import { registerScriptCommands, registerCustomCommands } from "./commands.js";
 import { openMainMenu } from "./ui.js";
 import { getTurnState, getTiles, getMapConfig, getStateVersion } from "./state.js";
 import { worldToTile, TERRAIN_TYPES, RESOURCE_TYPES } from "./mapGen.js";
@@ -11,6 +11,7 @@ import { PRODUCTION_DEFS } from "./production.js";
 import { getDistrictDef } from "./districts.js";
 import { getEffectiveCombatStrength, getEffectiveRangedStrength, isRangedUnit } from "./combat.js";
 import { getActingPlayer, resolveCivName } from "./civs.js";
+import { syncUnitLabels } from "./unitLabels.js";
 
 const MENU_ITEM_ID = "minecraft:compass";
 
@@ -48,6 +49,10 @@ function clearCityYieldCache() {
 
 // 修正①：イベント登録は worldLoad に入れず、最初から直接実行する
 registerScriptCommands();
+// 💡 カスタムスラッシュコマンド(/civ:settle など)の登録。system.beforeEvents.startup は
+//    スクリプト読み込み時に同期的に購読する必要があるため、registerScriptCommands() と同様に
+//    ここで直接呼び出す(イベントハンドラの中などから遅延して呼ぶと登録できない)。
+registerCustomCommands();
 
 /**
  * 💡 プレイヤーIDから現在のプレイヤー名を取得するヘルパー関数
@@ -82,7 +87,7 @@ world.afterEvents.playerSpawn.subscribe((eventData) => {
     const player = eventData.player;
     
     // 修正②：プレイヤーが入ってきたときに、アドオン読み込みメッセージを表示する
-    player.sendMessage("§6[Civ Tactics] §aアドオンを読み込みました。 !civ help でコマンド一覧を表示します。");
+    player.sendMessage("§6[Civ Tactics] §aアドオンを読み込みました。 /civ:help でコマンド一覧を表示します。");
 
     system.run(() => {
         try {
@@ -126,6 +131,10 @@ system.runInterval(() => {
     const turn = getTurnState();
     const config = getMapConfig();
     const tiles = getTiles();
+
+    // 💡 マスにいる戦闘ユニット(陸軍/海軍)をワールド内ラベルとして同期表示する。
+    //    内部で間引き実行されるため、ここで毎tick呼んでもコストは小さい。
+    syncUnitLabels();
 
     for (const player of world.getAllPlayers()) {
         // ==========================================
@@ -176,7 +185,7 @@ system.runInterval(() => {
                 : (tile.underDistrictConstruction ? " §5[🏛️区域: 建設中...]" : "");
             const combatUnit = tile.combatUnit;
             const combatUnitText = combatUnit
-                ? `§c[Warrior] ${combatUnit.label ?? combatUnit.id} | HP: ${combatUnit.hp ?? 0}/${combatUnit.maxHp ?? 100} | 戦闘力: ${formatCombatStrengthText(combatUnit)} | 移動力: ${combatUnit.movementRemaining ?? combatUnit.movement ?? 0}/${combatUnit.movement ?? 0} | 攻撃距離: ${combatUnit.attackRange ?? combatUnit.movement ?? 0}`
+                ? `§c[${combatUnit.domain === "naval" ? "Naval" : "Land"}] ${combatUnit.label ?? combatUnit.id} | HP: ${combatUnit.hp ?? 0}/${combatUnit.maxHp ?? 100} | 戦闘力: ${formatCombatStrengthText(combatUnit)} | 移動力: ${combatUnit.movementRemaining ?? combatUnit.movement ?? 0}/${combatUnit.movement ?? 0} | 攻撃距離: ${combatUnit.attackRange ?? combatUnit.movement ?? 0}`
                 : "§7戦闘ユニット: なし";
             const religiousUnit = tile.religiousUnit;
             const religiousUnitText = religiousUnit
@@ -197,8 +206,9 @@ system.runInterval(() => {
                 // 💡 市民配置ロジックを考慮した「今」実際に出ている産出量
                 const yields = getCachedCityCurrentYields(cityKey, tiles);
                 const oilText = yields.oil > 0 ? ` §7| §b🛢️x${yields.oil}` : "";
+                const ironText = yields.iron > 0 ? ` §7| §7⚒x${yields.iron}` : "";
                 const faithText = (yields.faith ?? 0) > 0 ? ` §7| §d🙏x${yields.faith}` : "";
-                currentYieldLine = `\n§f今の産出(都市全体): §a[Food]x${yields.food} §7| §6[Prod]x${yields.production}${oilText}${faithText}`;
+                currentYieldLine = `\n§f今の産出(都市全体): §a[Food]x${yields.food} §7| §6[Prod]x${yields.production}${oilText}${ironText}${faithText}`;
 
                 // 💡 帰属都市そのものの詳細情報
                 const c = cityTile.city;
