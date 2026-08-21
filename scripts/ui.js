@@ -211,9 +211,10 @@ export async function openMainMenu(player) {
     }
 
     const buttons = [];
-    if (!turn.started) { 
+    if (!turn.started) {
         if (isOp) { buttons.push({ text: "ゲームを開始する", action: "start" });  }
-        buttons.push({ text: "ゲームに参加する", action: "join" }); 
+        buttons.push({ text: "ゲームに参加する", action: "join" });
+        if (isOp) buttons.push({ text: "§d👥【管理者】全プレイヤーを参加待機状態にする", action: "joinall" });
     } else {
         buttons.push({ text: "§a🔬 研究ツリー", action: "technology" });
         buttons.push({ text: "§d📜 社会制度ツリー", action: "civic" });
@@ -305,6 +306,7 @@ export async function openMainMenu(player) {
     switch (selectedAction) {
         case "start": startGame(); break;
         case "join": player.sendMessage(joinGame(player).message); break;
+        case "joinall": if (isOp) (await import("./commands.js")).cmdJoinAll(player); break;
         case "claim": (await import("./commands.js")).cmdClaim(player); break;
         case "buyrights": (await import("./commands.js")).cmdBuyRights(player); break;
         case "settle": (await import("./commands.js")).cmdSettle(player); break;

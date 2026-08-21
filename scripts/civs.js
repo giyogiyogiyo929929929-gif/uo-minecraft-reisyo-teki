@@ -31,7 +31,7 @@ function getOnlinePlayers() {
     return onlinePlayersCache;
 }
 
-function getOnlinePlayerById(id) {
+export function getOnlinePlayerById(id) {
     getOnlinePlayers();
     return onlinePlayersByIdCache?.get(id) ?? null;
 }
@@ -167,9 +167,17 @@ export function getRealPlayer(player) {
 }
 
 /**
- * 実プレイヤーをプロトタイプにした薄いラッパーを返す。
- * ネイティブ Player のメソッドは実体を this として呼び出せるため、
- * Proxy の不変条件違反を避けつつ、仮想国家のID/名前/保存領域だけを差し替える。
+ * 実プレイヤーをラップした薄いプロキシを返す。仮想国家のID/名前/保存領域だけを差し替え、
+ * それ以外(location、dimension、sendMessage など)はすべて実プレイヤー本体に委譲する。
+ *
+ * 💡 以前は Object.create(realPlayer) で「プロトタイプに実体を置く」方式だったが、
+ *    それだと acting.sendMessage(...) や acting.location のようにプロパティへ
+ *    "acting" 経由でアクセスした際、ネイティブ側の this / レシーバーが acting のまま
+ *    ネイティブハンドルとして認識されず、メソッド呼び出しが失敗したり(sendMessage)
+ *    ゲッターが undefined を返したり(location)する不具合があった。
+ *    Proxy の get トラップで「関数は実体(target)に bind してから返す」
+ *    「ゲッター相当のプロパティは target 自身へのアクセスとして解決させる」ことで、
+ *    ネイティブ側には常に本物の realPlayer が this として渡るようにしている。
  */
 export function getActingPlayer(realPlayer) {
     const activeId = getActiveCivId(realPlayer);
@@ -178,11 +186,19 @@ export function getActingPlayer(realPlayer) {
     const civ = getVirtualCivById(activeId);
     if (!civ) return realPlayer;
 
-    const acting = Object.create(realPlayer);
-    Object.defineProperty(acting, "__realPlayer", { value: realPlayer, enumerable: false });
-    Object.defineProperty(acting, "id", { value: civ.id, enumerable: true, configurable: true });
-    Object.defineProperty(acting, "name", { value: civ.name, enumerable: true, configurable: true });
-    acting.getDynamicProperty = (key) => world.getDynamicProperty(`civ:npc:${civ.id}:${key}`);
-    acting.setDynamicProperty = (key, value) => world.setDynamicProperty(`civ:npc:${civ.id}:${key}`);
-    return acting;
+    const overrides = {
+        __realPlayer: realPlayer,
+        id: civ.id,
+        name: civ.name,
+        getDynamicProperty: (key) => world.getDynamicProperty(`civ:npc:${civ.id}:${key}`),
+        setDynamicProperty: (key, value) => world.setDynamicProperty(`civ:npc:${civ.id}:${key}`, value),
+    };
+
+    return new Proxy(realPlayer, {
+        get(target, prop, receiver) {
+            if (prop in overrides) return overrides[prop];
+            const value = target[prop];
+            return typeof value === "function" ? value.bind(target) : value;
+        },
+    });
 }

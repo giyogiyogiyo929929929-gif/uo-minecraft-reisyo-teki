@@ -470,6 +470,7 @@ adjacencyBonuses: [
 ```
 /civ:generate <幅> <高さ>   マップ生成(OPのみ)
 /civ:join                  ゲームに参加
+/civ:joinall               ワールドにいる全プレイヤーを一括で参加待機状態にする(OPのみ)
 /civ:start                 ゲーム開始(OPのみ)
 /civ:end                   ゲームをリセット(OPのみ)
 /civ:endturn               自分のターンを終了

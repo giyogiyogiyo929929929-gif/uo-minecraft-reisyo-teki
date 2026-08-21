@@ -7,7 +7,7 @@ import { PRODUCTION_DEFS, canStartProduction, startProduction, cancelProduction,
 import { getDefinition, getKindLabel, startProgress, getDefinitions } from "./progression.js";
 import { hasDiplomaticAgreement, signAgreement } from "./diplomacy.js";
 import { getAttackRange, resolveCombat, tileDistance, canUnitEnterTile } from "./combat.js";
-import { addVirtualCiv, getControllableCivs, getActiveCivId, setActiveCivId, getActingPlayer } from "./civs.js";
+import { addVirtualCiv, getControllableCivs, getActiveCivId, setActiveCivId, getActingPlayer, getOnlinePlayerById } from "./civs.js";
 import { getFacilityDef, canInstallFacility, installFacility, getFacilityIds } from "./facilities.js";
 import { getDistrictDef, canStartDistrict, startDistrictConstruction, getDistrictBuildingDef, canStartDistrictBuilding, startDistrictBuildingConstruction, getDistrictIds, getDistrictBuildingIds } from "./districts.js";
 import {
@@ -71,6 +71,7 @@ function cmdHelp(player) {
         "§7(スラッシュコマンド入力時、コマンド名・引数はタブ補完/候補表示が効きます)",
         "§e/civ:generate <幅> <高さ> §f: マップ生成(OPのみ)",
         "§e/civ:join §f: ゲームに参加",
+        "§d/civ:joinall §f: ワールドにいる全プレイヤーを一括で参加待機状態にする(OPのみ)",
         "§e/civ:start §f: ゲーム開始(OPのみ)",
         "§c/civ:end §f: ゲームをリセット(OPのみ)",
         "§e/civ:endturn §f: 自分のターンを終了",
@@ -266,6 +267,21 @@ function cmdGenerate(player, args) {
 }
 
 function cmdJoin(player) { reply(player, joinGame(player).message); }
+
+/** 🛠 OP用: ワールドに今いる全プレイヤーを一括で参加待機状態にする(各自が /civ:join する手間を省く)。 */
+export function cmdJoinAll(player) {
+    if (!isOperator(player)) { reply(player, "§cこのコマンドはOPのみ実行できます。"); return; }
+    const turn = getTurnState();
+    if (turn.started) { reply(player, "§cゲーム進行中です。ゲームをリセットしてから実行してください。"); return; }
+
+    let joined = 0, alreadyJoined = 0;
+    for (const p of world.getAllPlayers()) {
+        const result = joinGame(p);
+        if (result.ok) joined++; else alreadyJoined++;
+    }
+    world.sendMessage(`§a[Civ Tactics] ワールドにいる${joined}人のプレイヤーを参加待機状態にしました。§7(既に参加済み: ${alreadyJoined}人)`);
+}
+
 function cmdStart(player) { if (isOperator(player)) startGame(); }
 function cmdEndTurn(player) { const result = endTurn(player); if (!result.ok) reply(player, result.message); }
 
@@ -1051,6 +1067,7 @@ export function registerScriptCommands() {
             switch (sub) {
                 case "generate": cmdGenerate(player, args); break;
                 case "join": cmdJoin(player); break;
+                case "joinall": cmdJoinAll(player); break;
                 case "start": cmdStart(player); break;
                 case "end": cmdEndGame(player); break;
                 case "endturn": cmdEndTurn(player); break;
@@ -1135,16 +1152,25 @@ export function registerCustomCommands() {
         registerEnumSafe("civ:civicId", Object.keys(getDefinitions("civic")));
 
         /**
-         * コマンド実行者が実プレイヤーであることを確認し、実際の処理を次のtickに委譲する
-         * (scriptEventReceive版と同じく system.run() 経由で実行し、早期実行時の制約を避ける)。
+         * コマンド実行者が実プレイヤーであることを確認し、実際の処理を呼び出す。
          * fn には (realPlayer, player) が渡される。player は「現在操作中の国家」(civs.js)。
+         *
+         * 💡 scriptEventReceive版とは異なり、ここでは system.run() で次tickに遅延させない。
+         *    カスタムコマンドのコールバックは通常のコマンド実行と同じ書き込み可能な文脈で
+         *    同期的に呼ばれるため遅延は不要。
+         * 💡 origin.sourceEntity をそのまま使うと、Player::sendMessage が
+         *    "object bound to prototype does not exist" で失敗することがある
+         *    (カスタムコマンド用の一時的なハンドルであり、getActingPlayer() の
+         *    Object.create() による委譲パターンと相性が悪いとみられる)。
+         *    world.getAllPlayers() から同じIDの「本物の」Playerハンドルを取り直すことで回避する。
          */
         function runCivCommand(origin, fn) {
-            const realPlayer = origin?.sourceEntity;
-            if (!realPlayer || realPlayer.typeId !== "minecraft:player") {
+            const sourceEntity = origin?.sourceEntity;
+            if (!sourceEntity || sourceEntity.typeId !== "minecraft:player") {
                 return { status: CustomCommandStatus.Failure, message: "§cこのコマンドはプレイヤーからのみ実行できます。" };
             }
-            system.run(() => fn(realPlayer, getActingPlayer(realPlayer)));
+            const realPlayer = getOnlinePlayerById(sourceEntity.id) ?? sourceEntity;
+            fn(realPlayer, getActingPlayer(realPlayer));
             return { status: CustomCommandStatus.Success };
         }
 
@@ -1169,6 +1195,7 @@ export function registerCustomCommands() {
         }, (origin, width, height) => runCivCommand(origin, (r, player) => cmdGenerate(player, [String(width), String(height)])));
 
         cmd("join", "ゲームに参加する", {}, (origin) => runCivCommand(origin, (r, player) => cmdJoin(player)));
+        cmd("joinall", "ワールドにいる全プレイヤーを一括で参加待機状態にする(OPのみ)", {}, (origin) => runCivCommand(origin, (r, player) => cmdJoinAll(player)));
         cmd("start", "ゲームを開始する(OPのみ)", {}, (origin) => runCivCommand(origin, (r, player) => cmdStart(player)));
         cmd("end", "ゲームをリセットする(OPのみ)", {}, (origin) => runCivCommand(origin, (r, player) => cmdEndGame(player)));
         cmd("endturn", "自分のターンを終了する", {}, (origin) => runCivCommand(origin, (r, player) => cmdEndTurn(player)));
