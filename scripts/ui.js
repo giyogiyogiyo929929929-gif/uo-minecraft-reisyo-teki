@@ -1,21 +1,21 @@
 import { world, Player, PlayerPermissionLevel } from "@minecraft/server";
 import { ActionFormData, ModalFormData } from "@minecraft/server-ui";
-import { getMapConfig, getTile, getTiles, setTiles } from "./state.js";
+import { getMapConfig, getTile, getTiles, setTiles, getMatchSettings, setMatchSettings } from "./state.js";
 import { worldToTile, TERRAIN_TYPES, RESOURCE_TYPES } from "./mapGen.js"
-import { turnInfoText, endTurn, forceEndTurn, isPlayersTurn, joinGame, endGame, getTurnState, calculateCityFoodIncomes, getCityCurrentYields, startGame, debugForceVictory, connectTradeRoutes } from "./turns.js";
+import { turnInfoText, isPlayersTurn, joinGame, endGame, getTurnState, calculateCityFoodIncomes, getCityCurrentYields, debugForceVictory, connectTradeRoutes } from "./turns.js";
 import { PRODUCTION_DEFS, canStartProduction, getTotalWorkerActionsRemaining, WORKER_ACTIONS_PER_UNIT, getWorkerCount } from "./production.js";
 import { getFacilityIds, getFacilityDef, canInstallFacility } from "./facilities.js";
-import { getDistrictIds, getDistrictDef, canStartDistrict, getDistrictBuildingIds, getDistrictBuildingDef, canStartDistrictBuilding, isSacredSiteTile } from "./districts.js";
+import { getDistrictIds, getDistrictDef, canStartDistrict, getDistrictBuildingIds, getDistrictBuildingDef, canStartDistrictBuilding, isSacredSiteTile, hasCityDistrict } from "./districts.js";
 import {
     getReligiousUnitIds, getReligiousUnitDef, hasFoundedReligion, getReligionName,
     canFoundReligion, getTotalCivFaith, getNationalDominantReligion,
     getCityFollowers, getCityDominantReligion,
 } from "./religion.js";
 import { getDefinitions, getKindLabel, getPointsLabel, getProgressState, hasCompletedProgress, getDefinition } from "./progression.js";
-import { getRelation, sendRequest, getRequestsFor, acceptRequest, rejectRequest, breakRelation, hasDiplomaticAgreement } from "./diplomacy.js";
+import { getRelation, sendRequest, getRequestsFor, acceptRequest, rejectRequest, breakRelation, declareWar, isAtWar, hasDiplomaticAgreement } from "./diplomacy.js";
 import { getAttackRange, getAttackableTargets, getEffectiveCombatStrength, isRangedUnit, getEffectiveRangedStrength, canUnitEnterTile } from "./combat.js";
 import { resolveOwningCityKey, getAdjacentTileEntries } from "./adjacency.js";
-import { getRealPlayer, getControllableCivs, getActiveCivId, setActiveCivId, addVirtualCiv, getCivStorageHandle, resolveCivName } from "./civs.js";
+import { getRealPlayer, getControllableCivs, getActiveCivId, setActiveCivId, addVirtualCiv, getCivStorageHandle, resolveCivName, getVirtualCivById } from "./civs.js";
 import { removeUnitLabelAt } from "./unitLabels.js";
 
 function isOperator(player) {
@@ -29,6 +29,8 @@ export async function openMainMenu(player) {
     const config = getMapConfig();
     const body = [turnInfoText()];
     const isOp = isOperator(player);
+    const matchSettings = getMatchSettings();
+    body.push(`§7[Settings] 産出倍率: x${matchSettings.yieldMultiplier} | 不可侵条約・同盟: ${matchSettings.diplomacyEnabled ? "有効" : "無効"}`);
     // 💡 操作できる国家が複数ある(=テスト国家を追加済みの)OPには、今どちらを操作中か明示する。
     if (getControllableCivs(getRealPlayer(player)).length > 1) {
         body.push(`§d[Acting] 操作中の国家: ${player.name}`);
@@ -128,6 +130,14 @@ export async function openMainMenu(player) {
 
             if (currentTile.city) {
                 const city = currentTile.city;
+                // 💡 自国・同盟国以外の都市は、偵察による有利化を防ぐため詳細情報(人口・生産・
+                //    備蓄・区域建設・交易路・宗教的圧力の内訳・ミサイル在庫等)を表示しない
+                //    (存在・所有者・都市名までは他の箇所の表示で分かるが、それ以上は隠す)。
+                const isFriendlyCity = currentTile.ownerId === player.id || hasDiplomaticAgreement(player.id, currentTile.ownerId);
+
+                if (!isFriendlyCity) {
+                    body.push(`\n§6【${city.isCapital ? "首都" : "地方都市"}: ${city.name}】 §7(他国の都市のため詳細情報は非表示)`);
+                } else {
                 const threshold = 10 + (city.population - 1) * 2;
                 const totalIncome = incomes[`${tx},${tz}`] ?? 0;
 
@@ -135,8 +145,8 @@ export async function openMainMenu(player) {
 
                 body.push(`\n§6【${city.isCapital ? "首都" : "地方都市"}: ${city.name}】`);
                 body.push(`§f  - 人口: §a${city.population} §f/ 住宅上限: §e${city.housing} §f| [Worker] 労働者: §b${getWorkerCount(city)} 人 §7(残り行動:${getTotalWorkerActionsRemaining(city)})`);
-                body.push(`§f  - [Yield] 現市民の選択総出力: §6[Food]x${currentYields.food} §f/ §e[Prod]x${currentYields.production} §f/ §d[Faith]x${currentYields.faith ?? 0} §f/ §7[Iron]x${currentYields.iron ?? 0}`);
-                
+                body.push(`§f  - [Yield] 現市民の選択総出力: §6[Food]x${currentYields.food} §f/ §e[Prod]x${currentYields.production} §f/ §d[Faith]x${currentYields.faith ?? 0} §f/ §7[Iron]x${currentYields.iron ?? 0}${currentYields.science ? ` §f/ §b[Science]x${currentYields.science}` : ""}`);
+
                 // 💡 進行中の生産(ユニット/建造物)を汎用的に表示。新しい生産物を増やしても自動で対応する。
                 if (city.production) {
                     const def = PRODUCTION_DEFS[city.production.id];
@@ -160,7 +170,8 @@ export async function openMainMenu(player) {
                     if (city.tradingPost.routes && city.tradingPost.routes.length > 0) {
                         for (const r of city.tradingPost.routes) {
                             const targetName = allTiles[r.targetKey]?.city?.name ?? `未知の都市(${r.targetKey})`;
-                            body.push(`    §7-> [Link] 【${targetName}】残:${r.remainingTurns}T (食料 §a+${r.bonus}§7)`);
+                            const scienceText = r.scienceBonus > 0 ? ` §b科学力+${r.scienceBonus}§7` : "";
+                            body.push(`    §7-> [Link] 【${targetName}】残:${r.remainingTurns}T (食料 §a+${r.bonus}§7${scienceText})`);
                         }
                     } else {
                         body.push(`    §7-> [Link] 交易路: 接続対象(他の都市)なし`);
@@ -198,6 +209,7 @@ export async function openMainMenu(player) {
 
                 if ((city.missiles ?? 0) > 0) {
                     body.push(`§f  - [Missile] 保有ミサイル: §c${city.missiles} 発`);
+                }
                 }
             } else {
                 if (currentTile.ownerId === player.id && currentTile.belongsToCityKey) {
@@ -282,6 +294,11 @@ export async function openMainMenu(player) {
         if (currentTile.religiousUnit && currentTile.religiousUnit.ownerId !== player.id && isFullMovement) {
             buttons.push({ text: `§c[Purge] 異教徒(${currentTile.religiousUnit.label ?? "宗教ユニット"})を排除する`, action: "purgeheretic" });
         }
+        // 💡 今ターンまだ行動していない(移動力が最大値のまま)、HPが減っているユニットは、
+        //    行動力を全て消費してその場で休息し、最大HPの30%分回復できる。
+        if (isFullMovement && (unit.hp ?? unit.maxHp ?? 100) < (unit.maxHp ?? 100)) {
+            buttons.push({ text: `§a[Heal] このユニットを休息させて回復する (最大HPの30%)`, action: "healunit" });
+        }
     }
     if (currentTile?.religiousUnit?.ownerId === player.id) {
         buttons.push({ text: "§d[Missionary] 宗教ユニットの移動", action: "movereligious" });
@@ -290,8 +307,10 @@ export async function openMainMenu(player) {
     if (turn.started) { buttons.push({ text: "ターンを終了する", action: "endturn" }); }
     if (isOp && turn.started) buttons.push({ text: "§6【管理者】手番を強制スキップ", action: "forceendturn" });
     if (isOp) buttons.push({ text: "§c【管理者】ゲームをリセット", action: "endgame" });
+    if (isOp) buttons.push({ text: "§e[Settings] 試合の設定(産出倍率・外交の有無)", action: "matchsettings" });
     if (isOp && turn.started) buttons.push({ text: "§c[Debug]【デバッグ】指定した国家を即座に勝利させる", action: "debugvictory" });
     if (isOp && currentTile) buttons.push({ text: "§c[Debug]【デバッグ】このマスを編集する", action: "debugtile" });
+    if (isOp && turn.started) buttons.push({ text: "§b[Intel]【デバッグ】全国家の情報を閲覧する", action: "debugallcivs" });
     if (isOp) buttons.push({ text: "§d[Civs] 国家管理(ソロテスト用)", action: "civmanage" });
     buttons.push({ text: "閉じる", action: "close" });
 
@@ -305,7 +324,7 @@ export async function openMainMenu(player) {
     const selectedAction = buttons[selection].action;
 
     switch (selectedAction) {
-        case "start": startGame(); break;
+        case "start": (await import("./bots.js")).startGameAuto(); break;
         case "join": player.sendMessage(joinGame(player).message); break;
         case "joinall": if (isOp) (await import("./commands.js")).cmdJoinAll(player); break;
         case "claim": (await import("./commands.js")).cmdClaim(player); break;
@@ -334,6 +353,9 @@ export async function openMainMenu(player) {
             break;
         case "purgeheretic":
             if (currentTile?.combatUnit?.ownerId === player.id) (await import("./commands.js")).cmdPurgeHeretic(player, tx, tz);
+            break;
+        case "healunit":
+            if (currentTile?.combatUnit?.ownerId === player.id) (await import("./commands.js")).cmdHealCombatUnit(player, tx, tz);
             break;
 
         // 💡 新機能: 生産メニュー(ユニット/建造物)を開く
@@ -365,18 +387,77 @@ export async function openMainMenu(player) {
             }
             break;
 
-        case "endturn":
+        case "endturn": {
             if (!isPlayersTurn(player)) { player.sendMessage("§c手番ではありません。"); break; }
-            const result = endTurn(player);
+            const result = (await import("./bots.js")).endTurnAuto(player);
             if (!result.ok) player.sendMessage(result.message);
             break;
+        }
         case "endgame": if (isOp) world.sendMessage(endGame().message); break;
-        case "forceendturn": if (isOp) { const r = forceEndTurn(); if (!r.ok) player.sendMessage(r.message); } break;
+        case "forceendturn": if (isOp) { const r = (await import("./bots.js")).forceEndTurnAuto(); if (!r.ok) player.sendMessage(r.message); } break;
         case "debugvictory": if (isOp) await openDebugVictoryMenu(getRealPlayer(player)); break;
         case "debugtile": if (isOp && currentTile) await openDebugTileMenu(getRealPlayer(player), tx, tz); break;
+        case "debugallcivs": if (isOp) await openDebugAllCivsMenu(getRealPlayer(player)); break;
+        case "matchsettings": if (isOp) await openMatchSettingsMenu(getRealPlayer(player)); break;
         case "civmanage": if (isOp) await openCivManagementMenu(getRealPlayer(player)); break;
         default: break;
     }
+}
+
+/**
+ * OP専用: 試合全体に関わるルール設定を変更する。ゲームリセットを跨いでも保持される
+ * (state.js の getMatchSettings/setMatchSettings、resetAllでは消去されない)ため、
+ * 繰り返しテストプレイする際に毎回設定し直す必要が無い。
+ * - 産出の倍率: turns.js の getCityCurrentYields が集計する全産出量に掛ける倍率。
+ * - 不可侵条約・同盟の有無: 無効にすると、新規の提案送信・承認ができなくなる
+ *   (diplomacy.js の sendRequest/acceptRequest がここを見て拒否する。既に成立している
+ *   関係はそのまま残る)。
+ * - 講和の有無: 無効にすると、一度始まった戦争(war)を breakRelation で終了できなくなる
+ *   (diplomacy.js の breakRelation がここを見て拒否する。不可侵条約・同盟の解消は
+ *   この設定の影響を受けない)。無効にすると、Bot側の劣勢時の自動講和(bots.js)も行われない。
+ * - Botの手番間隔: 全員Botの対戦で、Botの手番から次のBotの手番へ移るまでの間隔(tick)。
+ *   bots.js の advanceUntilHuman がここを見て system.runTimeout の遅延に使う。
+ */
+// 💡 slider(label, minimumValue, maximumValue, sliderOptions?) 自体の呼び出し方は正しかったが、
+//    minimumValue/valueStepに小数(0.5)を渡すと、環境によって触った瞬間に0扱いになる不具合が
+//    確認された。そのため産出倍率のスライダーは整数(1〜10, 1刻み)で動かし、実際の倍率
+//    (x0.5〜x5, 0.5刻み)には YIELD_MULTIPLIER_STEP を掛けて変換する
+//    (スライダーの表示は「1〜10段階」になる)。Botの手番間隔はもともと整数(tick)なので
+//    この変換は不要で、そのままスライダーの値を使う。
+const YIELD_MULTIPLIER_STEP = 0.5;
+const YIELD_SLIDER_MAX_STEPS = 10; // x0.5 * 10 = x5 が上限
+const BOT_TURN_DELAY_TICKS_MIN = 1;
+const BOT_TURN_DELAY_TICKS_MAX = 100; // 100tick = 5秒
+
+async function openMatchSettingsMenu(realPlayer) {
+    const settings = getMatchSettings();
+    const defaultSliderValue = Math.round(settings.yieldMultiplier / YIELD_MULTIPLIER_STEP);
+    const defaultBotDelay = Math.min(BOT_TURN_DELAY_TICKS_MAX, Math.max(BOT_TURN_DELAY_TICKS_MIN, settings.botTurnDelayTicks));
+    const form = new ModalFormData()
+        .title("[Settings] 試合の設定")
+        .slider(
+            `産出の倍率(1段階=x${YIELD_MULTIPLIER_STEP}。食料・生産力・信仰力・鉄などの全産出量に掛ける倍率)`,
+            1,
+            YIELD_SLIDER_MAX_STEPS,
+            { valueStep: 1, defaultValue: Math.min(YIELD_SLIDER_MAX_STEPS, Math.max(1, defaultSliderValue)) },
+        )
+        .toggle("不可侵条約・同盟を有効にする", { defaultValue: settings.diplomacyEnabled })
+        .toggle("講和(戦争状態の解消)を有効にする", { defaultValue: settings.peaceEnabled })
+        .slider(
+            "Botの手番間隔(tick。20tick=1秒。全員Botの対戦を見やすくする速度調整)",
+            BOT_TURN_DELAY_TICKS_MIN,
+            BOT_TURN_DELAY_TICKS_MAX,
+            { valueStep: 1, defaultValue: defaultBotDelay },
+        );
+
+    const res = await form.show(realPlayer);
+    if (res.canceled) { await openMainMenu(realPlayer); return; }
+
+    const [sliderValue, diplomacyEnabled, peaceEnabled, botTurnDelayTicks] = res.formValues;
+    const yieldMultiplier = sliderValue * YIELD_MULTIPLIER_STEP;
+    setMatchSettings({ yieldMultiplier, diplomacyEnabled, peaceEnabled, botTurnDelayTicks });
+    realPlayer.sendMessage(`§a試合の設定を更新しました。 §7(産出の倍率: x${yieldMultiplier} / 不可侵条約・同盟: ${diplomacyEnabled ? "有効" : "無効"} / 講和: ${peaceEnabled ? "有効" : "無効"} / Bot手番間隔: ${botTurnDelayTicks}tick)`);
+    await openMainMenu(realPlayer);
 }
 
 /**
@@ -393,10 +474,11 @@ async function openCivManagementMenu(realPlayer) {
         "§7テスト国家として行動したいマスには、実際に歩いて移動してから操作してください。",
     ];
     const buttons = civs.map(c => ({
-        text: `${c.id === activeId ? "§a> " : "§f"}${c.name}${c.isVirtual ? " §7(テスト国家)" : " §7(あなた自身)"}`,
+        text: `${c.id === activeId ? "§a> " : "§f"}${c.name}${c.isBot ? " §7(Bot)" : c.isVirtual ? " §7(テスト国家)" : " §7(あなた自身)"}`,
         action: { type: "switch", civId: c.id },
     }));
     buttons.push({ text: "§b[Add] テスト国家を追加する", action: { type: "add" } });
+    buttons.push({ text: "§b[Add] Botを追加する(自動でゲームに参加)", action: { type: "addbot" } });
     buttons.push({ text: "戻る", action: { type: "back" } });
 
     const form = new ActionFormData().title("[Civs] 国家管理(ソロテスト用)").body(body.join("\n"));
@@ -433,6 +515,24 @@ async function openCivManagementMenu(realPlayer) {
         const civ = addVirtualCiv(realPlayer, nameResult.formValues?.[0]);
         realPlayer.sendMessage(`§aテスト国家【${civ.name}】を追加しました。§e/civ:join§aで参加させてください。`);
         await openCivManagementMenu(realPlayer);
+        return;
+    }
+
+    if (action.type === "addbot") {
+        const turn = getTurnState();
+        if (turn.started) {
+            realPlayer.sendMessage("§cゲーム開始後はBotを追加できません。次のゲームリセット後に追加してください。");
+            await openCivManagementMenu(realPlayer);
+            return;
+        }
+
+        const nameForm = new ModalFormData().title("Botを追加").textField("Bot名", "例: Bot1");
+        const nameResult = await nameForm.show(realPlayer);
+        if (nameResult.canceled) { await openCivManagementMenu(realPlayer); return; }
+
+        const result = (await import("./bots.js")).addBot(realPlayer, nameResult.formValues?.[0]);
+        realPlayer.sendMessage(result.message);
+        await openCivManagementMenu(realPlayer);
     }
 }
 
@@ -466,6 +566,147 @@ async function openDebugVictoryMenu(realPlayer) {
 
     const result = debugForceVictory(selectedIds);
     realPlayer.sendMessage(result.message);
+}
+
+/**
+ * OP専用デバッグ機能: 試合中の全国家(参加済みの人間・テスト国家・Bot全て)の一覧から
+ * 1つを選び、その国家の詳細情報(資源・都市・ユニット・外交関係など)を閲覧する入口メニュー。
+ * 一覧が多くなりうるため showPaginatedMenu を使う。
+ */
+async function openDebugAllCivsMenu(realPlayer) {
+    const turn = getTurnState();
+    const civIds = Array.isArray(turn?.playerOrder) ? turn.playerOrder : [];
+    if (civIds.length === 0) {
+        realPlayer.sendMessage("§7参加している国家がいません。");
+        await openMainMenu(realPlayer);
+        return;
+    }
+
+    const items = civIds.map((civId) => {
+        const virtualCiv = getVirtualCivById(civId);
+        const typeTag = virtualCiv?.isBot ? "§7(Bot)" : virtualCiv ? "§7(テスト国家)" : "§7(プレイヤー)";
+        return { text: `${resolveCivName(civId) ?? civId} ${typeTag}`, action: civId };
+    });
+
+    await showPaginatedMenu(
+        realPlayer,
+        "[Intel] 全国家の情報閲覧",
+        "§7情報を見る国家を選択してください。(OP専用のデバッグ機能です)",
+        items,
+        async (civId) => await openDebugCivDetailMenu(realPlayer, civId),
+        async () => await openMainMenu(realPlayer),
+    );
+}
+
+/**
+ * OP専用デバッグ機能: 指定した1国家の詳細情報を表示する。
+ * 資源(石油・鉄・勝利ポイント・開拓権)、研究/社会制度の進行状況、保有する都市(人口・住宅・
+ * 産出量・生産中の物・区域建設状況)、保有する戦闘ユニット(位置・HP・戦闘力・移動力)、
+ * 宗教の創始状況、他の全国家との外交関係(不可侵条約/同盟/関係なし)をまとめて表示する。
+ */
+async function openDebugCivDetailMenu(realPlayer, civId) {
+    const handle = getCivStorageHandle(civId);
+    if (!handle) {
+        realPlayer.sendMessage("§cこの国家の情報を取得できませんでした。(オフラインの人間プレイヤーの可能性があります)");
+        await openDebugAllCivsMenu(realPlayer);
+        return;
+    }
+
+    const virtualCiv = getVirtualCivById(civId);
+    const typeLabel = virtualCiv?.isBot ? "Bot" : virtualCiv ? "テスト国家" : "プレイヤー";
+    const turn = getTurnState();
+    const tiles = getTiles();
+
+    const lines = [`§6=== 【${handle.name}】(${typeLabel}) ===`];
+
+    // 資源・開拓権
+    const oil = handle.getDynamicProperty?.("strategic_oil") ?? 0;
+    const iron = handle.getDynamicProperty?.("strategic_iron") ?? 0;
+    const victoryPoints = handle.getDynamicProperty?.("civ:victoryPoints") ?? 0;
+    const rights = turn?.playerRights?.[civId] ?? 0;
+    lines.push(`§b[Resource] 石油: ${oil} §f| 鉄: ${iron} §f| 開拓権: ${rights} §f| §6勝利ポイント: ${victoryPoints}`);
+
+    // 研究・社会制度
+    const techState = getProgressState(handle, "technology");
+    const civicState = getProgressState(handle, "civic");
+    const techDef = techState.activeId ? getDefinition("technology", techState.activeId) : null;
+    const civicDef = civicState.activeId ? getDefinition("civic", civicState.activeId) : null;
+    lines.push(`§a研究: ${techDef ? `${techDef.label} (${Math.floor(techState.progress)}/${techDef.cost})` : "未選択"} §f| §d社会制度: ${civicDef ? `${civicDef.label} (${Math.floor(civicState.progress)}/${civicDef.cost})` : "未選択"}`);
+    const completedTech = techState.completed.map((id) => getDefinition("technology", id)?.label ?? id);
+    const completedCivic = civicState.completed.map((id) => getDefinition("civic", id)?.label ?? id);
+    lines.push(`§7  取得済み技術: ${completedTech.length ? completedTech.join("、") : "なし"}`);
+    lines.push(`§7  取得済み社会制度: ${completedCivic.length ? completedCivic.join("、") : "なし"}`);
+
+    // 都市(先に集計しておき、宗教セクションの総信仰力計算にも使う)
+    const cityEntries = [];
+    for (const key in tiles) {
+        const t = tiles[key];
+        if (t.ownerId === civId && t.city) cityEntries.push({ key, tile: t });
+    }
+
+    // 宗教
+    if (hasFoundedReligion(handle)) {
+        lines.push(`§d[Religion] 創始した宗教: 【${getReligionName(handle)}】 §f(総信仰力: ${Math.floor(getTotalCivFaith(cityEntries))})`);
+    } else {
+        lines.push(`§7宗教: 未創始`);
+    }
+
+    // 都市
+    lines.push(`\n§6[City] 都市 (${cityEntries.length}件):`);
+    if (cityEntries.length === 0) {
+        lines.push("§7  なし");
+    } else {
+        for (const { key, tile } of cityEntries) {
+            const city = tile.city;
+            const yields = getCityCurrentYields(key, tiles);
+            const prodText = city.production
+                ? `${PRODUCTION_DEFS[city.production.id]?.label ?? city.production.id} (${Math.floor(city.production.progress)}/${city.production.cost})`
+                : "なし";
+            const districtText = city.districtConstruction
+                ? `${getDistrictDef(city.districtConstruction.id)?.label ?? city.districtConstruction.id} (${Math.floor(city.districtConstruction.progress)}/${city.districtConstruction.cost})`
+                : "なし";
+            lines.push(`§f  ${city.isCapital ? "[首都]" : "[都市]"} ${city.name} (${key}) §7- 人口:${city.population}/住宅:${city.housing}`);
+            lines.push(`§7    産出: [Food]${yields.food} [Prod]${yields.production} [Faith]${yields.faith ?? 0} [Iron]${yields.iron ?? 0} [Science]${yields.science ?? 0} §7| 生産中: ${prodText} §7| 区域建設中: ${districtText}`);
+        }
+    }
+
+    // 戦闘ユニット
+    const unitEntries = [];
+    for (const key in tiles) {
+        const t = tiles[key];
+        if (t.combatUnit?.ownerId === civId) unitEntries.push({ key, unit: t.combatUnit });
+    }
+    lines.push(`\n§6[Combat] 戦闘ユニット (${unitEntries.length}件):`);
+    if (unitEntries.length === 0) {
+        lines.push("§7  なし");
+    } else {
+        for (const { key, unit } of unitEntries) {
+            const strengthText = isRangedUnit(unit)
+                ? `遠距離${getEffectiveRangedStrength(unit)}/近距離${getEffectiveCombatStrength(unit)}`
+                : `${getEffectiveCombatStrength(unit)}`;
+            lines.push(`§f  ${unit.label ?? unit.id} (${key}) §7- HP:${Math.max(0, Math.round(unit.hp ?? 0))}/${unit.maxHp ?? 100} 戦闘力:${strengthText} 移動:${unit.movementRemaining ?? unit.movement ?? 0}/${unit.movement ?? 0}`);
+        }
+    }
+
+    // 外交関係
+    const otherCivIds = (Array.isArray(turn?.playerOrder) ? turn.playerOrder : []).filter((id) => id !== civId);
+    lines.push(`\n§6[Diplomacy] 外交関係:`);
+    if (otherCivIds.length === 0) {
+        lines.push("§7  他に参加国家がいません");
+    } else {
+        for (const otherId of otherCivIds) {
+            const rel = getRelation(handle, otherId);
+            const relLabel = rel === "alliance" ? "§b同盟" : rel === "pact" ? "§a不可侵条約" : rel === "war" ? "§4戦争中" : "§7関係なし";
+            lines.push(`§f  ${resolveCivName(otherId) ?? otherId}: ${relLabel}`);
+        }
+    }
+
+    const form = new ActionFormData()
+        .title(`[Intel] ${handle.name}`)
+        .body(lines.join("\n"))
+        .button("戻る");
+    await form.show(realPlayer);
+    await openDebugAllCivsMenu(realPlayer);
 }
 
 /**
@@ -1049,11 +1290,13 @@ async function openDistrictStartMenu(player, tx, tz) {
 
     for (const id of getDistrictIds()) {
         const def = getDistrictDef(id);
-        const check = canStartDistrict(tile, id, player.id, city, player);
+        const check = canStartDistrict(tile, id, player.id, city, player, allTiles, cityKey);
         if (!check.ok) {
             if (def.requiresTechnology && !hasCompletedProgress(player, "technology", def.requiresTechnology)) {
                 const techDef = getDefinition("technology", def.requiresTechnology);
                 body.push(`§7[Locked] ${def.icon} ${def.label}: 技術【${techDef?.label ?? def.requiresTechnology}】が必要`);
+            } else if (cityKey && hasCityDistrict(cityKey, id, allTiles)) {
+                body.push(`§7[Built] ${def.icon} ${def.label}: 帰属都市に既に存在します(1都市につき1つまで)`);
             }
             continue;
         }
@@ -1202,6 +1445,7 @@ export function openDiplomacyMenu(player, allCivs) {
         let statusTag = "【関係なし】";
         if (rel === "pact") statusTag = "【[Pact] 不可侵条約】";
         if (rel === "alliance") statusTag = "【[Alliance] 同盟】";
+        if (rel === "war") statusTag = "§4【[War] 戦争中】§r";
 
         form.button(`${civ.name}\n${statusTag}`);
     });
@@ -1276,16 +1520,27 @@ function openCivDiplomacyDetail(player, targetCiv, allCivs) {
     const currentRel = getRelation(myCiv, targetCiv.id);
 
     // 💡 不可侵条約には「使節団」、同盟には「外交」civicの取得が必要。
-    const canProposePact = hasCompletedProgress(player, "civic", "emissaries");
-    const canProposeAlliance = hasCompletedProgress(player, "civic", "diplomacy");
+    //    さらに、試合の設定(§18参照)で不可侵条約・同盟そのものが無効化されている場合は
+    //    civic条件を満たしていても提案できない。
+    const diplomacyEnabled = getMatchSettings().diplomacyEnabled;
+    const canProposePact = diplomacyEnabled && hasCompletedProgress(player, "civic", "emissaries");
+    const canProposeAlliance = diplomacyEnabled && hasCompletedProgress(player, "civic", "diplomacy");
 
     let relText = "関係なし";
     if (currentRel === "pact") relText = "不可侵条約 締結中";
     if (currentRel === "alliance") relText = "同盟 締結中";
+    if (currentRel === "war") relText = "§4戦争中§r";
 
     const body = [`対象国: ${targetCiv.name}`, `現在の関係: ${relText}`];
-    if (!canProposePact) body.push("§7※不可侵条約の提案には社会制度「使節団」の取得が必要です");
-    if (!canProposeAlliance) body.push("§7※同盟の提案には社会制度「外交」の取得が必要です");
+    if (currentRel === "none") {
+        body.push("§7※「関係なし」の相手の領土にはユニットが進入できません。攻撃・都市の占領にも宣戦布告が必要です。");
+    }
+    if (!diplomacyEnabled) {
+        body.push("§7※この試合では不可侵条約・同盟が無効に設定されています(新規提案不可)");
+    } else {
+        if (!canProposePact) body.push("§7※不可侵条約の提案には社会制度「使節団」の取得が必要です");
+        if (!canProposeAlliance) body.push("§7※同盟の提案には社会制度「外交」の取得が必要です");
+    }
 
     const buttons = [];
     if (currentRel === "none") {
@@ -1296,6 +1551,11 @@ function openCivDiplomacyDetail(player, targetCiv, allCivs) {
         buttons.push({ text: "[Break] 不可侵条約を破棄する", action: "break" });
     } else if (currentRel === "alliance") {
         buttons.push({ text: "[Break] 同盟を解消する", action: "break" });
+    }
+    if (currentRel === "war") {
+        buttons.push({ text: "§a[Peace] 講和する(戦争を終了する)", action: "break" });
+    } else {
+        buttons.push({ text: "§4[War] 宣戦布告する", action: "declareWar" });
     }
     if (buttons.length === 0) buttons.push({ text: "閉じる", action: "close" });
 
@@ -1311,6 +1571,7 @@ function openCivDiplomacyDetail(player, targetCiv, allCivs) {
         if (selected === "proposePact") sendDiplomaticProposal(player, targetCiv, "pact");
         if (selected === "proposeAlliance") sendDiplomaticProposal(player, targetCiv, "alliance");
         if (selected === "break") confirmBreakRelation(player, targetCiv);
+        if (selected === "declareWar") confirmDeclareWar(player, targetCiv);
     });
 }
 
@@ -1328,22 +1589,43 @@ function sendDiplomaticProposal(player, targetCiv, type) {
     player.sendMessage(res.message);
 }
 
-/** 関係破棄の確認ダイアログ */
+/** 関係破棄(講和を含む)の確認ダイアログ */
 function confirmBreakRelation(player, targetCiv) {
     const realPlayer = getRealPlayer(player);
     const currentRel = getRelation(player, targetCiv.id);
-    const typeLabel = currentRel === "pact" ? "不可侵条約" : "同盟";
+    const isWar = currentRel === "war";
+    const typeLabel = currentRel === "pact" ? "不可侵条約" : currentRel === "alliance" ? "同盟" : "戦争";
+    const actionLabel = isWar ? "講和" : "解消・破棄";
 
     new MessageFormData()
-        .title(`確認: ${typeLabel}の解消`)
-        .body(`本当に【${targetCiv.name}】との【${typeLabel}】を解消・破棄しますか？\nこの操作は即座に反映されます。`)
-        .button1("破棄する")
+        .title(`確認: ${isWar ? "講和" : `${typeLabel}の解消`}`)
+        .body(`本当に【${targetCiv.name}】と${isWar ? "講和し、戦争を終了" : `の【${typeLabel}】を解消・破棄`}しますか？\nこの操作は即座に反映されます。`)
+        .button1(`${actionLabel}する`)
         .button2("キャンセル")
         .show(realPlayer)
         .then(res => {
             if (res.selection === 1) {
                 const result = breakRelation(player, targetCiv);
                 player.sendMessage(result.message);
+            }
+        });
+}
+
+/** 宣戦布告の確認ダイアログ。宣戦布告は相手の承諾を必要とせず、確認後に即座に成立する。 */
+function confirmDeclareWar(player, targetCiv) {
+    const realPlayer = getRealPlayer(player);
+
+    new MessageFormData()
+        .title(`確認: 宣戦布告`)
+        .body(`本当に【${targetCiv.name}】に宣戦布告しますか？\n結んでいる不可侵条約・同盟があれば同時に破棄されます。\nこの操作は相手の承諾を必要とせず、即座に成立します。`)
+        .button1("宣戦布告する")
+        .button2("キャンセル")
+        .show(realPlayer)
+        .then(res => {
+            if (res.selection === 1) {
+                const result = declareWar(player, targetCiv);
+                if (result.ok) world.sendMessage(result.message);
+                else player.sendMessage(result.message);
             }
         });
 }
@@ -1479,7 +1761,9 @@ async function openCombatUnitAttackMenu(player, fromTx, fromTz) {
     const tiles = getTiles();
 
     if (remaining > 0) {
-        const attackTargets = getAttackableTargets(fromTx, fromTz, player.id, unit, tiles, config, hasDiplomaticAgreement);
+        // 💡 攻撃できるのは宣戦布告済み(戦争状態)の相手のみ。hasAgreementFnは「除外する」述語なので、
+        //    戦争状態でない相手を除外する形で渡す。
+        const attackTargets = getAttackableTargets(fromTx, fromTz, player.id, unit, tiles, config, (a, b) => !isAtWar(a, b));
         for (const t of attackTargets) {
             const enemyUnit = t.unit;
             const cityText = t.tile.city ? ` | 都市: ${t.tile.city.name}` : "";

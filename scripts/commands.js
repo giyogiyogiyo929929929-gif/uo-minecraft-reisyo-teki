@@ -1,12 +1,12 @@
 // commands.js
 import { world, system, BlockPermutation, PlayerPermissionLevel, CustomCommandStatus, CustomCommandParamType, CommandPermissionLevel } from "@minecraft/server";
-import { generateMap, TERRAIN_TYPES, worldToTile, TILE_SIZE, RESOURCE_TYPES, ASSUMED_SIMULATION_RANGE_BLOCKS, isImpassableTerrain } from "./mapGen.js";
+import { generateMap, TERRAIN_TYPES, worldToTile, TILE_SIZE, RESOURCE_TYPES, ASSUMED_SIMULATION_RANGE_BLOCKS, isImpassableTerrain, isWaterTerrain } from "./mapGen.js";
 import { getMapConfig, setMapConfig, getTile, setTile, resetAll, setTiles, getTiles } from "./state.js";
-import { joinGame, startGame, endTurn, forceEndTurn, turnInfoText, isPlayersTurn, endGame, getTurnState, setTurnState, getCityCurrentYields, resolveMissileImpact, getPlayerColor, checkAndAnnounceVictory } from "./turns.js";
+import { joinGame, turnInfoText, isPlayersTurn, endGame, getTurnState, setTurnState, getCityCurrentYields, resolveMissileImpact, getPlayerColor, checkAndAnnounceVictory } from "./turns.js";
 import { PRODUCTION_DEFS, canStartProduction, startProduction, cancelProduction, addWorkers, consumeWorkerAction, hasAvailableWorkerAction, getProductionIds } from "./production.js";
 import { getDefinition, getKindLabel, startProgress, getDefinitions } from "./progression.js";
-import { hasDiplomaticAgreement, signAgreement } from "./diplomacy.js";
-import { getAttackRange, resolveCombat, tileDistance, canUnitEnterTile } from "./combat.js";
+import { hasDiplomaticAgreement, signAgreement, isAtWar } from "./diplomacy.js";
+import { getAttackRange, resolveCombat, tileDistance, canUnitEnterTerrain, canUnitEnterOwnership, countFlankingAllies, getFlankingBonus } from "./combat.js";
 import { addVirtualCiv, getControllableCivs, getActiveCivId, setActiveCivId, getActingPlayer, getOnlinePlayerById } from "./civs.js";
 import { getFacilityDef, canInstallFacility, installFacility, getFacilityIds } from "./facilities.js";
 import { resolveOwningCityKey } from "./adjacency.js";
@@ -18,6 +18,10 @@ import {
 } from "./religion.js";
 import { openMainMenu } from "./ui.js";
 import { removeUnitLabelAt, clearAllUnitLabels } from "./unitLabels.js";
+// 💡 bots.js は cmdClaim/cmdSettle/cmdBuyRights/cmdStartProduction をBotの行動再現に使うため
+//    このファイルを import する(相互import)。実際の呼び出しは関数本体の中でのみ行われるため
+//    (モジュール評価順に依存しない)ESモジュールとして安全に解決される。詳細は bots.js を参照。
+import { startGameAuto, endTurnAuto, forceEndTurnAuto, addBot } from "./bots.js";
 
 // 💡 都市名の命名プール
 const CITY_NAMES_POOL = [
@@ -80,7 +84,7 @@ function cmdHelp(player) {
         "§e/civ:claim §f: 周囲の土地を領有 (コスト: 人口1)",
         "§e/civ:buyrights §f: 開拓権を獲得 (コスト: 首都人口2)",
         "§e/civ:settle §f: 都市を建設 (コスト: 開拓権x1)",
-        "§e/civ:build <worker|warrior|archer|battleship|missile|tradingPost|granary|obelisk|capital> §f: 生産を開始",
+        "§e/civ:build <worker|warrior|archer|battleship|missile|tradingPost|granary|obelisk|antiAir|capital> §f: 生産を開始",
         "§c/civ:cancelbuild §f: 進行中の生産を中止(蓄積分は次に引き継ぎ)",
         "§e/civ:chop §f: 森林を伐採して住宅上限+1",
         "§e/civ:install <quarry|blacksmith> §f: 足元の空き領有マスに施設を設置(労働者の行動回数を1消費)",
@@ -93,6 +97,7 @@ function cmdHelp(player) {
         "§e/civ:info §f: 現在の情報を表示",
         "§e/civ:menu §f: メニューを開く",
         "§d/civ:addciv [名前] §f: ソロテスト用の国家を追加(OPのみ)",
+        "§d/civ:addbot [名前] §f: Botを追加し、ゲーム開始前であれば即座に参加させる(OPのみ)",
         "§d/civ:switchciv [番号] §f: 操作中の国家を切り替える",
         "§d/civ:civs §f: 操作できる国家の一覧を表示",
     ].join("\n"));
@@ -111,6 +116,13 @@ function cmdAddCiv(realPlayer, name) {
 
     const civ = addVirtualCiv(realPlayer, name);
     reply(realPlayer, `§aテスト国家【${civ.name}】を追加しました。§e/civ:switchciv§aで操作を切り替え、§e/civ:join§aで参加させてください。`);
+}
+
+/** 🛠 OP用: Botを追加し、ゲーム開始前であれば即座に参加させる。 */
+function cmdAddBot(realPlayer, name) {
+    if (!isOperator(realPlayer)) { reply(realPlayer, "§cこのコマンドはOPのみ実行できます。"); return; }
+    const result = addBot(realPlayer, name);
+    reply(realPlayer, result.message);
 }
 
 /** 操作中の国家を切り替える(自分自身、または自分が追加したテスト国家のみ)。 */
@@ -283,13 +295,16 @@ export function cmdJoinAll(player) {
     world.sendMessage(`§a[Civ Tactics] ワールドにいる${joined}人のプレイヤーを参加待機状態にしました。§7(既に参加済み: ${alreadyJoined}人)`);
 }
 
-function cmdStart(player) { if (isOperator(player)) startGame(); }
-function cmdEndTurn(player) { const result = endTurn(player); if (!result.ok) reply(player, result.message); }
+// 💡 ゲーム開始・ターン終了・強制ターン終了は、いずれもbots.jsのAuto版(startGameAuto等)を
+//    経由する。手番がBotに回ってきたときに自動で行動→次の手番へ進めるための共通フックが
+//    そこに入っているため、turns.js の素の関数を直接呼ばないようにする。
+function cmdStart(player) { if (isOperator(player)) startGameAuto(); }
+function cmdEndTurn(player) { const result = endTurnAuto(player); if (!result.ok) reply(player, result.message); }
 
 /** 🛠 OP用: 現在の手番を強制的にスキップする(手番のプレイヤーが応答不能な場合の保険)。 */
 function cmdForceEndTurn(player) {
     if (!isOperator(player)) { reply(player, "§cこのコマンドはOPのみ実行できます。"); return; }
-    const result = forceEndTurn();
+    const result = forceEndTurnAuto();
     if (!result.ok) reply(player, result.message);
 }
 
@@ -481,6 +496,7 @@ export function cmdLaunchMissile(player, targetTx, targetTz) {
     if (!tile || !tile.city) { reply(player, "§cここにあなたの都市はありません。"); return { ok: false }; }
     if (tile.ownerId !== player.id) { reply(player, "§cこの都市の所有権がありません。"); return { ok: false }; }
     if (!tile.city.missiles || tile.city.missiles <= 0) { reply(player, "§c[Missile] 発射可能なミサイルがありません。"); return { ok: false }; }
+    if (tile.city.missileLaunchedThisTurn) { reply(player, "§c[Missile] この都市からは、このターンすでにミサイルを発射済みです。(1ターンに1発まで)"); return { ok: false }; }
 
     const ttx = Math.floor(targetTx);
     const ttz = Math.floor(targetTz);
@@ -489,7 +505,16 @@ export function cmdLaunchMissile(player, targetTx, targetTz) {
         return { ok: false };
     }
 
+    // 💡 着弾地点に他国の都市がある場合、宣戦布告済み(戦争状態)の相手にしか発射できない
+    //    (攻撃・都市占領と同じ制約。無所属マス・空きマスへの発射は制限しない)。
+    const targetTile = getTile(ttx, ttz);
+    if (targetTile?.city && targetTile.ownerId && targetTile.ownerId !== player.id && !isAtWar(player.id, targetTile.ownerId)) {
+        reply(player, "§c宣戦布告していない相手の都市にはミサイルを発射できません。外交メニューから宣戦布告してください。");
+        return { ok: false };
+    }
+
     tile.city.missiles -= 1;
+    tile.city.missileLaunchedThisTurn = true;
     setTile(tx, tz, tile);
 
     world.sendMessage(`§c[Missile] ${player.name} の都市【${tile.city.name}】から (${ttx}, ${ttz}) へミサイルが発射されました！`);
@@ -517,6 +542,7 @@ export function cmdSettle(player) {
     if (tile.ownerId && tile.ownerId !== player.id) { reply(player, "§c他領地には建設できません。"); return; }
     if (tile.city) { reply(player, "§c既に都市が存在します。"); return; }
     if (isImpassableTerrain(tile.type)) { reply(player, "§c山脈マスには都市を建設できません。"); return; }
+    if (isWaterTerrain(tile.type)) { reply(player, "§c水上マスには都市を建設できません。"); return; }
 
     const allTiles = getTiles();
     let hasAnyCity = false;
@@ -786,7 +812,7 @@ export function cmdStartDistrict(player, districtId) {
     const cityTile = allTiles[cityKey];
     if (!cityTile || !cityTile.city) { reply(player, "§c帰属先の都市が見つかりません。"); return { ok: false }; }
 
-    const check = canStartDistrict(tile, districtId, player.id, cityTile.city, player);
+    const check = canStartDistrict(tile, districtId, player.id, cityTile.city, player, allTiles, cityKey);
     if (!check.ok) { reply(player, check.message); return { ok: false }; }
 
     if (!tile.belongsToCityKey) tile.belongsToCityKey = cityKey;
@@ -1025,6 +1051,7 @@ export function registerScriptCommands() {
             // 💡 国家の追加・切替・一覧は「実プレイヤー」自身の操作。現在操作中の国家に関係なく、
             //    常に実プレイヤー本人の権限・所有物として処理する。
             if (sub === "addciv") { cmdAddCiv(realPlayer, args.join(" ")); return; }
+            if (sub === "addbot") { cmdAddBot(realPlayer, args.join(" ")); return; }
             if (sub === "switchciv") { cmdSwitchCiv(realPlayer, args[0]); return; }
             if (sub === "civs") { cmdListCivs(realPlayer); return; }
 
@@ -1221,6 +1248,10 @@ export function registerCustomCommands() {
             optionalParameters: [{ name: "name", type: CustomCommandParamType.String }],
         }, (origin, name) => runCivCommand(origin, (realPlayer) => cmdAddCiv(realPlayer, name)));
 
+        cmd("addbot", "Botを追加し、ゲーム開始前であれば即座に参加させる(OPのみ)", {
+            optionalParameters: [{ name: "name", type: CustomCommandParamType.String }],
+        }, (origin, name) => runCivCommand(origin, (realPlayer) => cmdAddBot(realPlayer, name)));
+
         cmd("switchciv", "操作中の国家を切り替える", {
             optionalParameters: [{ name: "index", type: CustomCommandParamType.Integer }],
         }, (origin, index) => runCivCommand(origin, (realPlayer) => cmdSwitchCiv(realPlayer, index !== undefined ? String(index) : undefined)));
@@ -1269,8 +1300,12 @@ export function cmdMoveCombatUnit(player, fromTx, fromTz, toTx, toTz) {
     if (!unit || unit.ownerId !== player.id) { reply(player, "§cこのマスに移動可能なあなたの戦闘ユニットはいません。"); return { ok: false }; }
     if (!target) { reply(player, "§c移動先がマップ外です。"); return { ok: false }; }
     if (target.combatUnit) { reply(player, "§c移動先にはすでに戦闘ユニットが存在します。"); return { ok: false }; }
-    if (!canUnitEnterTile(unit, target)) {
+    if (!canUnitEnterTerrain(unit, target)) {
         reply(player, unit.domain === "naval" ? "§c海軍ユニットは水上マス(海・川・池・湖)にしか移動できません。" : "§c陸軍ユニットは陸地マスにしか移動できません(水上・山脈マスには移動できません)。");
+        return { ok: false };
+    }
+    if (!canUnitEnterOwnership(unit, target)) {
+        reply(player, "§c「関係なし」の相手の領土には移動できません。宣戦布告するか、不可侵条約/同盟を結んでください。");
         return { ok: false };
     }
 
@@ -1306,7 +1341,7 @@ export function cmdAttackCombatUnit(player, fromTx, fromTz, toTx, toTz) {
     const defender = target.combatUnit;
     if (!defender) { reply(player, "§c攻撃先に戦闘ユニットが存在しません。"); return { ok: false }; }
     if (defender.ownerId === player.id) { reply(player, "§c自分のユニットは攻撃できません。"); return { ok: false }; }
-    if (hasDiplomaticAgreement(player.id, defender.ownerId)) { reply(player, "§c外交協定を結んでいる相手のユニットは攻撃できません。"); return { ok: false }; }
+    if (!isAtWar(player.id, defender.ownerId)) { reply(player, "§c宣戦布告していない相手のユニットは攻撃できません。外交メニューから宣戦布告してください。"); return { ok: false }; }
 
     const remaining = attacker.movementRemaining ?? attacker.movement ?? 0;
     if (remaining <= 0) { reply(player, "§c移動力が残っていないため攻撃できません。"); return { ok: false }; }
@@ -1318,8 +1353,11 @@ export function cmdAttackCombatUnit(player, fromTx, fromTz, toTx, toTz) {
     const attackerLabel = attacker.label ?? "戦闘ユニット";
     const defenderLabel = defender.label ?? "戦闘ユニット";
 
+    // 💡 防御側に隣接する自軍ユニット(攻撃側自身を除く)の数に応じた包囲ボーナスを算出する。
+    const flankingAllies = countFlankingAllies(toTx, toTz, player.id, fromTx, fromTz, getTiles());
+    const flankingBonus = getFlankingBonus(flankingAllies);
     // 💡 攻撃側と防御側の間のマス距離を算出し、反撃の可否・反撃時の戦闘力選択に用いる。
-    const result = resolveCombat(attacker, defender, distance);
+    const result = resolveCombat(attacker, defender, distance, flankingBonus);
     // 攻撃を行うと、このユニットは今ターンの行動を終える(以後の移動・再攻撃は不可)。
     attacker.movementRemaining = 0;
 
@@ -1328,6 +1366,7 @@ export function cmdAttackCombatUnit(player, fromTx, fromTz, toTx, toTz) {
 
     const lines = [];
     lines.push(`§c[Combat] ${player.name} の${attackerLabel} (${fromTx}, ${fromTz}) が ${defenderLabel} (${toTx}, ${toTz}) を攻撃！`);
+    if (flankingBonus > 0) lines.push(`§7[包囲] 隣接する味方ユニット${flankingAllies}体分のボーナス: 先制攻撃力+${flankingBonus}`);
     lines.push(`§7先制ダメージ: ${result.firstDamage}`);
 
     if (result.defenderDestroyed) {
@@ -1371,6 +1410,7 @@ export function cmdCaptureCity(player, tx, tz) {
     const tile = tiles[cityKey];
     if (!tile || !tile.city) { reply(player, "§cこのマスに都市がありません。"); return { ok: false }; }
     if (!tile.ownerId || tile.ownerId === player.id) { reply(player, "§cこの都市はすでにあなたのものです。"); return { ok: false }; }
+    if (!isAtWar(player.id, tile.ownerId)) { reply(player, "§c宣戦布告していない相手の都市は占領できません。外交メニューから宣戦布告してください。"); return { ok: false }; }
 
     const unit = tile.combatUnit;
     if (!unit || unit.ownerId !== player.id) { reply(player, "§cこの都市にあなたの戦闘ユニットがいません。"); return { ok: false }; }
@@ -1400,6 +1440,7 @@ export function cmdCaptureCity(player, tx, tz) {
     let capturedTileCount = 0;
     let capturedFacilityCount = 0;
     let capturedDistrictCount = 0;
+    const capturedTileKeys = [];
     for (const key in tiles) {
         if (key === cityKey) continue;
         const t = tiles[key];
@@ -1422,10 +1463,26 @@ export function cmdCaptureCity(player, tx, tz) {
                 capturedDistrictCount++;
             }
             capturedTileCount++;
+            capturedTileKeys.push(key);
         }
     }
 
     setTiles(tiles);
+
+    // 💡 占領した都市・帰属マスの旗(banner)を、占領した自分の色に塗り替える。
+    //    placePlayerBannerAtCenter は新規領有(cmdClaim/cmdSettle)時にしか呼ばれないため、
+    //    占領時にここで呼び直さないと旧オーナーの色のまま残ってしまう。
+    //    都市タイルの isCapital には、既に false へ書き換えた後の値(capturedCapital取得前)
+    //    ではなく capturedCapital(占領前の実際の首都フラグ)を渡す。物理的な旗の高さは
+    //    設置時に置いたレッドストーン/鉄ブロックの位置に合わせる必要があり、占領しても
+    //    そのブロック自体は動かない(「占領した都市は首都にならない」というゲーム上の
+    //    ルールとは別に、ワールド上の見た目の整合性のための調整)。
+    const dimension = player.dimension;
+    placePlayerBannerAtCenter(dimension, tx, tz, config, player.id, capturedCapital);
+    for (const key of capturedTileKeys) {
+        const [ctx, ctz] = key.split(",").map(Number);
+        placePlayerBannerAtCenter(dimension, ctx, ctz, config, player.id);
+    }
 
     const captureDetails = [];
     if (capturedFacilityCount > 0) captureDetails.push(`施設${capturedFacilityCount}個`);
@@ -1436,5 +1493,37 @@ export function cmdCaptureCity(player, tx, tz) {
     const capitalText = capturedCapital ? " §c(相手の首都を陥落させました！)" : "";
     world.sendMessage(`§6[Capture] ${player.name} が ${previousOwnerName} の【${cityName}】を占領しました！${extraText}${capitalText}`);
     checkAndAnnounceVictory(tiles);
+    return { ok: true };
+}
+
+// 💡 行動力を消費して回復する際、最大HPに対して回復する割合。
+const HEAL_ACTION_HP_RATIO = 0.3;
+
+/**
+ * 戦闘ユニットが今ターンの行動力を全て消費して、その場で休息しHPを回復する。
+ * 今ターンまだ一度も行動していない(移動力が最大値のまま)ユニットにしか使えない
+ * (cmdCaptureCityの「占領には移動力が最大値である必要がある」制約と同じ考え方)。
+ */
+export function cmdHealCombatUnit(player, tx, tz) {
+    if (!isPlayersTurn(player)) { reply(player, "§cあなたのターンではありません。"); return { ok: false }; }
+
+    const tile = getTile(tx, tz);
+    const unit = tile?.combatUnit;
+    if (!unit || unit.ownerId !== player.id) { reply(player, "§cこのマスに回復可能なあなたの戦闘ユニットはいません。"); return { ok: false }; }
+
+    const maxMovement = unit.movement ?? 0;
+    const remaining = unit.movementRemaining ?? maxMovement;
+    if (remaining < maxMovement) { reply(player, "§c今ターン既に行動したユニットは回復できません。(移動力が最大値の時のみ回復できます)"); return { ok: false }; }
+
+    const maxHp = unit.maxHp ?? 100;
+    if ((unit.hp ?? maxHp) >= maxHp) { reply(player, "§cこのユニットのHPは既に満タンです。"); return { ok: false }; }
+
+    const healAmount = maxHp * HEAL_ACTION_HP_RATIO;
+    unit.hp = Math.min(maxHp, (unit.hp ?? maxHp) + healAmount);
+    unit.movementRemaining = 0;
+    tile.combatUnit = unit;
+    setTile(tx, tz, tile);
+
+    world.sendMessage(`§a[Heal] ${player.name} の${unit.label ?? "戦闘ユニット"} (${tx}, ${tz}) が休息し、HPが${Math.round(healAmount)}回復しました。 (HP: ${Math.max(0, Math.round(unit.hp))}/${maxHp})`);
     return { ok: true };
 }

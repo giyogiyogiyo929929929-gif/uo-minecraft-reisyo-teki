@@ -6,6 +6,11 @@ import { world } from "@minecraft/server";
 const KEY_CONFIG = "civ:mapConfig";
 const KEY_TURN = "civ:turn";
 const KEY_TILE_ROW_PREFIX = "civ:tiles_row_";
+const KEY_MATCH_SETTINGS = "civ:matchSettings";
+
+// 💡 試合の設定(産出の倍率、不可侵条約・同盟の有無、Bot同士の手番間隔、など)。マップ/ターン状態
+//    とは異なり、OPがゲームリセットを跨いで使い回せるよう resetAll() では消去しない(意図的)。
+const DEFAULT_MATCH_SETTINGS = { yieldMultiplier: 2, diplomacyEnabled: true, botTurnDelayTicks: 5, peaceEnabled: true };
 
 // Dynamic Property の読み書きを毎回繰り返さないためのメモリキャッシュ。
 // ワールド再読み込み後は最初の getTiles() で保存データから復元する。
@@ -17,6 +22,8 @@ let mapConfigCache = null;
 let mapConfigLoaded = false;
 let turnStateCache = null;
 let stateVersion = 0;
+let matchSettingsCache = null;
+let matchSettingsLoaded = false;
 
 function makeConfigKey(config) {
     return config ? JSON.stringify({
@@ -189,6 +196,33 @@ export function getTurnState() {
 export function setTurnState(state) {
     world.setDynamicProperty(KEY_TURN, JSON.stringify(state));
     turnStateCache = state;
+}
+
+/** 試合の設定 { yieldMultiplier, diplomacyEnabled, botTurnDelayTicks, peaceEnabled } を取得(未設定時は既定値)。 */
+export function getMatchSettings() {
+    if (matchSettingsLoaded) return matchSettingsCache;
+
+    const raw = world.getDynamicProperty(KEY_MATCH_SETTINGS);
+    matchSettingsCache = { ...DEFAULT_MATCH_SETTINGS };
+    if (typeof raw === "string") {
+        try {
+            Object.assign(matchSettingsCache, JSON.parse(raw));
+        } catch {
+            // 壊れた保存値は既定値のまま扱う。
+        }
+    }
+    matchSettingsLoaded = true;
+    return matchSettingsCache;
+}
+
+/** 試合の設定を部分更新する(渡したキーだけ上書きし、他は現在値を維持)。更新後の設定を返す。 */
+export function setMatchSettings(partial) {
+    const merged = { ...getMatchSettings(), ...partial };
+    world.setDynamicProperty(KEY_MATCH_SETTINGS, JSON.stringify(merged));
+    matchSettingsCache = merged;
+    matchSettingsLoaded = true;
+    stateVersion++; // 💡 産出倍率の変更を、都市産出量のキャッシュ(stateVersion駆動)に反映させる。
+    return merged;
 }
 
 export function resetAll() {

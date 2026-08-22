@@ -6,11 +6,13 @@ import { registerScriptCommands, registerCustomCommands } from "./commands.js";
 import { openMainMenu } from "./ui.js";
 import { getTurnState, getTiles, getMapConfig, getStateVersion } from "./state.js";
 import { worldToTile, TERRAIN_TYPES, RESOURCE_TYPES } from "./mapGen.js";
-import { getCityCurrentYields, forceEndTurn } from "./turns.js";
+import { getCityCurrentYields } from "./turns.js";
+import { forceEndTurnAuto } from "./bots.js";
 import { PRODUCTION_DEFS, getWorkerCount } from "./production.js";
 import { getDistrictDef } from "./districts.js";
 import { getEffectiveCombatStrength, getEffectiveRangedStrength, isRangedUnit } from "./combat.js";
-import { getActingPlayer, resolveCivName } from "./civs.js";
+import { getActingPlayer, getActiveCivId, resolveCivName } from "./civs.js";
+import { hasDiplomaticAgreement } from "./diplomacy.js";
 import { syncUnitLabels } from "./unitLabels.js";
 
 const MENU_ITEM_ID = "minecraft:compass";
@@ -118,7 +120,7 @@ world.afterEvents.playerLeave.subscribe((eventData) => {
     if (turn.playerOrder[turn.currentIndex] !== playerId) return;
 
     system.run(() => {
-        const result = forceEndTurn();
+        const result = forceEndTurnAuto();
         if (result.ok) {
             clearCityYieldCache();
             world.sendMessage(`§7(${playerName} が退出したため、自動的にターンをスキップしました)`);
@@ -165,9 +167,15 @@ system.runInterval(() => {
         const tile = tiles[key];
 
         if (tile) {
+            // 💡 このプレイヤーが今操作している国家(ソロテストで仮想国家を操作中の場合はそちらのID)。
+            //    自国・同盟国以外の都市については、内部管理情報(人口・生産・備蓄など)を
+            //    見えないようにする(相手を偵察して有利になる情報を与えないため)。
+            const viewerCivId = getActiveCivId(player);
+            const isFriendlyOwner = (ownerId) => !ownerId || ownerId === viewerCivId || hasDiplomaticAgreement(viewerCivId, ownerId);
+
             // 地形ラベルの取得
             const terrainLabel = TERRAIN_TYPES[tile.type]?.label ?? "未知の地形";
-            
+
             // 資源ラベルの取得（石油も含めて表示）
             let resourceLabel = "なし";
             if (tile.resource && RESOURCE_TYPES[tile.resource]) {
@@ -176,9 +184,11 @@ system.runInterval(() => {
                 resourceLabel = `${icon}${res.label} (${res.category})`;
             }
 
-            // 領有プレイヤー名と都市名の整形
+            // 領有プレイヤー名と都市名の整形(人口は自国・同盟国の都市のみ表示)
             const ownerText = tile.ownerName ? `§a${tile.ownerName}` : "§7中立";
-            const cityText = tile.city ? ` §e[都市: ${tile.city.name} ([Pop]x${tile.city.population})]` : "";
+            const cityText = tile.city
+                ? (isFriendlyOwner(tile.ownerId) ? ` §e[都市: ${tile.city.name} ([Pop]x${tile.city.population})]` : ` §e[都市: ${tile.city.name}]`)
+                : "";
             const facilityText = tile.facility ? ` §7[施設: ${tile.facility.label ?? tile.facility.id}]` : "";
             const districtText = tile.district
                 ? ` §5[区域: ${tile.district.label ?? tile.district.id}]`
@@ -203,36 +213,40 @@ system.runInterval(() => {
             let cityInfoLine = "";
 
             if (cityTile && cityTile.city) {
-                // 💡 市民配置ロジックを考慮した「今」実際に出ている産出量
-                const yields = getCachedCityCurrentYields(cityKey, tiles);
-                const oilText = yields.oil > 0 ? ` §7| §b[Oil]x${yields.oil}` : "";
-                const ironText = yields.iron > 0 ? ` §7| §7[Iron]x${yields.iron}` : "";
-                const faithText = (yields.faith ?? 0) > 0 ? ` §7| §d[Faith]x${yields.faith}` : "";
-                currentYieldLine = `\n§f今の産出(都市全体): §a[Food]x${yields.food} §7| §6[Prod]x${yields.production}${oilText}${ironText}${faithText}`;
-
-                // 💡 帰属都市そのものの詳細情報
                 const c = cityTile.city;
+                if (isFriendlyOwner(cityTile.ownerId)) {
+                    // 💡 市民配置ロジックを考慮した「今」実際に出ている産出量
+                    const yields = getCachedCityCurrentYields(cityKey, tiles);
+                    const oilText = yields.oil > 0 ? ` §7| §b[Oil]x${yields.oil}` : "";
+                    const ironText = yields.iron > 0 ? ` §7| §7[Iron]x${yields.iron}` : "";
+                    const faithText = (yields.faith ?? 0) > 0 ? ` §7| §d[Faith]x${yields.faith}` : "";
+                    currentYieldLine = `\n§f今の産出(都市全体): §a[Food]x${yields.food} §7| §6[Prod]x${yields.production}${oilText}${ironText}${faithText}`;
 
-                // 💡 進行中の生産(ユニット/建造物)を汎用的に表示。新しい生産物が増えても自動で対応。
-                let productionText = "";
-                if (c.production) {
-                    const def = PRODUCTION_DEFS[c.production.id];
-                    if (def) {
-                        const progressText = Math.floor(c.production.progress * 10) / 10;
-                        productionText = ` §7| ${def.icon}${def.label}生産中(${progressText}/${def.cost})`;
+                    // 💡 進行中の生産(ユニット/建造物)を汎用的に表示。新しい生産物が増えても自動で対応。
+                    let productionText = "";
+                    if (c.production) {
+                        const def = PRODUCTION_DEFS[c.production.id];
+                        if (def) {
+                            const progressText = Math.floor(c.production.progress * 10) / 10;
+                            productionText = ` §7| ${def.icon}${def.label}生産中(${progressText}/${def.cost})`;
+                        }
                     }
-                }
 
-                const tpText = c.tradingPost?.status === "active" ? " §7| §a[Trade]交易所稼働中" : "";
-                const missileText = (c.missiles ?? 0) > 0 ? ` §7| §c[Missile]x${c.missiles}` : "";
-                const faithStorageText = (c.faithStorage ?? 0) > 0 ? ` §7| §d[Faith]信仰力${c.faithStorage}` : "";
-                let districtProductionText = "";
-                if (c.districtConstruction) {
-                    const districtDef = getDistrictDef(c.districtConstruction.id);
-                    const districtProgressText = Math.floor(c.districtConstruction.progress * 10) / 10;
-                    districtProductionText = ` §7| §5${districtDef?.icon ?? "[Sacred]"}${districtDef?.label ?? c.districtConstruction.id}区域建設中(${districtProgressText}/${c.districtConstruction.cost})`;
+                    const tpText = c.tradingPost?.status === "active" ? " §7| §a[Trade]交易所稼働中" : "";
+                    const missileText = (c.missiles ?? 0) > 0 ? ` §7| §c[Missile]x${c.missiles}` : "";
+                    const faithStorageText = (c.faithStorage ?? 0) > 0 ? ` §7| §d[Faith]信仰力${c.faithStorage}` : "";
+                    let districtProductionText = "";
+                    if (c.districtConstruction) {
+                        const districtDef = getDistrictDef(c.districtConstruction.id);
+                        const districtProgressText = Math.floor(c.districtConstruction.progress * 10) / 10;
+                        districtProductionText = ` §7| §5${districtDef?.icon ?? "[Sacred]"}${districtDef?.label ?? c.districtConstruction.id}区域建設中(${districtProgressText}/${c.districtConstruction.cost})`;
+                    }
+                    cityInfoLine = `\n§6【${c.isCapital ? "首都" : "都市"}: ${c.name}】§f 人口:§a${c.population}§f/§e${c.housing} §f| [Worker]${getWorkerCount(c)}人 §f| [Food]貯留${c.foodStorage ?? 0} §f| §c飢餓${c.starvationTurns ?? 0}/3${productionText}${tpText}${missileText}${faithStorageText}${districtProductionText}`;
+                } else {
+                    // 💡 自国・同盟国以外の都市は、偵察による有利化を防ぐため詳細情報を表示しない
+                    //    (存在・所有者・都市名までは領有表示で分かるが、それ以上は隠す)。
+                    cityInfoLine = `\n§6【${c.isCapital ? "首都" : "都市"}: ${c.name}】 §7(他国の都市のため詳細情報は非表示)`;
                 }
-                cityInfoLine = `\n§6【${c.isCapital ? "首都" : "都市"}: ${c.name}】§f 人口:§a${c.population}§f/§e${c.housing} §f| [Worker]${getWorkerCount(c)}人 §f| [Food]貯留${c.foodStorage ?? 0} §f| §c飢餓${c.starvationTurns ?? 0}/3${productionText}${tpText}${missileText}${faithStorageText}${districtProductionText}`;
             }
 
             // アクションバーへ出力

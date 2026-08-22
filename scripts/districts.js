@@ -16,6 +16,9 @@
 //   tile.underDistrictConstruction = true                                … 建設中の対象マスの目印
 //   tile.district = { id, label, ownerId, ownerName }                   … 完成した区域
 //
+// 【1都市につき同じ区域は1つまで】
+//   canStartDistrict() は、belongsToCityKey が一致する帰属マスの中に同じ区域IDが既に無いかを
+//   hasCityDistrict() で確認する(tiles/cityKeyを渡した場合のみ判定する)。
 // 【新しい区域の増やし方】
 //   DISTRICT_DEFS に1エントリ追加するだけでよい。
 //   - adjacencyBonuses: 隣接マスに応じたボーナス(adjacency.js と全く同じ書き方)。
@@ -23,12 +26,14 @@
 
 import { hasCompletedProgress, getDefinition } from "./progression.js";
 import { matchesTerrainWeighted, matchesFacility, matchesDistrict, matchesAnyCity, sumAssignedTileYields, sumAssignedTileAdjacencyYields, getFlagFlatYields } from "./adjacency.js";
+import { isWaterTerrain } from "./mapGen.js";
 
 /**
  * @typedef {Object} DistrictDef
  * @property {string} label 表示名
  * @property {string} icon 表示アイコン
  * @property {number} cost 完成に必要な生産力の合計値
+ * @property {boolean} [allowWater] trueの場合のみ水上マス(川・海・池・湖)に配置できる(省略時は不可)
  * @property {string} [requiresTechnology] 配置に必要な技術ID(technology progression)
  * @property {Record<string, number>} [perPopulationYields] この区域を持つ都市に、人口1につき
  *   追加で加算される産出量(例: { faith: 2 })
@@ -68,6 +73,23 @@ export const DISTRICT_DEFS = {
         ],
         completeMessage: (tx, tz) => `§e[Complete] (${tx}, ${tz}) に工業地帯が完成しました！`,
     },
+    campus: {
+        label: "キャンパス",
+        icon: "[Campus]",
+        cost: 50,
+        requiresTechnology: "writing",
+        // 💡 キャンパスがあるだけで、国家の科学力+2(隣接マスに関係なく毎ターン。
+        //    turns.js の processPlayerTurnStart が、各都市のscience産出量を合算して
+        //    技術ポイントの付与量に加算する。人口由来の科学力とは別枠で追加される)。
+        flatYields: { science: 2 },
+        // 💡 キャンパスに隣接する「山」1マスにつき科学力+1(山脈はその2倍の+2、上限なし)。
+        //    他の区域1マスにつき科学力+1。
+        adjacencyBonuses: [
+            { id: "campusNature", label: "山・山脈からの学術的恩恵", match: matchesTerrainWeighted({ mountain: 1, mountainRange: 2 }), yieldPerMatch: { science: 1 } },
+            { id: "campusOtherDistrict", label: "他の区域からの恩恵", match: matchesDistrict(), yieldPerMatch: { science: 1 } },
+        ],
+        completeMessage: (tx, tz) => `§e[Complete] (${tx}, ${tz}) にキャンパスが完成しました！`,
+    },
 };
 
 export function getDistrictDef(id) {
@@ -79,15 +101,33 @@ export function getDistrictIds() {
 }
 
 /**
+ * 指定した都市が既にこの区域(id)を保有しているかどうかを判定する(都市1つにつき同じ区域は
+ * 1つまでという制約のチェックに使う)。区域タイルは着工時に belongsToCityKey がその都市の
+ * キーに設定される(cmdStartDistrict参照)ため、それを基準に判定する。
+ * @param {string} cityKey 判定対象の都市のマスキー("tx,tz")
+ * @param {string} districtId 区域ID
+ * @param {any} tiles 全タイルデータ
+ */
+export function hasCityDistrict(cityKey, districtId, tiles) {
+    for (const key in tiles) {
+        const t = tiles[key];
+        if (t.belongsToCityKey === cityKey && t.district?.id === districtId) return true;
+    }
+    return false;
+}
+
+/**
  * 指定マスに区域の建設を開始できるかどうかを判定する。
  * @param {any} tile 対象マスのデータ
  * @param {string} id 区域ID
  * @param {string} playerId 建設しようとしているプレイヤー/国家のID
  * @param {any} city 帰属先となる都市のデータ(既に建設中の区域が無いかの判定に使う)
  * @param {any} [player] 技術取得状況の判定に使うプレイヤー/国家ハンドル(省略時は技術チェックを行わない)
+ * @param {any} [tiles] 全タイルデータ(同じ都市に同じ区域が既にあるかの判定に使う。省略時は判定しない)
+ * @param {string} [cityKey] 帰属先都市のマスキー(tilesとセットで指定する)
  * @returns {{ ok: boolean, message?: string }}
  */
-export function canStartDistrict(tile, id, playerId, city, player = null) {
+export function canStartDistrict(tile, id, playerId, city, player = null, tiles = null, cityKey = null) {
     const def = DISTRICT_DEFS[id];
     if (!def) return { ok: false, message: "§c不明な区域です。" };
     if (!tile) return { ok: false, message: "§c無効なマスです。" };
@@ -97,6 +137,10 @@ export function canStartDistrict(tile, id, playerId, city, player = null) {
     if (tile.district) return { ok: false, message: `§cこのマスには既に区域【${tile.district.label ?? tile.district.id}】が存在します。` };
     if (tile.underDistrictConstruction) return { ok: false, message: "§cこのマスは既に区域を建設中です。" };
     if (city?.districtConstruction) return { ok: false, message: "§c既にこの都市は別の区域を建設中です(同時に1つまで)。" };
+    if (tiles && cityKey && hasCityDistrict(cityKey, id, tiles)) {
+        return { ok: false, message: `§cこの都市には既に【${def.label}】が存在します(都市1つにつき同じ区域は1つまでです)。` };
+    }
+    if (!def.allowWater && isWaterTerrain(tile.type)) return { ok: false, message: `§c【${def.label}】は水上マスには配置できません。` };
     if (def.requiresTechnology) {
         const hasTech = !!player && hasCompletedProgress(player, "technology", def.requiresTechnology);
         if (!hasTech) {

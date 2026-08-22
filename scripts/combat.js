@@ -7,6 +7,13 @@
 // ・海軍ユニットは水上マス(isWaterなマス。川・海・池・湖)にのみ進入できる。
 // ・山脈マス(impassable)には、陸軍・海軍を問わずどのユニットも進入できない。
 //
+// 【他国の領土への進入】
+// ・「関係なし」(diplomacy.js の getRelation が "none")の相手が所有するマスには進入できない。
+//   宣戦布告した相手(war)・不可侵条約(pact)・同盟(alliance)の相手の領土になら進入できる。
+//   canUnitEnterTile が地形適性(canUnitEnterTerrain)とこの外交関係(canUnitEnterOwnership)の
+//   両方をまとめて判定する。個別の理由でエラーメッセージを出し分けたい呼び出し元
+//   (commands.js の cmdMoveCombatUnit)は、2つのサブ関数を直接使う。
+//
 // 【ルール】
 // ・攻撃距離は、そのユニットの移動力(movement)と同じ範囲を使う(attackRange を明示的に
 //   持たせている場合はそちらを優先。将来、移動力と攻撃距離が異なるユニットを追加したくなった
@@ -35,8 +42,18 @@
 // ・ダメージを受けたユニットは戦闘力が下がる。HPが10減るごとに-1(最大-9)のペナルティ。
 //   このペナルティは常に「現在のHP」から算出する派生値であり、combatStrength等の基礎値自体は
 //   書き換えない。ダメージを受けた直後の反撃にも即座に反映される。
+//
+// 【包囲ボーナス(flanking)】
+// ・攻撃対象(防御側)に隣接する8マスのうち、攻撃側自身のマスを除いて、攻撃側と同じ国家の
+//   戦闘ユニットが存在するマスの数(countFlankingAllies)に応じて、攻撃側の先制攻撃力に
+//   ボーナスを与える(getFlankingBonus: 1体につき+FLANKING_BONUS_PER_ALLY、最大
+//   FLANKING_MAX_ALLIES体分まで)。複数のユニットで敵を取り囲んでから攻撃すると有利になる、
+//   という戦術的な選択を後押しする。反撃側の戦闘力には影響しない(包囲は「攻める側」の
+//   有利さであり、囲まれている防御側の反撃の強さ自体は変えない)。呼び出し元
+//   (commands.js の cmdAttackCombatUnit)が攻撃実行時の盤面から算出し、resolveCombat に渡す。
 
 import { isWaterTerrain, isImpassableTerrain } from "./mapGen.js";
+import { canEnterTerritory } from "./diplomacy.js";
 
 const DAMAGE_MIN = 24;
 const DAMAGE_MAX = 36;
@@ -46,6 +63,9 @@ const MAX_STRENGTH_PENALTY = 9;
 // attackRangeがこの値より大きいユニットは、明示的な遠距離戦闘力を持っていなくても
 // 遠距離戦闘ユニットとみなしてよい(将来追加されるユニットのための保険的な判定)。
 const RANGED_UNIT_ATTACK_RANGE_THRESHOLD = 2;
+// 包囲ボーナス: 攻撃対象に隣接する自軍ユニット1体につき与える先制攻撃力ボーナス、およびその上限体数。
+const FLANKING_BONUS_PER_ALLY = 3;
+const FLANKING_MAX_ALLIES = 4;
 
 /** ユニットの攻撃距離を取得する。明示的な attackRange が無ければ移動力(movement)と同じ範囲を使う。 */
 export function getAttackRange(unit) {
@@ -63,15 +83,34 @@ export function isLandUnit(unit) {
 }
 
 /**
- * 指定した戦闘ユニットが、指定したタイルへ進入できるかどうかを判定する。
+ * 指定した戦闘ユニットが、地形の観点だけで指定したタイルへ進入できるかどうかを判定する
+ * (所有者・外交関係は見ない。地形適性のみ)。
  * ・山脈マス(impassable)は陸軍・海軍を問わず進入不可。
  * ・陸軍ユニットは水上マス(isWater)に進入不可、海軍ユニットは水上マス以外に進入不可。
  */
-export function canUnitEnterTile(unit, tile) {
+export function canUnitEnterTerrain(unit, tile) {
     if (!tile) return false;
     if (isImpassableTerrain(tile.type)) return false;
     const water = isWaterTerrain(tile.type);
     return isNavalUnit(unit) ? water : !water;
+}
+
+/**
+ * 指定した戦闘ユニットが、このタイルの所有者との外交関係の観点で進入できるかどうかを判定する
+ * (地形は見ない)。「関係なし」の相手の領土には入れない(宣戦布告した相手・不可侵条約・
+ * 同盟の相手、および無所属マス・自国の領土には入れる)。
+ */
+export function canUnitEnterOwnership(unit, tile) {
+    if (!tile?.ownerId || tile.ownerId === unit?.ownerId) return true;
+    return canEnterTerritory(unit?.ownerId, tile.ownerId);
+}
+
+/**
+ * 指定した戦闘ユニットが、指定したタイルへ進入できるかどうかを総合判定する
+ * (地形適性 + 所有者との外交関係の両方を満たす必要がある)。
+ */
+export function canUnitEnterTile(unit, tile) {
+    return canUnitEnterTerrain(unit, tile) && canUnitEnterOwnership(unit, tile);
 }
 
 /**
@@ -125,8 +164,33 @@ export function tileDistance(fromTx, fromTz, toTx, toTz) {
 }
 
 /**
+ * 防御側(defTx, defTz)に隣接する8マスのうち、攻撃側自身のマス(attackerTx, attackerTz)を除いて、
+ * attackerOwnerId と同じ国家の戦闘ユニットが存在するマスの数を数える(包囲ボーナスの算出に使う)。
+ */
+export function countFlankingAllies(defTx, defTz, attackerOwnerId, attackerTx, attackerTz, tiles) {
+    let count = 0;
+    for (let dz = -1; dz <= 1; dz++) {
+        for (let dx = -1; dx <= 1; dx++) {
+            if (dx === 0 && dz === 0) continue;
+            const tx = defTx + dx;
+            const tz = defTz + dz;
+            if (tx === attackerTx && tz === attackerTz) continue;
+            if (tiles[`${tx},${tz}`]?.combatUnit?.ownerId === attackerOwnerId) count++;
+        }
+    }
+    return count;
+}
+
+/** countFlankingAllies() が返した数を、実際の先制攻撃力ボーナスに変換する(上限あり)。 */
+export function getFlankingBonus(flankingAllyCount) {
+    return Math.min(flankingAllyCount, FLANKING_MAX_ALLIES) * FLANKING_BONUS_PER_ALLY;
+}
+
+/**
  * 指定した戦闘ユニットが今攻撃できる、敵の戦闘ユニットが存在するマスの一覧を返す。
- * 外交協定(不可侵条約・同盟)を結んでいる相手のユニットは対象に含めない。
+ * hasAgreementFn(playerId, otherOwnerId) が true を返した相手のユニットは対象から除外する。
+ * 呼び出し元は「戦争状態でない(=攻撃できない)相手」を除外する述語(例:
+ * `(a, b) => !isAtWar(a, b)`)を渡す(commands.js の cmdAttackCombatUnit と同じ判定基準)。
  * @returns {{ tx: number, tz: number, tile: any, unit: any }[]}
  */
 export function getAttackableTargets(fromTx, fromTz, playerId, unit, tiles, config, hasAgreementFn) {
@@ -193,6 +257,8 @@ function getCounterStrength(defender, attacker, distance) {
  * @param {any} defender 防御側の戦闘ユニット (hp, combatStrength / rangedCombatStrength / meleeCombatStrength 等を持つ)
  * @param {number} [distance=1] 攻撃側と防御側の間のマス距離(呼び出し元で tileDistance() を使って算出する)。
  *   省略した場合は隣接(1)とみなす。
+ * @param {number} [flankingBonus=0] 先制攻撃力に加算する包囲ボーナス(呼び出し元で
+ *   countFlankingAllies() + getFlankingBonus() を使って算出する)。反撃側の戦闘力には影響しない。
  * @returns {{
  *   firstDamage: number,
  *   counterDamage: number,
@@ -201,10 +267,10 @@ function getCounterStrength(defender, attacker, distance) {
  *   counterSkippedReason: "defenderDestroyed" | "outOfDefenderRange" | null
  * }}
  */
-export function resolveCombat(attacker, defender, distance = 1) {
+export function resolveCombat(attacker, defender, distance = 1, flankingBonus = 0) {
     // 1. 先制攻撃(攻撃側 → 防御側)。
     //    攻撃側の攻撃力は先制攻撃のルールに従って選択し、防御側の抵抗力は常に近距離戦闘力を用いる。
-    const firstStrikeStrength = getFirstStrikeStrength(attacker);
+    const firstStrikeStrength = getFirstStrikeStrength(attacker) + flankingBonus;
     const firstDamage = rollDamage(firstStrikeStrength, getEffectiveCombatStrength(defender));
     defender.hp = (defender.hp ?? 0) - firstDamage;
     const defenderDestroyed = defender.hp <= 0;

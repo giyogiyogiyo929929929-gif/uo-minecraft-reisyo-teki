@@ -307,6 +307,21 @@ export const PRODUCTION_DEFS = {
         onComplete: (city) => { city.obelisk = true; },
         completeMessage: (city) => `§e[Complete]【${city.name}】オベリスクが完成しました！ (信仰力の産出+4)`,
     },
+    antiAir: {
+        label: "対空砲",
+        icon: "[AntiAir]",
+        category: "building",
+        cost: 200,
+        uniquePerCity: true,
+        hasBuilt: (city) => !!city.antiAir,
+        // 💡 効果そのもの(ミサイルの迎撃)はflatYields等では表現できない特殊効果のため、
+        //    turns.js の resolveMissileImpact() が city.antiAir / city.antiAirUsedThisTurn を
+        //    直接見て判定する(§17)。1ターンに1回までという制限は、他の「今ターン使用済み」系
+        //    フラグ(hasProselytizedThisTurn等)と同じく processPlayerTurnStart で毎ターン
+        //    falseにリセットされる。
+        onComplete: (city) => { city.antiAir = true; },
+        completeMessage: (city) => `§e[Complete]【${city.name}】に対空砲が完成しました！ (1ターンに1回、この都市と周囲8マスへ着弾するミサイルを迎撃)`,
+    },
     capital: {
         label: "遷都",
         icon: "[Capital]",

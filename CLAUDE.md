@@ -41,8 +41,10 @@ There are no automated tests; correctness is verified by playing the game in a B
 | `combat.js` | Melee/ranged combat-strength selection, damage formula, counterattack rules |
 | `diplomacy.js` | Non-aggression pacts and alliances |
 | `progression.js` | Technology and civic tree progress |
-| `commands.js` | Chat command parsing and the action handlers behind both commands and the UI |
+| `commands.js` | Slash command (custom commands + `/scriptevent`) parsing and the action handlers behind both commands and the UI |
 | `ui.js` | All `ActionFormData`-based menus, paginated where lists can get long |
+| `unitLabels.js` | World-space `TextPrimitive` labels over tiles with combat units (experimental API; silently no-ops if unavailable) |
+| `bots.js` | Autonomous "Bot" civs: replays existing command functions (`cmdClaim`/`cmdSettle`/...) via a synthetic player-like object to take a Bot's turn, then advances play until a human's turn |
 
 ### State & persistence model
 
@@ -51,6 +53,7 @@ Everything lives in `world` Dynamic Properties (there is no external DB):
 - `civ:mapConfig` — map origin/size/tile size (JSON).
 - `civ:turn` — `{ turnNumber, playerOrder, currentIndex, started }`.
 - `civ:tiles_row_<z>` — one Dynamic Property **per map row**, holding a JSON object of `{ [tx]: tileData }` for that row. Tiles are addressed elsewhere as a flat map keyed by `"tx,tz"` strings.
+- `civ:matchSettings` — `{ yieldMultiplier, diplomacyEnabled, botTurnDelayTicks, peaceEnabled }` (`state.js`'s `getMatchSettings`/`setMatchSettings`), OP-editable match rules. Unlike the keys above, **this one is intentionally NOT cleared by `resetAll()`** — it's meant to survive a game reset so an OP doesn't have to re-configure it for every test match.
 - Per-civ data (research, diplomacy, capital flags, etc.) is namespaced by civ ID so virtual test civs — which have no in-world entity — can persist state too.
 
 `state.js` is the only module that touches Dynamic Properties directly; everything else goes through its `getTiles/setTile/setTiles/getMapConfig/getTurnState/...` accessors. It maintains an in-memory cache (`tilesCache`, `tileRowsRawCache`, etc.) so hot paths (UI refreshed every 10 ticks, yield calculations) don't re-read/re-serialize the whole map every call. Key invariants when touching this file or adding new persisted state:

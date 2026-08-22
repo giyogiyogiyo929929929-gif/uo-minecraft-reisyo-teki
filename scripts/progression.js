@@ -13,6 +13,8 @@ export const TECHNOLOGIES = {
     smelting: { label: "製錬技術", cost: 100, prerequisites: ["mining"] },
     // 💡 徒弟制度: 前提は製錬技術。取得後、区域「工業地帯」を配置できるようになる。
     apprenticeship: { label: "徒弟制度", cost: 300, prerequisites: ["smelting"] },
+    // 💡 筆記: 前提は陶磁器。取得後、区域「キャンパス」を配置できるようになる。
+    writing: { label: "筆記", cost: 20, prerequisites: ["pottery"] },
 };
 
 export const CIVICS = {

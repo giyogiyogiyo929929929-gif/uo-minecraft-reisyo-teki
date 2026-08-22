@@ -19,7 +19,7 @@
 
 import { hasCompletedProgress, getDefinition } from "./progression.js";
 import { matchesTerrainWeighted, sumAssignedTileYields, sumAssignedTileAdjacencyYields } from "./adjacency.js";
-import { RESOURCE_TYPES } from "./mapGen.js";
+import { RESOURCE_TYPES, isWaterTerrain } from "./mapGen.js";
 
 /**
  * @typedef {Object} FacilityDef
@@ -27,6 +27,7 @@ import { RESOURCE_TYPES } from "./mapGen.js";
  * @property {string} icon 表示アイコン
  * @property {string} [requiresTechnology] 設置に必要な技術ID(technology progression)
  * @property {string} [requiresResource] 設置できるマスの資源を限定する(tile.resourceと一致が必要)
+ * @property {boolean} [allowWater] trueの場合のみ水上マス(川・海・池・湖)に設置できる(省略時は不可)
  * @property {Record<string, number>} [flatYields] この施設があるだけで(隣接マスに関係なく)
  *   都市に毎ターン加算される産出量(例: { iron: 2, production: 4 })
  * @property {Array<any>} [adjacencyBonuses] 隣接マスに応じたボーナスのルール一覧(adjacency.js参照)
@@ -78,6 +79,7 @@ export function canInstallFacility(tile, id, playerId, player = null) {
     if (tile.facility) return { ok: false, message: `§cこのマスには既に施設【${tile.facility.label ?? tile.facility.id}】が存在します。` };
     if (tile.district) return { ok: false, message: `§cこのマスには区域【${tile.district.label ?? tile.district.id}】があるため施設は設置できません。` };
     if (tile.underDistrictConstruction) return { ok: false, message: "§cこのマスは区域を建設中のため施設は設置できません。" };
+    if (!def.allowWater && isWaterTerrain(tile.type)) return { ok: false, message: `§c【${def.label}】は水上マスには設置できません。` };
     if (def.requiresResource && tile.resource !== def.requiresResource) {
         const resourceLabel = RESOURCE_TYPES[def.requiresResource]?.label ?? def.requiresResource;
         return { ok: false, message: `§c【${def.label}】は資源【${resourceLabel}】があるマスにのみ設置できます。` };

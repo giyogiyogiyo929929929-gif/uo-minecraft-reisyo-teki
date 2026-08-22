@@ -96,19 +96,24 @@ export function getVirtualCivById(id) {
     return virtualCivsByIdCache.get(id) ?? null;
 }
 
-export function addVirtualCiv(controllerPlayer, name) {
+/**
+ * @param {any} controllerPlayer この国家を追加した実プレイヤー(所有者)
+ * @param {string} [name] 国家名(省略時は自動採番)
+ * @param {{ isBot?: boolean }} [options] isBot:true で自動操作されるBotとして追加する(bots.js参照)
+ */
+export function addVirtualCiv(controllerPlayer, name, options = {}) {
     const civs = getVirtualCivs();
     const id = `npc_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
     const civName = (name ?? "").trim() || `テスト国家${civs.length + 1}`;
-    civs.push({ id, name: civName, controllerId: controllerPlayer.id });
+    civs.push({ id, name: civName, controllerId: controllerPlayer.id, isBot: !!options.isBot });
     saveVirtualCivs(civs);
     return { id, name: civName };
 }
 
 export function getControllableCivs(realPlayer) {
-    const list = [{ id: realPlayer.id, name: realPlayer.name, isVirtual: false }];
+    const list = [{ id: realPlayer.id, name: realPlayer.name, isVirtual: false, isBot: false }];
     for (const civ of getVirtualCivs()) {
-        if (civ.controllerId === realPlayer.id) list.push({ id: civ.id, name: civ.name, isVirtual: true });
+        if (civ.controllerId === realPlayer.id) list.push({ id: civ.id, name: civ.name, isVirtual: true, isBot: !!civ.isBot });
     }
     return list;
 }
@@ -139,7 +144,7 @@ export function resolveCivName(civId) {
 export function isCivControllable(civId) {
     if (getOnlinePlayerById(civId)) return true;
     const civ = getVirtualCivById(civId);
-    if (civ) return !!getOnlinePlayerById(civ.controllerId);
+    if (civ) return civ.isBot || !!getOnlinePlayerById(civ.controllerId);
     return false;
 }
 
