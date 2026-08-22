@@ -9,6 +9,7 @@ import { hasDiplomaticAgreement, signAgreement } from "./diplomacy.js";
 import { getAttackRange, resolveCombat, tileDistance, canUnitEnterTile } from "./combat.js";
 import { addVirtualCiv, getControllableCivs, getActiveCivId, setActiveCivId, getActingPlayer, getOnlinePlayerById } from "./civs.js";
 import { getFacilityDef, canInstallFacility, installFacility, getFacilityIds } from "./facilities.js";
+import { resolveOwningCityKey } from "./adjacency.js";
 import { getDistrictDef, canStartDistrict, startDistrictConstruction, getDistrictBuildingDef, canStartDistrictBuilding, startDistrictBuildingConstruction, getDistrictIds, getDistrictBuildingIds } from "./districts.js";
 import {
     getReligiousUnitDef, hasFoundedReligion, getReligionName, setReligionName,
@@ -49,7 +50,7 @@ world.beforeEvents.chatSend.subscribe(async (ev) => {
         city.missiles = 999;
         const [cx, cz] = capitalKey.split(",");
         setTile(parseInt(cx, 10), parseInt(cz, 10), capitalTile);
-        player.sendMessage(`§c[Missile]🎉【${city.name}】ミサイルチート発動！ (在庫: ${city.missiles}発)`);
+        player.sendMessage(`§c[Missile][Complete]【${city.name}】ミサイルチート発動！ (在庫: ${city.missiles}発)`);
     }
     if (message === '.nuke') {
         ev.cancel = true;
@@ -154,7 +155,7 @@ export function cmdRenameCity(player, tx, tz, newName) {
 
     if (!tile || !tile.city) return;
     if (tile.ownerId !== player.id) {
-        player.sendMessage("§c❌ 自分の都市の名前しか変更できません。");
+        player.sendMessage("§c[Fail] 自分の都市の名前しか変更できません。");
         return;
     }
 
@@ -162,7 +163,7 @@ export function cmdRenameCity(player, tx, tz, newName) {
     tile.city.name = newName;
     setTile(tx, tz, tile);
 
-    world.sendMessage(`§e📢 【都市改名】${player.name} が【${oldName}】の名前を【${newName}】に変更しました！`);
+    world.sendMessage(`§e[Rename] 【都市改名】${player.name} が【${oldName}】の名前を【${newName}】に変更しました！`);
 }
 
 /**
@@ -312,7 +313,7 @@ export function cmdBuyRights(player) {
     turn.playerRights[player.id] = (turn.playerRights[player.id] ?? 0) + 1;
     setTurnState(turn);
 
-    reply(player, `§a🎉 首都の人口を2消費し、開拓権を獲得しました！(ストック: ${turn.playerRights[player.id]}回)`);
+    reply(player, `§a[Complete] 首都の人口を2消費し、開拓権を獲得しました！(ストック: ${turn.playerRights[player.id]}回)`);
 }
 
 export function cmdClaim(player) {
@@ -436,7 +437,7 @@ export function cmdStartProduction(player, productionId) {
 
     const { production } = getCityCurrentYields(`${tx},${tz}`, getTiles());
     const remaining = Math.max(0, tile.city.production.cost - tile.city.production.progress);
-    const estTurns = production > 0 ? Math.ceil(remaining / production) : "∞";
+    const estTurns = production > 0 ? Math.ceil(remaining / production) : "--";
 
     world.sendMessage(
         `§e${def.icon} ${player.name} が都市【${tile.city.name}】で【${def.label}】の生産を開始しました！` +
@@ -465,7 +466,7 @@ export function cmdCancelProduction(player) {
 
     const def = PRODUCTION_DEFS[cancelled.id];
     const label = def?.label ?? cancelled.id;
-    world.sendMessage(`§7🛑 ${player.name} が都市【${tile.city.name}】の【${label}】の生産を中止しました。(蓄積生産力 ${cancelled.progress} は次の生産へ引き継がれます)`);
+    world.sendMessage(`§7[Stop] ${player.name} が都市【${tile.city.name}】の【${label}】の生産を中止しました。(蓄積生産力 ${cancelled.progress} は次の生産へ引き継がれます)`);
     return { ok: true };
 }
 
@@ -634,7 +635,7 @@ export function cmdSettle(player) {
     const labelName = isCapital ? "首都" : "都市";
     placePlayerBannerAtCenter(dimension, tx, tz, config, player.id, isCapital);
     player.runCommand(`title @a title §6${labelName}【${cityUniqueName}】建設！`);
-    world.sendMessage(`§6★ ${player.name} が (${tx}, ${tz}) に${labelName}【${cityUniqueName}】を創設！ (${waterText}, 住宅上限: ${housing})`);
+    world.sendMessage(`§6[New City] ${player.name} が (${tx}, ${tz}) に${labelName}【${cityUniqueName}】を創設！ (${waterText}, 住宅上限: ${housing})`);
 }
 
 // 💡 交易所の建設も、労働者・ミサイルと同じ汎用生産コマンド cmdStartProduction("tradingPost") で行う。
@@ -679,7 +680,7 @@ export function cmdChop(player) {
 
     // 💡 労働者の行動回数チェック(労働者1人あたり行動回数WORKER_ACTIONS_PER_UNIT。1消費するごとに-1)
     if (!hasAvailableWorkerAction(cityTile.city)) {
-        reply(player, `§c❌ 労働者が足りません！この作業には帰属都市【${cityTile.city.name}】の労働者が必要です。`);
+        reply(player, `§c[Fail] 労働者が足りません！この作業には帰属都市【${cityTile.city.name}】の労働者が必要です。`);
         return { ok: false };
     }
 
@@ -710,7 +711,7 @@ export function cmdChop(player) {
     }
 
     player.runCommand(`playsound dig.wood @a ${player.location.x} ${player.location.y} ${player.location.z}`);
-    world.sendMessage(`§d🪓 ${player.name} が (${tx}, ${tz}) の森を伐採！【${cityTile.city.name}】の労働者の行動回数を1消費し、同都市の住宅上限が +1！`);
+    world.sendMessage(`§d[Chop] ${player.name} が (${tx}, ${tz}) の森を伐採！【${cityTile.city.name}】の労働者の行動回数を1消費し、同都市の住宅上限が +1！`);
     return { ok: true };
 }
 
@@ -732,29 +733,17 @@ export function cmdInstallFacility(player, facilityId) {
     if (!check.ok) { reply(player, check.message); return { ok: false }; }
 
     // 💡 労働者の所属・帰属先都市を決定する(cmdChopと同じロジック)
-    let cityKey = tile.belongsToCityKey;
-    if (!cityKey) {
-        const allTiles = getTiles();
-        let minDist = Infinity;
-        for (const key in allTiles) {
-            const t = allTiles[key];
-            if (t.ownerId === player.id && t.city) {
-                const [cx, cz] = key.split(",");
-                const dist = Math.abs(tx - parseInt(cx, 10)) + Math.abs(tz - parseInt(cz, 10));
-                if (dist < minDist) { minDist = dist; cityKey = key; }
-            }
-        }
-        if (cityKey) tile.belongsToCityKey = cityKey;
-    }
-    if (!cityKey) { reply(player, "§c作業エラー: このマスが帰属する都市が存在しません。"); return { ok: false }; }
-
     const allTiles = getTiles();
+    const cityKey = resolveOwningCityKey(tx, tz, tile, player.id, allTiles);
+    if (!cityKey) { reply(player, "§c作業エラー: このマスが帰属する都市が存在しません。"); return { ok: false }; }
+    if (!tile.belongsToCityKey) tile.belongsToCityKey = cityKey;
+
     const cityTile = allTiles[cityKey];
     if (!cityTile || !cityTile.city) { reply(player, "§c帰属先の都市が見つかりません。"); return { ok: false }; }
 
     // 💡 労働者の行動回数チェック(伐採と同じ、労働者1人あたり行動回数WORKER_ACTIONS_PER_UNIT)
     if (!hasAvailableWorkerAction(cityTile.city)) {
-        reply(player, `§c❌ 労働者が足りません！この作業には帰属都市【${cityTile.city.name}】の労働者が必要です。`);
+        reply(player, `§c[Fail] 労働者が足りません！この作業には帰属都市【${cityTile.city.name}】の労働者が必要です。`);
         return { ok: false };
     }
 
@@ -767,7 +756,7 @@ export function cmdInstallFacility(player, facilityId) {
     setTile(tx, tz, tile);
 
     const def = getFacilityDef(facilityId);
-    const message = def?.installMessage?.(tile, tx, tz) ?? `§e🎉 ${player.name} が (${tx}, ${tz}) に${def?.label ?? facilityId}を設置しました！`;
+    const message = def?.installMessage?.(tile, tx, tz) ?? `§e[Complete] ${player.name} が (${tx}, ${tz}) に${def?.label ?? facilityId}を設置しました！`;
     world.sendMessage(message);
     return { ok: true };
 }
@@ -790,22 +779,10 @@ export function cmdStartDistrict(player, districtId) {
     const tile = getTile(tx, tz);
 
     // 💡 帰属先都市を決定する(cmdChop/cmdInstallFacilityと同じロジック)
-    let cityKey = tile?.belongsToCityKey;
-    if (!cityKey) {
-        const allTiles = getTiles();
-        let minDist = Infinity;
-        for (const key in allTiles) {
-            const t = allTiles[key];
-            if (t.ownerId === player.id && t.city) {
-                const [cx, cz] = key.split(",");
-                const dist = Math.abs(tx - parseInt(cx, 10)) + Math.abs(tz - parseInt(cz, 10));
-                if (dist < minDist) { minDist = dist; cityKey = key; }
-            }
-        }
-    }
+    const allTiles = getTiles();
+    const cityKey = resolveOwningCityKey(tx, tz, tile, player.id, allTiles);
     if (!cityKey) { reply(player, "§c作業エラー: このマスが帰属する都市が存在しません。"); return { ok: false }; }
 
-    const allTiles = getTiles();
     const cityTile = allTiles[cityKey];
     if (!cityTile || !cityTile.city) { reply(player, "§c帰属先の都市が見つかりません。"); return { ok: false }; }
 
@@ -819,7 +796,7 @@ export function cmdStartDistrict(player, districtId) {
     setTile(parseInt(cxStr, 10), parseInt(czStr, 10), cityTile);
 
     const def = getDistrictDef(districtId);
-    world.sendMessage(`§e🏛️ ${player.name} が (${tx}, ${tz}) に、【${cityTile.city.name}】の生産力を使って${def?.label ?? districtId}の建設を開始しました！ (コスト: ${def?.cost ?? "?"})`);
+    world.sendMessage(`§e[District] ${player.name} が (${tx}, ${tz}) に、【${cityTile.city.name}】の生産力を使って${def?.label ?? districtId}の建設を開始しました！ (コスト: ${def?.cost ?? "?"})`);
     return { ok: true };
 }
 
@@ -838,22 +815,10 @@ export function cmdStartDistrictBuilding(player, buildingId) {
     const tileKey = `${tx},${tz}`;
     const tile = getTile(tx, tz);
 
-    let cityKey = tile?.belongsToCityKey;
-    if (!cityKey) {
-        const allTiles = getTiles();
-        let minDist = Infinity;
-        for (const key in allTiles) {
-            const t = allTiles[key];
-            if (t.ownerId === player.id && t.city) {
-                const [cx, cz] = key.split(",");
-                const dist = Math.abs(tx - parseInt(cx, 10)) + Math.abs(tz - parseInt(cz, 10));
-                if (dist < minDist) { minDist = dist; cityKey = key; }
-            }
-        }
-    }
+    const allTiles = getTiles();
+    const cityKey = resolveOwningCityKey(tx, tz, tile, player.id, allTiles);
     if (!cityKey) { reply(player, "§c作業エラー: このマスが帰属する都市が存在しません。"); return { ok: false }; }
 
-    const allTiles = getTiles();
     const cityTile = allTiles[cityKey];
     if (!cityTile || !cityTile.city) { reply(player, "§c帰属先の都市が見つかりません。"); return { ok: false }; }
 
@@ -866,7 +831,7 @@ export function cmdStartDistrictBuilding(player, buildingId) {
     setTile(parseInt(cxStr, 10), parseInt(czStr, 10), cityTile);
 
     const def = getDistrictBuildingDef(buildingId);
-    world.sendMessage(`§e🏛️ ${player.name} が (${tx}, ${tz}) に、【${cityTile.city.name}】の生産力を使って${def?.label ?? buildingId}の建設を開始しました！ (コスト: ${def?.cost ?? "?"})`);
+    world.sendMessage(`§e[District] ${player.name} が (${tx}, ${tz}) に、【${cityTile.city.name}】の生産力を使って${def?.label ?? buildingId}の建設を開始しました！ (コスト: ${def?.cost ?? "?"})`);
     return { ok: true };
 }
 
@@ -886,7 +851,7 @@ export function cmdFoundReligion(player) {
     if (!check.ok) { reply(player, check.message); return { ok: false }; }
 
     const { name } = foundReligion(player);
-    world.sendMessage(`§d⛪ ${player.name} の国家が宗教【${name}】を創始しました！`);
+    world.sendMessage(`§d[Religion] ${player.name} の国家が宗教【${name}】を創始しました！`);
     return { ok: true };
 }
 
@@ -932,7 +897,7 @@ export function cmdBuyReligiousUnit(player, unitId) {
     };
     setTile(tx, tz, tile);
 
-    world.sendMessage(`§d🙏 ${player.name} が【${tile.city.name}】の信仰力${def.cost}を使って${def.label}を購入しました！`);
+    world.sendMessage(`§d[Faith] ${player.name} が【${tile.city.name}】の信仰力${def.cost}を使って${def.label}を購入しました！`);
     return { ok: true };
 }
 
@@ -986,7 +951,7 @@ export function cmdProselytize(player, fromTx, fromTz, targetTx, targetTz) {
     unit.hasProselytizedThisTurn = true;
 
     const religionName = getReligionName(player) ?? "自国の宗教";
-    let message = `§d🙏 ${player.name} の${unit.label ?? "宗教ユニット"}が【${targetTile.city.name}】で布教し、【${religionName}】の宗教的圧力+${Math.floor(pressure)}！ (残り布教力: ${unit.evangelismPower})`;
+    let message = `§d[Faith] ${player.name} の${unit.label ?? "宗教ユニット"}が【${targetTile.city.name}】で布教し、【${religionName}】の宗教的圧力+${Math.floor(pressure)}！ (残り布教力: ${unit.evangelismPower})`;
 
     if (unit.evangelismPower <= 0) {
         source.religiousUnit = null;
@@ -1030,7 +995,7 @@ export function cmdPurgeHeretic(player, tx, tz) {
     combatUnit.movementRemaining = 0;
     setTile(tx, tz, tile);
 
-    world.sendMessage(`§c⚔ ${player.name} の${combatUnit.label ?? "戦闘ユニット"}が、(${tx}, ${tz}) にいた${removedOwnerName}の${removedLabel}を排除しました！(異教徒の排除)`);
+    world.sendMessage(`§c[Combat] ${player.name} の${combatUnit.label ?? "戦闘ユニット"}が、(${tx}, ${tz}) にいた${removedOwnerName}の${removedLabel}を排除しました！(異教徒の排除)`);
     return { ok: true };
 }
 
@@ -1362,25 +1327,25 @@ export function cmdAttackCombatUnit(player, fromTx, fromTz, toTx, toTz) {
     target.combatUnit = defender;
 
     const lines = [];
-    lines.push(`§c⚔ ${player.name} の${attackerLabel} (${fromTx}, ${fromTz}) が ${defenderLabel} (${toTx}, ${toTz}) を攻撃！`);
+    lines.push(`§c[Combat] ${player.name} の${attackerLabel} (${fromTx}, ${fromTz}) が ${defenderLabel} (${toTx}, ${toTz}) を攻撃！`);
     lines.push(`§7先制ダメージ: ${result.firstDamage}`);
 
     if (result.defenderDestroyed) {
-        lines.push(`§c💀 ${defenderLabel}は撃破されました！`);
+        lines.push(`§c[Defeated] ${defenderLabel}は撃破されました！`);
         target.combatUnit = null;
         removeUnitLabelAt(toTx, toTz);
     } else {
-        lines.push(`§7 └ ${defenderLabel} 残りHP: ${Math.max(0, Math.round(defender.hp))}/${defender.maxHp ?? 100}`);
+        lines.push(`§7  -> ${defenderLabel} 残りHP: ${Math.max(0, Math.round(defender.hp))}/${defender.maxHp ?? 100}`);
         if (result.counterSkippedReason === "outOfDefenderRange") {
             lines.push(`§7${defenderLabel}の攻撃範囲外からの攻撃のため、反撃はありません。`);
         } else {
             lines.push(`§7反撃ダメージ: ${result.counterDamage}`);
             if (result.attackerDestroyed) {
-                lines.push(`§c💀 ${attackerLabel}は反撃により撃破されました！`);
+                lines.push(`§c[Defeated] ${attackerLabel}は反撃により撃破されました！`);
                 source.combatUnit = null;
                 removeUnitLabelAt(fromTx, fromTz);
             } else {
-                lines.push(`§7 └ ${attackerLabel} 残りHP: ${Math.max(0, Math.round(attacker.hp))}/${attacker.maxHp ?? 100}`);
+                lines.push(`§7  -> ${attackerLabel} 残りHP: ${Math.max(0, Math.round(attacker.hp))}/${attacker.maxHp ?? 100}`);
             }
         }
     }
@@ -1469,7 +1434,7 @@ export function cmdCaptureCity(player, tx, tz) {
         ? ` (帰属していた領有マス${capturedTileCount}マスも同時に占領${captureDetails.length > 0 ? `、うち${captureDetails.join("・")}を接収` : ""})`
         : "";
     const capitalText = capturedCapital ? " §c(相手の首都を陥落させました！)" : "";
-    world.sendMessage(`§6🏳 ${player.name} が ${previousOwnerName} の【${cityName}】を占領しました！${extraText}${capitalText}`);
+    world.sendMessage(`§6[Capture] ${player.name} が ${previousOwnerName} の【${cityName}】を占領しました！${extraText}${capitalText}`);
     checkAndAnnounceVictory(tiles);
     return { ok: true };
 }

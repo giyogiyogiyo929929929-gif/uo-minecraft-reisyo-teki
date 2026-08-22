@@ -1,7 +1,7 @@
 // diplomacy.js
 // 🤝 外交関係（不可侵条約・同盟）と申請・破棄を管理するモジュール
 
-import { getCivStorageHandle } from "./civs"
+import { getCivStorageHandle } from "./civs.js"
 
 const DIPLOMACY_KEY = "civ:diplomacy";
 

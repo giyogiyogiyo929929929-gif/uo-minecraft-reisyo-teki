@@ -18,7 +18,7 @@
 //   建造物と全く同じ書き方(adjacency.js の matchesTerrain 等)で指定できる。
 
 import { hasCompletedProgress, getDefinition } from "./progression.js";
-import { matchesTerrainWeighted, getAdjacencyBonus } from "./adjacency.js";
+import { matchesTerrainWeighted, sumAssignedTileYields, sumAssignedTileAdjacencyYields } from "./adjacency.js";
 import { RESOURCE_TYPES } from "./mapGen.js";
 
 /**
@@ -41,7 +41,7 @@ export const FACILITY_DEFS = {
         adjacencyBonuses: [
             { id: "quarryMountain", label: "山・山脈からの採石恩恵", match: matchesTerrainWeighted({ mountain: 1, mountainRange: 2 }), yieldPerMatch: { production: 1 } },
         ],
-        installMessage: (tile, tx, tz) => `§e🎉 (${tx}, ${tz}) に採石場を設置しました！(隣接する山1つにつき生産力+1、山脈は+2)`,
+        installMessage: (tile, tx, tz) => `§e[Complete] (${tx}, ${tz}) に採石場を設置しました！(隣接する山1つにつき生産力+1、山脈は+2)`,
     },
     blacksmith: {
         label: "鍛冶場",
@@ -49,7 +49,7 @@ export const FACILITY_DEFS = {
         requiresTechnology: "smelting",
         requiresResource: "iron",
         flatYields: { iron: 2, production: 4 },
-        installMessage: (tile, tx, tz) => `§e🎉 (${tx}, ${tz}) に鍛冶場を設置しました！(毎ターン鉄+2、生産力+4)`,
+        installMessage: (tile, tx, tz) => `§e[Complete] (${tx}, ${tz}) に鍛冶場を設置しました！(毎ターン鉄+2、生産力+4)`,
     },
 };
 
@@ -111,22 +111,7 @@ export function installFacility(tile, id, ownerId, ownerName) {
  * @returns {{ [yieldKey: string]: number }}
  */
 export function getFacilityAdjacencyYields(assignedTiles, tiles) {
-    const totals = {};
-    if (!Array.isArray(assignedTiles)) return totals;
-
-    for (const t of assignedTiles) {
-        const facility = t.tile?.facility;
-        if (!facility) continue;
-        const def = FACILITY_DEFS[facility.id];
-        if (!def?.adjacencyBonuses) continue;
-
-        const bonus = getAdjacencyBonus(t.tx, t.tz, tiles, def.adjacencyBonuses);
-        for (const key in bonus) {
-            totals[key] = (totals[key] ?? 0) + bonus[key];
-        }
-    }
-
-    return totals;
+    return sumAssignedTileAdjacencyYields(assignedTiles, tiles, (tile) => tile?.facility, FACILITY_DEFS);
 }
 
 /**
@@ -136,19 +121,5 @@ export function getFacilityAdjacencyYields(assignedTiles, tiles) {
  * @returns {{ [yieldKey: string]: number }}
  */
 export function getFacilityFlatYields(assignedTiles) {
-    const totals = {};
-    if (!Array.isArray(assignedTiles)) return totals;
-
-    for (const t of assignedTiles) {
-        const facility = t.tile?.facility;
-        if (!facility) continue;
-        const def = FACILITY_DEFS[facility.id];
-        if (!def?.flatYields) continue;
-
-        for (const key in def.flatYields) {
-            totals[key] = (totals[key] ?? 0) + def.flatYields[key];
-        }
-    }
-
-    return totals;
+    return sumAssignedTileYields(assignedTiles, (tile) => tile?.facility, FACILITY_DEFS, "flatYields");
 }

@@ -21,7 +21,7 @@
 //   上限に達した場合はそれ以上の新規追加をスキップする(既存のラベルは残す)。
 
 import { world, system, TextPrimitive } from "@minecraft/server";
-import { getMapConfig, getTiles } from "./state.js";
+import { getMapConfig, getTiles, getStateVersion } from "./state.js";
 
 const TILE_SIZE = 5;
 const LABEL_HEIGHT_OFFSET = 2.2;
@@ -32,6 +32,7 @@ const SYNC_INTERVAL_TICKS = 20;
 const activeLabels = new Map();
 let primitiveApiAvailable = true;
 let lastSyncTick = -Infinity;
+let lastSyncedVersion = -1;
 
 function tileCenterLocation(config, tx, tz, dimension) {
     return {
@@ -99,6 +100,11 @@ function syncUnitLabelsInner() {
 /**
  * 現在の全タイルを走査し、戦闘ユニットがいるマスのラベルをワールドに同期する。
  * main.js の定期ループから呼び出す想定。実験的APIが無効な環境では何もしない。
+ *
+ * 💡 全タイル走査(syncUnitLabelsInner)はマップが大きいほどコストが増えるため、
+ *    前回の同期以降にタイル/都市などの状態が何も変わっていなければ(getStateVersion()が
+ *    同じなら)スキップする。ユニットの移動・生産・撃破などは必ず setTile/setTiles を
+ *    経由してstateVersionを上げるので、それらを取りこぼすことはない。
  */
 export function syncUnitLabels() {
     if (!primitiveApiAvailable) return;
@@ -106,6 +112,10 @@ export function syncUnitLabels() {
     const currentTick = system.currentTick;
     if (currentTick - lastSyncTick < SYNC_INTERVAL_TICKS) return;
     lastSyncTick = currentTick;
+
+    const version = getStateVersion();
+    if (version === lastSyncedVersion) return;
+    lastSyncedVersion = version;
 
     try {
         syncUnitLabelsInner();

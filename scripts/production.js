@@ -25,10 +25,13 @@
 // アクションは、労働者を1人まるごと消費するのではなく、その行動回数を1減らすだけにする。行動回数が
 // 0になった労働者だけがプールから取り除かれる(＝行動回数を使い切って初めて「消費」される)。
 //   city.workerUnits = number[]  … 各労働者の残り行動回数の配列(例: [3, 3, 1] なら労働者3人)
-//   city.workers      = number   … 表示・互換用の労働者数(常に workerUnits.length と同期する)
+//   労働者数の表示には getWorkerCount(city) を使う(workerUnits.length から都度算出し、
+//   別フィールドとして保持・同期しない。旧セーブの city.workers はマイグレーション用の
+//   読み取り専用フォールバックとして ensureWorkerUnits 内でのみ参照される)。
 
 import { hasCompletedProgress, getDefinition } from "./progression.js";
 import { isWaterTerrain } from "./mapGen.js";
+import { getAdjacentTiles } from "./adjacency.js";
 
 /** 労働者1人が持つ行動回数。 */
 export const WORKER_ACTIONS_PER_UNIT = 3;
@@ -50,7 +53,6 @@ function ensureWorkerUnits(city) {
 export function addWorkers(city, count = 1) {
     const units = ensureWorkerUnits(city);
     for (let i = 0; i < count; i++) units.push(WORKER_ACTIONS_PER_UNIT);
-    city.workers = units.length; // 表示・互換用フィールドを同期
     return units.length;
 }
 
@@ -64,13 +66,21 @@ export function consumeWorkerAction(city) {
 
     units[0] -= 1;
     if (units[0] <= 0) units.shift();
-    city.workers = units.length; // 表示・互換用フィールドを同期
     return true;
 }
 
 /** この都市に、行動回数が1以上残っている労働者が存在するかどうかを判定する。 */
 export function hasAvailableWorkerAction(city) {
     return ensureWorkerUnits(city).length > 0;
+}
+
+/**
+ * 表示用: この都市の労働者数を取得する。city.workers を別途持たず、常に
+ * workerUnits.length から算出する(旧セーブ(workerUnits が無いデータ)からの復元も
+ * ensureWorkerUnits が面倒を見るので、ここでは意識しなくてよい)。
+ */
+export function getWorkerCount(city) {
+    return ensureWorkerUnits(city).length;
 }
 
 /** 表示用: この都市の労働者全体の残り行動回数の合計を取得する。 */
@@ -92,6 +102,10 @@ export function getTotalWorkerActionsRemaining(city) {
  * @property {number} [extraUpkeep] 生産中、都市の食料消費に追加される値
  * @property {string} [requiresTechnology] 生産に必要な技術ID(technology progression)
  * @property {boolean} [disallowInCapital] true の場合、首都ではこの建造物を生産できない(遷都用)
+ * @property {Record<string, number>} [flatYields] この建造物(category:"building")があるだけで
+ *   (隣接マスに関係なく)都市に毎ターン加算される産出量(例: { faith: 4 })。
+ *   adjacency.js の getFlagFlatYields() が city[buildingId] を見て自動的に反映するので、
+ *   turns.js 側の変更は不要。
  * @property {Array<any>} [adjacencyBonuses] 隣接マスに応じたボーナスのルール一覧。
  *   adjacency.js の AdjacencyBonusRule 形式で書く(matchesTerrain/matchesResource/matchesBuilding
  *   などのヘルパーを使うと簡潔に書ける)。この建造物を持つ都市の産出量計算(turns.js)に
@@ -132,16 +146,11 @@ function placeProducedCombatUnit(ctx, createUnit) {
     }
 
     // 💡 自国/同盟のユニットが既にいる場合、都市のマスを取り囲む8マスのうち空いているマスへ配置する。
-    const [txStr, tzStr] = String(ctx.cityKey).split(",");
-    const tx = Number(txStr), tz = Number(tzStr);
-    for (let dz = -1; dz <= 1; dz++) {
-        for (let dx = -1; dx <= 1; dx++) {
-            if (dx === 0 && dz === 0) continue;
-            const neighborTile = ctx.tiles[`${tx + dx},${tz + dz}`];
-            if (neighborTile && !neighborTile.combatUnit) {
-                neighborTile.combatUnit = newUnit;
-                return { cancelled: false, relocated: true };
-            }
+    const [tx, tz] = String(ctx.cityKey).split(",").map(Number);
+    for (const neighborTile of getAdjacentTiles(tx, tz, ctx.tiles)) {
+        if (!neighborTile.combatUnit) {
+            neighborTile.combatUnit = newUnit;
+            return { cancelled: false, relocated: true };
         }
     }
 
@@ -163,16 +172,11 @@ function placeProducedNavalUnit(ctx, createUnit) {
 
     const newUnit = createUnit(tile.ownerId, tile.ownerName);
 
-    const [txStr, tzStr] = String(ctx.cityKey).split(",");
-    const tx = Number(txStr), tz = Number(tzStr);
-    for (let dz = -1; dz <= 1; dz++) {
-        for (let dx = -1; dx <= 1; dx++) {
-            if (dx === 0 && dz === 0) continue;
-            const neighborTile = ctx.tiles[`${tx + dx},${tz + dz}`];
-            if (neighborTile && isWaterTerrain(neighborTile.type) && !neighborTile.combatUnit) {
-                neighborTile.combatUnit = newUnit;
-                return undefined;
-            }
+    const [tx, tz] = String(ctx.cityKey).split(",").map(Number);
+    for (const neighborTile of getAdjacentTiles(tx, tz, ctx.tiles)) {
+        if (isWaterTerrain(neighborTile.type) && !neighborTile.combatUnit) {
+            neighborTile.combatUnit = newUnit;
+            return undefined;
         }
     }
 
@@ -188,7 +192,7 @@ export const PRODUCTION_DEFS = {
         onComplete: (city) => {
             addWorkers(city, 1);
         },
-        completeMessage: (city) => `§e🎉【${city.name}】労働者の生産が完了！ ([Worker]x${city.workers}、1人あたり行動回数${WORKER_ACTIONS_PER_UNIT})`,
+        completeMessage: (city) => `§e[Complete]【${city.name}】労働者の生産が完了！ ([Worker]x${getWorkerCount(city)}、1人あたり行動回数${WORKER_ACTIONS_PER_UNIT})`,
     },
     missile: {
         label: "ミサイル",
@@ -198,7 +202,7 @@ export const PRODUCTION_DEFS = {
         onComplete: (city) => {
             city.missiles = (city.missiles ?? 0) + 1;
         },
-        completeMessage: (city) => `§c[Missile]🎉【${city.name}】ミサイルの製造が完了しました！ (在庫: ${city.missiles}発)`,
+        completeMessage: (city) => `§c[Missile][Complete]【${city.name}】ミサイルの製造が完了しました！ (在庫: ${city.missiles}発)`,
     },
     warrior: {
         label: "戦士",
@@ -269,7 +273,7 @@ export const PRODUCTION_DEFS = {
                 ctx.connectTradeRoutes(ctx.cityKey, city, ctx.tiles);
             }
         },
-        completeMessage: (city) => `§e🎉【${city.name}】交易所が完成しました！`,
+        completeMessage: (city) => `§e[Complete]【${city.name}】交易所が完成しました！`,
     },
     granary: {
         label: "穀物庫",
@@ -279,13 +283,15 @@ export const PRODUCTION_DEFS = {
         uniquePerCity: true,
         hasBuilt: (city) => !!city.granary,
         requiresTechnology: "pottery",
-        // 💡 食料生産量+1 は turns.js の getCityCurrentYields 側で city.granary を見て加算する。
+        // 💡 食料生産量+1 は flatYields 経由で getFlagFlatYields() が city.granary を見て
+        //    自動的に加算する(turns.js 側に個別の分岐は不要)。
         //    住居+2 はここで即時・恒久的に加算する(交易所建設時のhousing+1と同じ考え方)。
+        flatYields: { food: 1 },
         onComplete: (city) => {
             city.granary = true;
             city.housing = (city.housing ?? 0) + 2;
         },
-        completeMessage: (city) => `§e🎉【${city.name}】穀物庫が完成しました！ (食料生産量+1、住居+2)`,
+        completeMessage: (city) => `§e[Complete]【${city.name}】穀物庫が完成しました！ (食料生産量+1、住居+2)`,
     },
     obelisk: {
         label: "オベリスク",
@@ -295,13 +301,15 @@ export const PRODUCTION_DEFS = {
         uniquePerCity: true,
         hasBuilt: (city) => !!city.obelisk,
         requiresTechnology: "astrology",
-        // 💡 信仰力+4 は turns.js の getCityCurrentYields 側で city.obelisk を見て加算する。
+        // 💡 信仰力+4 は flatYields 経由で getFlagFlatYields() が city.obelisk を見て
+        //    自動的に加算する(turns.js 側に個別の分岐は不要)。
+        flatYields: { faith: 4 },
         onComplete: (city) => { city.obelisk = true; },
-        completeMessage: (city) => `§e🎉【${city.name}】オベリスクが完成しました！ (信仰力の産出+4)`,
+        completeMessage: (city) => `§e[Complete]【${city.name}】オベリスクが完成しました！ (信仰力の産出+4)`,
     },
     capital: {
         label: "遷都",
-        icon: "[👑]",
+        icon: "[Capital]",
         category: "building",
         cost: 100,
         // 💡 「すでに首都である都市」では実行不可(首都以外の都市でのみ遷都できる)。
@@ -320,7 +328,7 @@ export const PRODUCTION_DEFS = {
             }
             city.isCapital = true;
         },
-        completeMessage: (city) => `§e👑【${city.name}】が新たな首都になりました！(遷都完了)`,
+        completeMessage: (city) => `§e[Capital]【${city.name}】が新たな首都になりました！(遷都完了)`,
     },
 };
 
@@ -424,7 +432,7 @@ export function tickProduction(city, productionAmount, ctx) {
                 : completionResult.cancelReason === "noNavalTile"
                 ? "隣接する海・川などの水上マスが無い(または空きが無い)"
                 : "配置できる空きマスが周囲に無い";
-            const message = `§c⚠【${city.name}】${def.label}の生産が完了しましたが、${reasonText}ため配置できず中止されました。(進行度は保持されます)`;
+            const message = `§c[Warning]【${city.name}】${def.label}の生産が完了しましたが、${reasonText}ため配置できず中止されました。(進行度は保持されます)`;
 
             city.production = null;
             city.productionCarry = (city.productionCarry ?? 0) + progress;
@@ -434,7 +442,7 @@ export function tickProduction(city, productionAmount, ctx) {
         const overflow = city.production.progress - city.production.cost;
         let message = def.completeMessage
             ? def.completeMessage(city)
-            : `§e🎉【${city.name}】${def.label}の生産が完了！`;
+            : `§e[Complete]【${city.name}】${def.label}の生産が完了！`;
         if (completionResult && completionResult.relocated) {
             message += " §7(都市のマスが自国/同盟ユニットで埋まっていたため、隣接マスに配置されました)";
         }

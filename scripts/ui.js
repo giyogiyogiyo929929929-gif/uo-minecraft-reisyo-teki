@@ -3,9 +3,9 @@ import { ActionFormData, ModalFormData } from "@minecraft/server-ui";
 import { getMapConfig, getTile, getTiles, setTiles } from "./state.js";
 import { worldToTile, TERRAIN_TYPES, RESOURCE_TYPES } from "./mapGen.js"
 import { turnInfoText, endTurn, forceEndTurn, isPlayersTurn, joinGame, endGame, getTurnState, calculateCityFoodIncomes, getCityCurrentYields, startGame, debugForceVictory, connectTradeRoutes } from "./turns.js";
-import { PRODUCTION_DEFS, canStartProduction, getTotalWorkerActionsRemaining, WORKER_ACTIONS_PER_UNIT } from "./production.js";
+import { PRODUCTION_DEFS, canStartProduction, getTotalWorkerActionsRemaining, WORKER_ACTIONS_PER_UNIT, getWorkerCount } from "./production.js";
 import { getFacilityIds, getFacilityDef, canInstallFacility } from "./facilities.js";
-import { getDistrictIds, getDistrictDef, canStartDistrict, getDistrictBuildingIds, getDistrictBuildingDef, canStartDistrictBuilding } from "./districts.js";
+import { getDistrictIds, getDistrictDef, canStartDistrict, getDistrictBuildingIds, getDistrictBuildingDef, canStartDistrictBuilding, isSacredSiteTile } from "./districts.js";
 import {
     getReligiousUnitIds, getReligiousUnitDef, hasFoundedReligion, getReligionName,
     canFoundReligion, getTotalCivFaith, getNationalDominantReligion,
@@ -14,6 +14,7 @@ import {
 import { getDefinitions, getKindLabel, getPointsLabel, getProgressState, hasCompletedProgress, getDefinition } from "./progression.js";
 import { getRelation, sendRequest, getRequestsFor, acceptRequest, rejectRequest, breakRelation, hasDiplomaticAgreement } from "./diplomacy.js";
 import { getAttackRange, getAttackableTargets, getEffectiveCombatStrength, isRangedUnit, getEffectiveRangedStrength, canUnitEnterTile } from "./combat.js";
+import { resolveOwningCityKey, getAdjacentTileEntries } from "./adjacency.js";
 import { getRealPlayer, getControllableCivs, getActiveCivId, setActiveCivId, addVirtualCiv, getCivStorageHandle, resolveCivName } from "./civs.js";
 import { removeUnitLabelAt } from "./unitLabels.js";
 
@@ -30,7 +31,7 @@ export async function openMainMenu(player) {
     const isOp = isOperator(player);
     // 💡 操作できる国家が複数ある(=テスト国家を追加済みの)OPには、今どちらを操作中か明示する。
     if (getControllableCivs(getRealPlayer(player)).length > 1) {
-        body.push(`§d🎭 操作中の国家: ${player.name}`);
+        body.push(`§d[Acting] 操作中の国家: ${player.name}`);
     }
     const turn = getTurnState();
     const rights = (turn && turn.playerRights) ? (turn.playerRights[player.id] ?? 0) : 0;
@@ -53,7 +54,7 @@ export async function openMainMenu(player) {
 
     // 💡 戦闘勝利ポイント(他ゲームでいうレート的なもの。ゲームを跨いで持続する)
     const victoryPoints = player.getDynamicProperty("civ:victoryPoints") ?? 0;
-    body.push(`§6🏆 勝利ポイント: ${victoryPoints}`);
+    body.push(`§6[Victory] 勝利ポイント: ${victoryPoints}`);
 
     let currentTile = null;
     let hasAnyCity = false;
@@ -133,8 +134,8 @@ export async function openMainMenu(player) {
                 const currentYields = getCityCurrentYields(`${tx},${tz}`, allTiles);
 
                 body.push(`\n§6【${city.isCapital ? "首都" : "地方都市"}: ${city.name}】`);
-                body.push(`§f  - 人口: §a${city.population} §f/ 住宅上限: §e${city.housing} §f| [Worker] 労働者: §b${city.workers ?? 0} 人 §7(残り行動:${getTotalWorkerActionsRemaining(city)})`);
-                body.push(`§f  - ⚖️ 現市民の選択総出力: §6[Food]x${currentYields.food} §f/ §e[Prod]x${currentYields.production} §f/ §d🙏x${currentYields.faith ?? 0} §f/ §7⚒x${currentYields.iron ?? 0}`);
+                body.push(`§f  - 人口: §a${city.population} §f/ 住宅上限: §e${city.housing} §f| [Worker] 労働者: §b${getWorkerCount(city)} 人 §7(残り行動:${getTotalWorkerActionsRemaining(city)})`);
+                body.push(`§f  - [Yield] 現市民の選択総出力: §6[Food]x${currentYields.food} §f/ §e[Prod]x${currentYields.production} §f/ §d[Faith]x${currentYields.faith ?? 0} §f/ §7[Iron]x${currentYields.iron ?? 0}`);
                 
                 // 💡 進行中の生産(ユニット/建造物)を汎用的に表示。新しい生産物を増やしても自動で対応する。
                 if (city.production) {
@@ -159,17 +160,17 @@ export async function openMainMenu(player) {
                     if (city.tradingPost.routes && city.tradingPost.routes.length > 0) {
                         for (const r of city.tradingPost.routes) {
                             const targetName = allTiles[r.targetKey]?.city?.name ?? `未知の都市(${r.targetKey})`;
-                            body.push(`    §7➔ 🤝 【${targetName}】残:${r.remainingTurns}T (食料 §a+${r.bonus}§7)`);
+                            body.push(`    §7-> [Link] 【${targetName}】残:${r.remainingTurns}T (食料 §a+${r.bonus}§7)`);
                         }
                     } else {
-                        body.push(`    §7➔ 🤝 交易路: 接続対象(他の都市)なし`);
+                        body.push(`    §7-> [Link] 交易路: 接続対象(他の都市)なし`);
                     }
                 } else {
                     body.push(`§f  - [Trade] 交易所: §7未建設`);
                 }
 
                 body.push(`§f  - 貯留食料: [Food] ${city.foodStorage ?? 0} / 成長まで: ${threshold}`);
-                body.push(`§f  - 貯留信仰力: §d🙏 ${city.faithStorage ?? 0}`);
+                body.push(`§f  - 貯留信仰力: §d[Faith] ${city.faithStorage ?? 0}`);
 
                 // 💡 新機能: この都市の宗教的圧力の内訳(どの宗教が何%、信仰者は何人か)を表示する。
                 const pressures = city.religiousPressure ?? {};
@@ -177,7 +178,7 @@ export async function openMainMenu(player) {
                 if (totalPressure > 0) {
                     const dominantCivId = getCityDominantReligion(city);
                     const followers = getCityFollowers(city);
-                    body.push(`§f  - §d⛪ 宗教的圧力の内訳 (合計: ${Math.floor(totalPressure)}):`);
+                    body.push(`§f  - §d[Religion] 宗教的圧力の内訳 (合計: ${Math.floor(totalPressure)}):`);
                     const sortedCivIds = Object.keys(pressures).sort((a, b) => (pressures[b] ?? 0) - (pressures[a] ?? 0));
                     for (const civId of sortedCivIds) {
                         const pressure = pressures[civId] ?? 0;
@@ -186,11 +187,11 @@ export async function openMainMenu(player) {
                         const religionName = getReligionName(getCivStorageHandle(civId)) ?? "無名の宗教";
                         const percent = (pressure / totalPressure) * 100;
                         const followerCount = Math.floor(followers[civId] ?? 0);
-                        const dominantMark = civId === dominantCivId ? "§a★主流§7 " : "";
-                        body.push(`    §7➔ ${dominantMark}【${religionName}】§7(${civName}) 圧力:${Math.floor(pressure)} (${percent.toFixed(1)}%) 信仰者:${followerCount}人`);
+                        const dominantMark = civId === dominantCivId ? "§a[Dominant]§7 " : "";
+                        body.push(`    §7-> ${dominantMark}【${religionName}】§7(${civName}) 圧力:${Math.floor(pressure)} (${percent.toFixed(1)}%) 信仰者:${followerCount}人`);
                     }
                 } else {
-                    body.push(`§f  - §d⛪ 宗教的圧力: §7なし`);
+                    body.push(`§f  - §d[Religion] 宗教的圧力: §7なし`);
                 }
 
                 body.push(`§f  - 不足飢餓: §c${city.starvationTurns ?? 0} / 3 ターン`);
@@ -203,7 +204,7 @@ export async function openMainMenu(player) {
                     const belongsCityTile = allTiles[currentTile.belongsToCityKey];
                     if (belongsCityTile && belongsCityTile.city) {
                         body.push(`\n§b帰属都市: 【${belongsCityTile.city.name}】`);
-                        body.push(`§7(この領地で稼働できる労働者: [Worker]x${belongsCityTile.city.workers ?? 0}、残り行動:${getTotalWorkerActionsRemaining(belongsCityTile.city)})`);
+                        body.push(`§7(この領地で稼働できる労働者: [Worker]x${getWorkerCount(belongsCityTile.city)}、残り行動:${getTotalWorkerActionsRemaining(belongsCityTile.city)})`);
                     }
                 }
             }
@@ -214,17 +215,17 @@ export async function openMainMenu(player) {
     if (!turn.started) {
         if (isOp) { buttons.push({ text: "ゲームを開始する", action: "start" });  }
         buttons.push({ text: "ゲームに参加する", action: "join" });
-        if (isOp) buttons.push({ text: "§d👥【管理者】全プレイヤーを参加待機状態にする", action: "joinall" });
+        if (isOp) buttons.push({ text: "§d[Join] 【管理者】全プレイヤーを参加待機状態にする", action: "joinall" });
     } else {
-        buttons.push({ text: "§a🔬 研究ツリー", action: "technology" });
-        buttons.push({ text: "§d📜 社会制度ツリー", action: "civic" });
+        buttons.push({ text: "§a[Tech] 研究ツリー", action: "technology" });
+        buttons.push({ text: "§d[Civic] 社会制度ツリー", action: "civic" });
     }
     // 💡 外交メニューはゲーム中(ターン制開始後)ならいつでも開けるようにする。
     //    ("使節団"civicの完了を条件にしていたが、ゲーム参加者との関係確認自体は常にできてよいため撤廃)
     if (turn.started) {
-        buttons.push({ text: "§b🤝 外交メニュー", action: "diplomacy" });
-        buttons.push({ text: "§f⚔ 自分の戦闘ユニット一覧", action: "myunits" });
-        buttons.push({ text: "§d⛪ 宗教", action: "religion" });
+        buttons.push({ text: "§b[Diplomacy] 外交メニュー", action: "diplomacy" });
+        buttons.push({ text: "§f[Combat] 自分の戦闘ユニット一覧", action: "myunits" });
+        buttons.push({ text: "§d[Religion] 宗教", action: "religion" });
     }
     
     if (currentTile && !currentTile.ownerId) {
@@ -240,12 +241,12 @@ export async function openMainMenu(player) {
 
     // 💡 新機能: 今立っているマスが自分の都市なら「名前変更ボタン」を表示
     if (currentTile && currentTile.city && currentTile.ownerId === player.id) {
-        buttons.push({ text: "✍️ 都市の名前を変更する", action: "renamecity" });
+        buttons.push({ text: "[Rename] 都市の名前を変更する", action: "renamecity" });
     }
 
     // 💡 新機能: 生産(ユニット/建造物)をまとめたサブメニューへの入口
     if (currentTile && currentTile.city && currentTile.ownerId === player.id) {
-        buttons.push({ text: "§b🏭 生産メニューを開く", action: "production" });
+        buttons.push({ text: "§b[Production] 生産メニューを開く", action: "production" });
 
         if ((currentTile.city.missiles ?? 0) > 0) {
             buttons.push({ text: `§c[Missile] ミサイルを発射する (在庫:${currentTile.city.missiles})`, action: "launchmissile" });
@@ -253,45 +254,45 @@ export async function openMainMenu(player) {
     }
 
     if (currentTile && currentTile.ownerId === player.id && (currentTile.type === "forest" || currentTile.type === "rainforest") && !currentTile.isChopped) {
-        buttons.push({ text: "§d🪓 このマスの森林を伐採する (住宅上限+1)", action: "chop" });
+        buttons.push({ text: "§d[Chop] このマスの森林を伐採する (住宅上限+1)", action: "chop" });
     }
     if (currentTile && currentTile.ownerId === player.id && !currentTile.city && !currentTile.facility) {
-        buttons.push({ text: "§7🏗️ 施設を設置する", action: "installfacility" });
+        buttons.push({ text: "§7[Facility] 施設を設置する", action: "installfacility" });
     }
     if (currentTile && currentTile.ownerId === player.id && !currentTile.city && !currentTile.district && !currentTile.underDistrictConstruction) {
-        buttons.push({ text: "§5🏛️ 区域を配置する", action: "startdistrict" });
+        buttons.push({ text: "§5[District] 区域を配置する", action: "startdistrict" });
     }
     if (currentTile && currentTile.ownerId === player.id && currentTile.district) {
-        buttons.push({ text: "§5🏛️ 区域専用の建造物を建設する", action: "startdistrictbuilding" });
+        buttons.push({ text: "§5[District] 区域専用の建造物を建設する", action: "startdistrictbuilding" });
     }
     if (currentTile && currentTile.city && currentTile.ownerId === player.id && hasFoundedReligion(player)) {
-        buttons.push({ text: "§d🙏 宗教ユニットを購入する", action: "buyreligious" });
+        buttons.push({ text: "§d[Faith] 宗教ユニットを購入する", action: "buyreligious" });
     }
     if (currentTile?.combatUnit?.ownerId === player.id) {
         buttons.push({ text: "§f ユニットの移動", action: "moveunit" });
-        buttons.push({ text: "§c⚔ ユニットの攻撃", action: "attackunit" });
+        buttons.push({ text: "§c[Combat] ユニットの攻撃", action: "attackunit" });
 
         // 💡 都市に自分のユニットが存在し、移動力が最大値のまま(今ターン未行動)なら占領可能。
         const unit = currentTile.combatUnit;
         const isFullMovement = (unit.movementRemaining ?? unit.movement ?? 0) === (unit.movement ?? 0);
         if (currentTile.city && currentTile.ownerId && currentTile.ownerId !== player.id && isFullMovement) {
-            buttons.push({ text: `§6🏳 【${currentTile.city.name}】を占領する`, action: "capturecity" });
+            buttons.push({ text: `§6[Capture] 【${currentTile.city.name}】を占領する`, action: "capturecity" });
         }
         // 💡 同じマスに他国の宗教ユニットがいれば、移動力が最大値のときに排除できる(異教徒の排除)。
         if (currentTile.religiousUnit && currentTile.religiousUnit.ownerId !== player.id && isFullMovement) {
-            buttons.push({ text: `§c✝ 異教徒(${currentTile.religiousUnit.label ?? "宗教ユニット"})を排除する`, action: "purgeheretic" });
+            buttons.push({ text: `§c[Purge] 異教徒(${currentTile.religiousUnit.label ?? "宗教ユニット"})を排除する`, action: "purgeheretic" });
         }
     }
     if (currentTile?.religiousUnit?.ownerId === player.id) {
         buttons.push({ text: "§d[Missionary] 宗教ユニットの移動", action: "movereligious" });
-        buttons.push({ text: "§d🙏 隣接する都市に布教する", action: "proselytize" });
+        buttons.push({ text: "§d[Faith] 隣接する都市に布教する", action: "proselytize" });
     }
     if (turn.started) { buttons.push({ text: "ターンを終了する", action: "endturn" }); }
     if (isOp && turn.started) buttons.push({ text: "§6【管理者】手番を強制スキップ", action: "forceendturn" });
     if (isOp) buttons.push({ text: "§c【管理者】ゲームをリセット", action: "endgame" });
-    if (isOp && turn.started) buttons.push({ text: "§c🐞【デバッグ】指定した国家を即座に勝利させる", action: "debugvictory" });
-    if (isOp && currentTile) buttons.push({ text: "§c🐞【デバッグ】このマスを編集する", action: "debugtile" });
-    if (isOp) buttons.push({ text: "§d🎭 国家管理(ソロテスト用)", action: "civmanage" });
+    if (isOp && turn.started) buttons.push({ text: "§c[Debug]【デバッグ】指定した国家を即座に勝利させる", action: "debugvictory" });
+    if (isOp && currentTile) buttons.push({ text: "§c[Debug]【デバッグ】このマスを編集する", action: "debugtile" });
+    if (isOp) buttons.push({ text: "§d[Civs] 国家管理(ソロテスト用)", action: "civmanage" });
     buttons.push({ text: "閉じる", action: "close" });
 
     const form = new ActionFormData().title("Civ Tactics メニュー").body(body.join("\n"));
@@ -392,13 +393,13 @@ async function openCivManagementMenu(realPlayer) {
         "§7テスト国家として行動したいマスには、実際に歩いて移動してから操作してください。",
     ];
     const buttons = civs.map(c => ({
-        text: `${c.id === activeId ? "§a▶ " : "§f"}${c.name}${c.isVirtual ? " §7(テスト国家)" : " §7(あなた自身)"}`,
+        text: `${c.id === activeId ? "§a> " : "§f"}${c.name}${c.isVirtual ? " §7(テスト国家)" : " §7(あなた自身)"}`,
         action: { type: "switch", civId: c.id },
     }));
-    buttons.push({ text: "§b➕ テスト国家を追加する", action: { type: "add" } });
+    buttons.push({ text: "§b[Add] テスト国家を追加する", action: { type: "add" } });
     buttons.push({ text: "戻る", action: { type: "back" } });
 
-    const form = new ActionFormData().title("🎭 国家管理(ソロテスト用)").body(body.join("\n"));
+    const form = new ActionFormData().title("[Civs] 国家管理(ソロテスト用)").body(body.join("\n"));
     for (const button of buttons) form.button(button.text);
     const result = await form.show(realPlayer);
     if (result.canceled || result.selection === undefined) return;
@@ -448,7 +449,7 @@ async function openDebugVictoryMenu(realPlayer) {
         return;
     }
 
-    const form = new ModalFormData().title("§c🐞 デバッグ: 即座に勝利させる");
+    const form = new ModalFormData().title("§c[Debug] デバッグ: 即座に勝利させる");
     for (const civId of turn.playerOrder) {
         form.toggle(resolveCivName(civId) ?? civId, { defaultValue: false });
     }
@@ -487,18 +488,18 @@ async function openDebugTileMenu(realPlayer, tx, tz) {
     ];
 
     const buttons = [
-        { text: "§f🗺️ 地形・資源・基礎産出量を編集", action: "terrain" },
-        { text: "§f👤 所有者を編集", action: "owner" },
+        { text: "§f[Map] 地形・資源・基礎産出量を編集", action: "terrain" },
+        { text: "§f[Owner] 所有者を編集", action: "owner" },
     ];
-    if (tile.city) buttons.push({ text: "§6🏙️ 都市を編集", action: "city" });
-    buttons.push({ text: "§7🏗️ 施設を編集", action: "facility" });
-    buttons.push({ text: "§5🏛️ 区域を編集", action: "district" });
-    buttons.push({ text: "§c⚔ 戦闘ユニットを編集", action: "combatunit" });
-    buttons.push({ text: "§d🙏 宗教ユニットを編集", action: "religiousunit" });
-    if (tile.city) buttons.push({ text: "§d⛪ 宗教的圧力を編集", action: "pressure" });
+    if (tile.city) buttons.push({ text: "§6[City] 都市を編集", action: "city" });
+    buttons.push({ text: "§7[Facility] 施設を編集", action: "facility" });
+    buttons.push({ text: "§5[District] 区域を編集", action: "district" });
+    buttons.push({ text: "§c[Combat] 戦闘ユニットを編集", action: "combatunit" });
+    buttons.push({ text: "§d[Faith] 宗教ユニットを編集", action: "religiousunit" });
+    if (tile.city) buttons.push({ text: "§d[Religion] 宗教的圧力を編集", action: "pressure" });
     buttons.push({ text: "戻る", action: "back" });
 
-    const form = new ActionFormData().title("§c🐞 デバッグ: マス編集").body(body.join("\n"));
+    const form = new ActionFormData().title("§c[Debug] デバッグ: マス編集").body(body.join("\n"));
     for (const b of buttons) form.button(b.text);
     const res = await form.show(realPlayer);
     if (res.canceled || res.selection === undefined) { await openMainMenu(realPlayer); return; }
@@ -529,7 +530,7 @@ async function openDebugTerrainMenu(realPlayer, tx, tz) {
     const resourceLabels = ["なし", ...Object.keys(RESOURCE_TYPES).map(id => RESOURCE_TYPES[id].label)];
 
     const form = new ModalFormData()
-        .title("🗺️ 地形・資源・基礎産出量を編集")
+        .title("[Map] 地形・資源・基礎産出量を編集")
         .dropdown("地形タイプ", terrainLabels, { defaultValueIndex: Math.max(0, terrainIds.indexOf(tile.type)) })
         .dropdown("資源", resourceLabels, { defaultValueIndex: Math.max(0, resourceIds.indexOf(tile.resource ?? "none")) })
         .textField("基礎食料産出量 (foodYield)", "例: 3", { defaultValue: String(tile.foodYield ?? 0) })
@@ -560,11 +561,11 @@ async function openDebugOwnerMenu(realPlayer, tx, tz) {
     const turn = getTurnState();
     const civIds = Array.isArray(turn.playerOrder) ? turn.playerOrder : [];
 
-    const buttons = civIds.map(civId => ({ text: `${tile.ownerId === civId ? "§a▶ " : "§f"}${resolveCivName(civId) ?? civId}`, civId }));
-    buttons.push({ text: `${!tile.ownerId ? "§a▶ " : "§7"}未所有にする`, civId: "__none__" });
+    const buttons = civIds.map(civId => ({ text: `${tile.ownerId === civId ? "§a> " : "§f"}${resolveCivName(civId) ?? civId}`, civId }));
+    buttons.push({ text: `${!tile.ownerId ? "§a> " : "§7"}未所有にする`, civId: "__none__" });
     buttons.push({ text: "戻る", civId: "__back__" });
 
-    const form = new ActionFormData().title("👤 所有者を編集").body(`§7現在の所有者: ${tile.ownerName ?? "未所有"}`);
+    const form = new ActionFormData().title("[Owner] 所有者を編集").body(`§7現在の所有者: ${tile.ownerName ?? "未所有"}`);
     for (const b of buttons) form.button(b.text);
     const res = await form.show(realPlayer);
     if (res.canceled || res.selection === undefined) { await openDebugTileMenu(realPlayer, tx, tz); return; }
@@ -594,11 +595,11 @@ async function openDebugCityMenu(realPlayer, tx, tz) {
     const wasTradingActive = city.tradingPost?.status === "active";
 
     const form = new ModalFormData()
-        .title("🏙️ 都市を編集")
+        .title("[City] 都市を編集")
         .textField("都市名", "都市名", { defaultValue: city.name ?? "" })
         .textField("人口 (population)", "例: 4", { defaultValue: String(city.population ?? 1) })
         .textField("住宅上限 (housing)", "例: 5", { defaultValue: String(city.housing ?? 2) })
-        .textField("労働者数 (workers)", "例: 2", { defaultValue: String(city.workers ?? 0) })
+        .textField("労働者数 (workers)", "例: 2", { defaultValue: String(getWorkerCount(city)) })
         .textField("貯留食料 (foodStorage)", "例: 0", { defaultValue: String(city.foodStorage ?? 0) })
         .textField("貯留信仰力 (faithStorage)", "例: 0", { defaultValue: String(city.faithStorage ?? 0) })
         .textField("保有ミサイル数 (missiles)", "例: 0", { defaultValue: String(city.missiles ?? 0) })
@@ -624,7 +625,6 @@ async function openDebugCityMenu(realPlayer, tx, tz) {
     if (Number.isFinite(workers)) {
         const count = Math.max(0, Math.floor(workers));
         city.workerUnits = Array.from({ length: count }, () => WORKER_ACTIONS_PER_UNIT);
-        city.workers = count;
     }
 
     if (isCapital && !wasCapital) {
@@ -662,7 +662,7 @@ async function openDebugFacilityMenu(realPlayer, tx, tz) {
     if (tile.facility) buttons.push({ text: "§c施設を削除する", facilityId: "__remove__" });
     buttons.push({ text: "戻る", facilityId: "__back__" });
 
-    const form = new ActionFormData().title("🏗️ 施設を編集").body(`§7現在: ${tile.facility?.label ?? "なし"}`);
+    const form = new ActionFormData().title("[Facility] 施設を編集").body(`§7現在: ${tile.facility?.label ?? "なし"}`);
     for (const b of buttons) form.button(b.text);
     const res = await form.show(realPlayer);
     if (res.canceled || res.selection === undefined) { await openDebugTileMenu(realPlayer, tx, tz); return; }
@@ -692,7 +692,7 @@ async function openDebugDistrictMenu(realPlayer, tx, tz) {
     if (tile.district || tile.underDistrictConstruction) buttons.push({ text: "§c区域を削除する", districtId: "__remove__" });
     buttons.push({ text: "戻る", districtId: "__back__" });
 
-    const form = new ActionFormData().title("🏛️ 区域を編集").body(`§7現在: ${tile.district?.label ?? (tile.underDistrictConstruction ? "建設中" : "なし")}`);
+    const form = new ActionFormData().title("[District] 区域を編集").body(`§7現在: ${tile.district?.label ?? (tile.underDistrictConstruction ? "建設中" : "なし")}`);
     for (const b of buttons) form.button(b.text);
     const res = await form.show(realPlayer);
     if (res.canceled || res.selection === undefined) { await openDebugTileMenu(realPlayer, tx, tz); return; }
@@ -720,11 +720,11 @@ async function openDebugCombatUnitMenu(realPlayer, tx, tz) {
     if (!tile) { await openMainMenu(realPlayer); return; }
     const unit = tile.combatUnit;
 
-    const actionButtons = [{ text: unit ? "✏️ 編集する" : "➕ 配置する", act: "edit" }];
+    const actionButtons = [{ text: unit ? "[Edit] 編集する" : "[Add] 配置する", act: "edit" }];
     if (unit) actionButtons.push({ text: "§c削除する", act: "remove" });
     actionButtons.push({ text: "戻る", act: "back" });
 
-    const form = new ActionFormData().title("⚔ 戦闘ユニットを編集")
+    const form = new ActionFormData().title("[Combat] 戦闘ユニットを編集")
         .body(`§7現在: ${unit ? `${unit.label} (HP:${Math.round(unit.hp ?? 0)}/${unit.maxHp ?? 100} 戦闘力:${unit.combatStrength ?? 0} 所有:${unit.ownerName})` : "なし"}`);
     for (const b of actionButtons) form.button(b.text);
     const res = await form.show(realPlayer);
@@ -748,7 +748,7 @@ async function openDebugCombatUnitMenu(realPlayer, tx, tz) {
     const domainOptions = ["land", "naval"];
 
     const modal = new ModalFormData()
-        .title("⚔ 戦闘ユニットを配置/編集")
+        .title("[Combat] 戦闘ユニットを配置/編集")
         .textField("ラベル", "例: 戦士", { defaultValue: unit?.label ?? "戦士" })
         .dropdown("所属国家", ownerNames.length ? ownerNames : ["(参加国家なし)"], { defaultValueIndex: Math.max(0, civIds.indexOf(ownerCivId)) })
         .dropdown("兵科", ["陸軍", "海軍"], { defaultValueIndex: unit?.domain === "naval" ? 1 : 0 })
@@ -792,11 +792,11 @@ async function openDebugReligiousUnitMenu(realPlayer, tx, tz) {
     if (!tile) { await openMainMenu(realPlayer); return; }
     const unit = tile.religiousUnit;
 
-    const actionButtons = [{ text: unit ? "✏️ 編集する" : "➕ 配置する", act: "edit" }];
+    const actionButtons = [{ text: unit ? "[Edit] 編集する" : "[Add] 配置する", act: "edit" }];
     if (unit) actionButtons.push({ text: "§c削除する", act: "remove" });
     actionButtons.push({ text: "戻る", act: "back" });
 
-    const form = new ActionFormData().title("🙏 宗教ユニットを編集")
+    const form = new ActionFormData().title("[Faith] 宗教ユニットを編集")
         .body(`§7現在: ${unit ? `${unit.label} (HP:${Math.round(unit.hp ?? 0)}/${unit.maxHp ?? 100}) 所有:${unit.ownerName}` : "なし"}`);
     for (const b of actionButtons) form.button(b.text);
     const res = await form.show(realPlayer);
@@ -818,7 +818,7 @@ async function openDebugReligiousUnitMenu(realPlayer, tx, tz) {
     const ownerNames = civIds.map(id => resolveCivName(id) ?? id);
 
     const modal = new ModalFormData()
-        .title("🙏 宗教ユニットを配置/編集")
+        .title("[Faith] 宗教ユニットを配置/編集")
         .textField("ラベル", "例: 伝道者", { defaultValue: unit?.label ?? "伝道者" })
         .dropdown("所属国家", ownerNames.length ? ownerNames : ["(参加国家なし)"], { defaultValueIndex: Math.max(0, civIds.indexOf(ownerCivId)) })
         .textField("HP", "例: 100", { defaultValue: String(unit?.hp ?? 100) })
@@ -868,7 +868,7 @@ async function openDebugPressureMenu(realPlayer, tx, tz) {
     const civButtons = civIds.map(id => ({ text: `${resolveCivName(id) ?? id} §7(現在: ${Math.floor(pressures[id] ?? 0)})`, civId: id }));
     civButtons.push({ text: "戻る", civId: "__back__" });
 
-    const form = new ActionFormData().title("⛪ 宗教的圧力を編集").body("§7値を設定する国家を選んでください(0にすると削除されます)。");
+    const form = new ActionFormData().title("[Religion] 宗教的圧力を編集").body("§7値を設定する国家を選んでください(0にすると削除されます)。");
     for (const b of civButtons) form.button(b.text);
     const res = await form.show(realPlayer);
     if (res.canceled || res.selection === undefined) { await openDebugTileMenu(realPlayer, tx, tz); return; }
@@ -876,7 +876,7 @@ async function openDebugPressureMenu(realPlayer, tx, tz) {
     if (picked.civId === "__back__") { await openDebugTileMenu(realPlayer, tx, tz); return; }
 
     const modal = new ModalFormData()
-        .title(`⛪ ${resolveCivName(picked.civId) ?? picked.civId} の宗教的圧力`)
+        .title(`[Religion] ${resolveCivName(picked.civId) ?? picked.civId} の宗教的圧力`)
         .textField("圧力値", "例: 100", { defaultValue: String(pressures[picked.civId] ?? 0) });
     const modalRes = await modal.show(realPlayer);
     if (modalRes.canceled) { await openDebugPressureMenu(realPlayer, tx, tz); return; }
@@ -898,7 +898,7 @@ async function openDebugPressureMenu(realPlayer, tx, tz) {
  */
 async function openProductionMenu(player, tx, tz) {
     const form = new ActionFormData()
-        .title("🏭 生産メニュー")
+        .title("[Production] 生産メニュー")
         .body("生産する種類のカテゴリを選択してください。")
         .button("§b[Worker] ユニット生産")
         .button("§e[Trade] 建造物生産")
@@ -936,7 +936,7 @@ async function openProductionCategoryMenu(player, tx, tz, category) {
         const progressText = Math.floor(city.production.progress * 10) / 10;
         if (activeDef.category === category) {
             body.push(`\n${activeDef.icon} §7${activeDef.label}: 生産中 (${progressText}/${city.production.cost})`);
-            buttons.push({ text: `§c🛑 ${activeDef.label}の生産を中止する`, action: "cancel" });
+            buttons.push({ text: `§c[Stop] ${activeDef.label}の生産を中止する`, action: "cancel" });
         } else {
             body.push(`\n§7(他の生産【${activeDef.icon}${activeDef.label}】が進行中のため、この都市は今生産を開始できません)`);
         }
@@ -954,14 +954,14 @@ async function openProductionCategoryMenu(player, tx, tz, category) {
                     body.push(`§7${def.icon} ${def.label}: 建設済み`);
                 } else if (def.requiresTechnology && !hasCompletedProgress(player, "technology", def.requiresTechnology)) {
                     const techDef = getDefinition("technology", def.requiresTechnology);
-                    body.push(`§7🔒 ${def.icon} ${def.label}: 技術【${techDef?.label ?? def.requiresTechnology}】が必要`);
+                    body.push(`§7[Locked] ${def.icon} ${def.label}: 技術【${techDef?.label ?? def.requiresTechnology}】が必要`);
                 } else if (def.disallowInCapital && city.isCapital) {
                     body.push(`§7${def.icon} ${def.label}: この都市は既に首都です`);
                 }
                 continue;
             }
 
-            const estTurns = production > 0 ? Math.ceil(def.cost / production) : "∞";
+            const estTurns = production > 0 ? Math.ceil(def.cost / production) : "--";
             buttons.push({ text: `${def.icon} ${def.label}を生産する (必要生産力:${def.cost}、予測:約${estTurns}T)`, action: `start:${id}` });
         }
     }
@@ -1004,7 +1004,7 @@ async function openFacilityInstallMenu(player, tx, tz) {
         if (!check.ok) {
             if (def.requiresTechnology && !hasCompletedProgress(player, "technology", def.requiresTechnology)) {
                 const techDef = getDefinition("technology", def.requiresTechnology);
-                body.push(`§7🔒 ${def.icon} ${def.label}: 技術【${techDef?.label ?? def.requiresTechnology}】が必要`);
+                body.push(`§7[Locked] ${def.icon} ${def.label}: 技術【${techDef?.label ?? def.requiresTechnology}】が必要`);
             } else if (def.requiresResource) {
                 body.push(`§7${def.icon} ${def.label}: ${check.message}`);
             }
@@ -1017,7 +1017,7 @@ async function openFacilityInstallMenu(player, tx, tz) {
 
     await showPaginatedMenu(
         getRealPlayer(player),
-        "🏗️ 施設を設置",
+        "[Facility] 施設を設置",
         body.join("\n"),
         items,
         async (facilityId) => {
@@ -1037,18 +1037,7 @@ async function openDistrictStartMenu(player, tx, tz) {
 
     // 💡 帰属先都市を探す(既に建設中の区域が無いかの判定に必要)
     const allTiles = getTiles();
-    let cityKey = tile.belongsToCityKey;
-    if (!cityKey) {
-        let minDist = Infinity;
-        for (const key in allTiles) {
-            const t = allTiles[key];
-            if (t.ownerId === player.id && t.city) {
-                const [cx, cz] = key.split(",");
-                const dist = Math.abs(tx - parseInt(cx, 10)) + Math.abs(tz - parseInt(cz, 10));
-                if (dist < minDist) { minDist = dist; cityKey = key; }
-            }
-        }
-    }
+    const cityKey = resolveOwningCityKey(tx, tz, tile, player.id, allTiles);
     const city = cityKey ? allTiles[cityKey]?.city : null;
 
     const body = [`(${tx}, ${tz}) に建設する区域を選んでください。`, "§7建設には帰属都市の生産力を複数ターンかけて使います。"];
@@ -1064,7 +1053,7 @@ async function openDistrictStartMenu(player, tx, tz) {
         if (!check.ok) {
             if (def.requiresTechnology && !hasCompletedProgress(player, "technology", def.requiresTechnology)) {
                 const techDef = getDefinition("technology", def.requiresTechnology);
-                body.push(`§7🔒 ${def.icon} ${def.label}: 技術【${techDef?.label ?? def.requiresTechnology}】が必要`);
+                body.push(`§7[Locked] ${def.icon} ${def.label}: 技術【${techDef?.label ?? def.requiresTechnology}】が必要`);
             }
             continue;
         }
@@ -1075,7 +1064,7 @@ async function openDistrictStartMenu(player, tx, tz) {
 
     await showPaginatedMenu(
         getRealPlayer(player),
-        "🏛️ 区域を配置",
+        "[District] 区域を配置",
         body.join("\n"),
         items,
         async (districtId) => {
@@ -1135,13 +1124,13 @@ async function openProgressMenu(player, kind) {
     for (const id of Object.keys(defs)) {
         const def = defs[id];
         if (state.completed.includes(id)) {
-            buttons.push({ text: `§a✓ ${def.label} (取得済み)${def.effect ? ` - ${def.effect}` : ""}`, action: null });
+            buttons.push({ text: `§a[Done] ${def.label} (取得済み)${def.effect ? ` - ${def.effect}` : ""}`, action: null });
         } else if (state.activeId === id) {
-            buttons.push({ text: `§e⌛ ${def.label} (${state.progress}/${def.cost})`, action: null });
+            buttons.push({ text: `§e[Pending] ${def.label} (${state.progress}/${def.cost})`, action: null });
         } else {
             const locked = !(def.prerequisites ?? []).every(prerequisite => state.completed.includes(prerequisite));
             buttons.push({
-                text: locked ? `§8🔒 ${def.label}` : `§f${def.label} (必要${getPointsLabel(kind)}: ${def.cost})${def.effect ? ` - ${def.effect}` : ""}`,
+                text: locked ? `§8[Locked] ${def.label}` : `§f${def.label} (必要${getPointsLabel(kind)}: ${def.cost})${def.effect ? ` - ${def.effect}` : ""}`,
                 action: locked ? null : id,
             });
         }
@@ -1196,14 +1185,14 @@ export function openDiplomacyMenu(player, allCivs) {
         : getJoinedCivHandles(myCiv.id);
 
     const form = new ActionFormData()
-        .title("🌐 外交メニュー")
+        .title("[Diplomacy] 外交メニュー")
         .body(`自国: ${myCiv.name}\n届いている外交提案: ${requests.length} 件`);
 
     // 1. 届いた提案の確認ボタン
     if (requests.length > 0) {
-        form.button(`📩 届いた提案を確認する (${requests.length}件)`);
+        form.button(`[Request] 届いた提案を確認する (${requests.length}件)`);
     } else {
-        form.button("📩 届いた提案はありません (0)");
+        form.button("[Request] 届いた提案はありません (0)");
     }
 
     // 2. 自分以外の他国一覧ボタン
@@ -1211,8 +1200,8 @@ export function openDiplomacyMenu(player, allCivs) {
     otherCivs.forEach(civ => {
         const rel = getRelation(myCiv, civ.id);
         let statusTag = "【関係なし】";
-        if (rel === "pact") statusTag = "【🤝 不可侵条約】";
-        if (rel === "alliance") statusTag = "【👑 同盟】";
+        if (rel === "pact") statusTag = "【[Pact] 不可侵条約】";
+        if (rel === "alliance") statusTag = "【[Alliance] 同盟】";
 
         form.button(`${civ.name}\n${statusTag}`);
     });
@@ -1243,7 +1232,7 @@ function openIncomingRequestsMenu(player, allCivs) {
     }
 
     const form = new ActionFormData()
-        .title("📩 届いた外交提案")
+        .title("[Request] 届いた外交提案")
         .body("対応する提案を選択してください。");
 
     requests.forEach(r => {
@@ -1300,13 +1289,13 @@ function openCivDiplomacyDetail(player, targetCiv, allCivs) {
 
     const buttons = [];
     if (currentRel === "none") {
-        if (canProposePact) buttons.push({ text: "📜 不可侵条約を提案する", action: "proposePact" });
-        if (canProposeAlliance) buttons.push({ text: "👑 同盟を提案する", action: "proposeAlliance" });
+        if (canProposePact) buttons.push({ text: "[Pact] 不可侵条約を提案する", action: "proposePact" });
+        if (canProposeAlliance) buttons.push({ text: "[Alliance] 同盟を提案する", action: "proposeAlliance" });
     } else if (currentRel === "pact") {
-        if (canProposeAlliance) buttons.push({ text: "👑 同盟を提案する", action: "proposeAlliance" });
-        buttons.push({ text: "❌ 不可侵条約を破棄する", action: "break" });
+        if (canProposeAlliance) buttons.push({ text: "[Alliance] 同盟を提案する", action: "proposeAlliance" });
+        buttons.push({ text: "[Break] 不可侵条約を破棄する", action: "break" });
     } else if (currentRel === "alliance") {
-        buttons.push({ text: "❌ 同盟を解消する", action: "break" });
+        buttons.push({ text: "[Break] 同盟を解消する", action: "break" });
     }
     if (buttons.length === 0) buttons.push({ text: "閉じる", action: "close" });
 
@@ -1381,8 +1370,8 @@ async function showPaginatedMenu(realPlayer, title, bodyText, items, onSelect, o
     const pageItems = items.slice(start, start + MENU_PAGE_SIZE);
 
     const buttons = pageItems.map(item => ({ kind: "item", text: item.text, action: item.action }));
-    if (currentPage > 0) buttons.push({ kind: "prev", text: "§b◀ 前のページ" });
-    if (currentPage < totalPages - 1) buttons.push({ kind: "next", text: "§b次のページ ▶" });
+    if (currentPage > 0) buttons.push({ kind: "prev", text: "§b< 前のページ" });
+    if (currentPage < totalPages - 1) buttons.push({ kind: "next", text: "§b次のページ >" });
     buttons.push({ kind: "back", text: "戻る" });
 
     const pageInfo = totalPages > 1 ? `\n§7(${currentPage + 1}/${totalPages}ページ, 全${items.length}件)` : "";
@@ -1429,7 +1418,7 @@ async function openCombatUnitMoveMenu(player, fromTx, fromTz) {
                 && standTile && !standTile.combatUnit && canUnitEnterTile(unit, standTile);
             if (canStandMove) {
                 const cityText = standTile.city ? ` | 都市: ${standTile.city.name}` : "";
-                items.push({ text: `§a📍 今いる場所へ移動 (${standTx}, ${standTz})${cityText}`, action: { tx: standTx, tz: standTz } });
+                items.push({ text: `§a[Here] 今いる場所へ移動 (${standTx}, ${standTz})${cityText}`, action: { tx: standTx, tz: standTz } });
             }
         }
     }
@@ -1495,7 +1484,7 @@ async function openCombatUnitAttackMenu(player, fromTx, fromTz) {
             const enemyUnit = t.unit;
             const cityText = t.tile.city ? ` | 都市: ${t.tile.city.name}` : "";
             items.push({
-                text: `⚔ (${t.tx}, ${t.tz}) | ${enemyUnit.label ?? enemyUnit.id} HP:${Math.max(0, Math.round(enemyUnit.hp ?? 0))}/${enemyUnit.maxHp ?? 100} 戦闘力:${getEffectiveCombatStrength(enemyUnit)}${cityText}`,
+                text: `[Combat] (${t.tx}, ${t.tz}) | ${enemyUnit.label ?? enemyUnit.id} HP:${Math.max(0, Math.round(enemyUnit.hp ?? 0))}/${enemyUnit.maxHp ?? 100} 戦闘力:${getEffectiveCombatStrength(enemyUnit)}${cityText}`,
                 action: { tx: t.tx, tz: t.tz },
             });
         }
@@ -1544,7 +1533,7 @@ async function openMyUnitsMenu(player) {
             ? `遠距離${getEffectiveRangedStrength(unit)}/近距離${getEffectiveCombatStrength(unit)}`
             : `${getEffectiveCombatStrength(unit)}`;
         const remaining = unit.movementRemaining ?? unit.movement ?? 0;
-        const cityText = entry.tile.city ? ` | 🎪${entry.tile.city.name}` : "";
+        const cityText = entry.tile.city ? ` | [City]${entry.tile.city.name}` : "";
         items.push({
             text: `${unit.label ?? unit.id} (${entry.tx},${entry.tz}) HP:${Math.max(0, Math.round(unit.hp ?? 0))}/${unit.maxHp ?? 100} 戦闘力:${strengthText} 移動:${remaining}/${unit.movement ?? 0}${cityText}`,
             action: { tx: entry.tx, tz: entry.tz },
@@ -1555,7 +1544,7 @@ async function openMyUnitsMenu(player) {
 
     await showPaginatedMenu(
         getRealPlayer(player),
-        "⚔ 自分の戦闘ユニット一覧",
+        "[Combat] 自分の戦闘ユニット一覧",
         body.join("\n"),
         items,
         async (action) => { await openUnitActionMenu(player, action.tx, action.tz); },
@@ -1582,7 +1571,7 @@ async function openUnitActionMenu(player, tx, tz) {
 
     const buttons = [
         { text: "§f 移動", action: "move" },
-        { text: "§c⚔ 攻撃", action: "attack" },
+        { text: "§c[Combat] 攻撃", action: "attack" },
         { text: "戻る", action: null },
     ];
 
@@ -1614,20 +1603,20 @@ async function openReligionMenu(player) {
 
     if (!hasFoundedReligion(player)) {
         const totalFaith = getTotalCivFaith(playerCities);
-        const hasSacredSite = Object.values(allTiles).some(t => t.ownerId === player.id && t.district?.id === "sacredSite");
+        const hasSacredSite = Object.values(allTiles).some(t => isSacredSiteTile(t, player.id));
         const check = canFoundReligion(player, player.id, playerCities, allTiles);
 
         const body = [
-            `§f国家全体の信仰力: §d🙏 ${Math.floor(totalFaith)} / 100`,
+            `§f国家全体の信仰力: §d[Faith] ${Math.floor(totalFaith)} / 100`,
             `§f聖地: ${hasSacredSite ? "§aあり" : "§cなし"}`,
         ];
         if (!check.ok) body.push(`§7${check.message}`);
 
         const buttons = [];
-        if (check.ok) buttons.push({ text: "⛪ 宗教を創始する", action: "found" });
+        if (check.ok) buttons.push({ text: "[Religion] 宗教を創始する", action: "found" });
         buttons.push({ text: "戻る", action: null });
 
-        const form = new ActionFormData().title("⛪ 宗教").body(body.join("\n"));
+        const form = new ActionFormData().title("[Religion] 宗教").body(body.join("\n"));
         for (const btn of buttons) form.button(btn.text);
         const result = await form.show(realPlayer);
         if (result.canceled || result.selection === undefined) return;
@@ -1651,11 +1640,11 @@ async function openReligionMenu(player) {
     ];
 
     const buttons = [
-        { text: "✏️ 宗教の名前を変更する", action: "rename" },
+        { text: "[Rename] 宗教の名前を変更する", action: "rename" },
         { text: "戻る", action: null },
     ];
 
-    const form = new ActionFormData().title(`⛪ ${religionName}`).body(body.join("\n"));
+    const form = new ActionFormData().title(`[Religion] ${religionName}`).body(body.join("\n"));
     for (const btn of buttons) form.button(btn.text);
     const result = await form.show(realPlayer);
     if (result.canceled || result.selection === undefined) return;
@@ -1694,7 +1683,7 @@ async function openDistrictBuildingMenu(player, tx, tz) {
     if (items.length === 0) body.push("§7現在建設できる建造物がありません。");
 
     await showPaginatedMenu(
-        getRealPlayer(player), "🏛️ 区域専用の建造物", body.join("\n"), items,
+        getRealPlayer(player), "[District] 区域専用の建造物", body.join("\n"), items,
         async (buildingId) => { (await import("./commands.js")).cmdStartDistrictBuilding(player, buildingId); },
         async () => { await openMainMenu(player); },
     );
@@ -1711,7 +1700,7 @@ async function openBuyReligiousUnitMenu(player, tx, tz) {
     for (const id of getReligiousUnitIds()) {
         const def = getReligiousUnitDef(id);
         if (def.requiresBuilding && !tile.city[def.requiresBuilding]) {
-            body.push(`§7🔒 ${def.icon} ${def.label}: 建造物が必要`);
+            body.push(`§7[Locked] ${def.icon} ${def.label}: 建造物が必要`);
             continue;
         }
         if (tile.religiousUnit) { body.push(`§7${def.icon} ${def.label}: このマスには既に宗教ユニットがいます`); continue; }
@@ -1721,7 +1710,7 @@ async function openBuyReligiousUnitMenu(player, tx, tz) {
     if (items.length === 0) body.push("§7現在購入できる宗教ユニットがありません。");
 
     await showPaginatedMenu(
-        getRealPlayer(player), "🙏 宗教ユニットを購入", body.join("\n"), items,
+        getRealPlayer(player), "[Faith] 宗教ユニットを購入", body.join("\n"), items,
         async (unitId) => { (await import("./commands.js")).cmdBuyReligiousUnit(player, unitId); },
         async () => { await openMainMenu(player); },
     );
@@ -1776,20 +1765,15 @@ async function openProselytizeMenu(player, fromTx, fromTz) {
         body.push("§7この宗教ユニットは今ターン既に布教しました。(1ターン1回まで。次の自分のターンで再度布教できます)");
     } else {
         const tiles = getTiles();
-        for (let dz = -1; dz <= 1; dz++) {
-            for (let dx = -1; dx <= 1; dx++) {
-                if (dx === 0 && dz === 0) continue;
-                const tx = fromTx + dx, tz = fromTz + dz;
-                const tile = tiles[`${tx},${tz}`];
-                if (tile?.city) items.push({ text: `⛪ (${tx}, ${tz}) | 都市: ${tile.city.name}`, action: { tx, tz } });
-            }
+        for (const { tx, tz, tile } of getAdjacentTileEntries(fromTx, fromTz, tiles)) {
+            if (tile.city) items.push({ text: `[Religion] (${tx}, ${tz}) | 都市: ${tile.city.name}`, action: { tx, tz } });
         }
         body.push("§7布教先の都市を選んでください(布教力を1消費します)。");
         if (items.length === 0) body.push("§7隣接する都市がありません。");
     }
 
     await showPaginatedMenu(
-        getRealPlayer(player), "🙏 布教する", body.join("\n"), items,
+        getRealPlayer(player), "[Faith] 布教する", body.join("\n"), items,
         async (action) => { (await import("./commands.js")).cmdProselytize(player, fromTx, fromTz, action.tx, action.tz); },
         async () => { await openMainMenu(player); },
     );

@@ -75,6 +75,10 @@ Three distinct ways things get built, easy to conflate:
 
 `adjacency.js` is a generic engine used by buildings, facilities, and districts alike: each bonus rule declares a `match` predicate over neighboring tiles (helpers: `matchesTerrain`, `matchesResource`, `matchesBuilding`, `matchesAnyCity`) and a `yieldPerMatch`. Adding a new adjacency bonus to any structure type is a data-only change — `getBuildingAdjacencyYields()` / `getFacilityAdjacencyYields()` feed automatically into `turns.js`'s `getCityCurrentYields`. Prefer extending via this system over hand-rolling per-structure neighbor-scanning code.
 
+### UI/text conventions
+
+Minecraft Bedrock's default font cannot render most Unicode emoji (they show as blank tofu boxes). **Never use emoji in player-visible strings** — chat messages (`reply`/`world.sendMessage`), action-bar text, or `ActionFormData`/`ModalFormData` titles/bodies/buttons. Use bracket tags instead, matching the existing convention (`[Worker]`, `[Food]`, `[Prod]`, `[Missile]`, `[Faith]`, `[Combat]`, `[District]`, ...) — `§`-prefixed Minecraft color codes are not emoji and are fine to use freely. Emoji in source comments (e.g. the `💡` note-marker convention) are developer-only and never reach the player, so they're unaffected by this rule.
+
 ### Performance conventions
 
 Recent history in this repo (see git log) is dominated by perf work around Dynamic Property I/O and per-tick recomputation. When touching hot paths (the 10-tick HUD loop in `main.js`, per-turn city yield calculation in `turns.js`, tile lookups):

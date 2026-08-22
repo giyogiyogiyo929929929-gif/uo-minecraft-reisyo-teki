@@ -15,6 +15,8 @@
 // 【宗教の識別】
 // 1国家につき宗教は1つまでなので、宗教IDはそれを創始した国家のID(civId)をそのまま使う。
 
+import { isSacredSiteTile } from "./districts.js";
+
 const RELIGION_FOUND_THRESHOLD = 100; // 国家全体の信仰力合計がこの値に達すると宗教を創始できる
 const SACRED_SITE_PRESSURE_PER_TURN = 100; // 聖地のある都市が、自国の宗教に毎ターン与える宗教的圧力
 
@@ -98,7 +100,7 @@ export function getTotalCivFaith(playerCities) {
 export function canFoundReligion(civHandle, civId, playerCities, tiles) {
     if (hasFoundedReligion(civHandle)) return { ok: false, message: "§c既に宗教を創始しています。" };
 
-    const hasSacredSite = Object.values(tiles).some(t => t.ownerId === civId && t.district?.id === "sacredSite");
+    const hasSacredSite = Object.values(tiles).some(t => isSacredSiteTile(t, civId));
     if (!hasSacredSite) return { ok: false, message: "§c宗教を創始するには聖地が必要です。" };
 
     const totalFaith = getTotalCivFaith(playerCities);

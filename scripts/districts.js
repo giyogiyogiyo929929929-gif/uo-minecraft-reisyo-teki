@@ -22,7 +22,7 @@
 //   - perPopulationYields: この区域を持つ都市に、人口1につき追加で加算されるボーナス。
 
 import { hasCompletedProgress, getDefinition } from "./progression.js";
-import { matchesTerrainWeighted, matchesFacility, matchesDistrict, matchesAnyCity, getAdjacencyBonus } from "./adjacency.js";
+import { matchesTerrainWeighted, matchesFacility, matchesDistrict, matchesAnyCity, sumAssignedTileYields, sumAssignedTileAdjacencyYields, getFlagFlatYields } from "./adjacency.js";
 
 /**
  * @typedef {Object} DistrictDef
@@ -50,7 +50,7 @@ export const DISTRICT_DEFS = {
         adjacencyBonuses: [
             { id: "sacredSiteNature", label: "山・山脈・森からの神聖な恩恵", match: matchesTerrainWeighted({ mountain: 1, mountainRange: 2, forest: 1 }), yieldPerMatch: { faith: 1 } },
         ],
-        completeMessage: (tx, tz) => `§e🎉 (${tx}, ${tz}) に聖地が完成しました！`,
+        completeMessage: (tx, tz) => `§e[Complete] (${tx}, ${tz}) に聖地が完成しました！`,
     },
     industrialZone: {
         label: "工業地帯",
@@ -66,7 +66,7 @@ export const DISTRICT_DEFS = {
             { id: "industrialBlacksmith", label: "鍛冶場からの恩恵", match: matchesFacility("blacksmith"), yieldPerMatch: { production: 2 } },
             { id: "industrialCity", label: "都市からの恩恵", match: matchesAnyCity(), yieldPerMatch: { production: 0.5 } },
         ],
-        completeMessage: (tx, tz) => `§e🎉 (${tx}, ${tz}) に工業地帯が完成しました！`,
+        completeMessage: (tx, tz) => `§e[Complete] (${tx}, ${tz}) に工業地帯が完成しました！`,
     },
 };
 
@@ -123,6 +123,8 @@ export function startDistrictConstruction(city, tile, id, tileKey) {
  * @property {string} icon 表示アイコン
  * @property {number} cost 完成に必要な生産力の合計値
  * @property {string} forDistrict どの区域(DISTRICT_DEFSのID)の上に建てられるか
+ * @property {Record<string, number>} [flatYields] この建造物があるだけで(隣接マスに関係なく)
+ *   都市に毎ターン加算される産出量(例: { faith: 2 })
  * @property {(city: any, tile: any) => void} onComplete 完成時の効果を適用する関数
  * @property {(tx: number, tz: number) => string} [completeMessage] 完成時のメッセージ生成関数
  */
@@ -132,13 +134,24 @@ export const DISTRICT_BUILDING_DEFS = {
         icon: "[Shrine]",
         cost: 70,
         forDistrict: "sacredSite",
-        // 💡 信仰力+2 は turns.js の getCityCurrentYields 側で city.shrine を見て加算する。
+        // 💡 信仰力+2 は flatYields 経由で getDistrictBuildingFlatYields() が city.shrine を見て
+        //    自動的に加算する(turns.js 側に個別の分岐は不要)。
         //    伝道者の購入可否は religion.js の RELIGIOUS_UNIT_DEFS.missionary.requiresBuilding が
         //    "shrine" を指定しており、city.shrine を見て自動的に判定される。
+        flatYields: { faith: 2 },
         onComplete: (city) => { city.shrine = true; },
-        completeMessage: (tx, tz) => `§e🎉 (${tx}, ${tz})の聖地に社が完成しました！ (信仰力の産出+2、伝道者を購入可能に)`,
+        completeMessage: (tx, tz) => `§e[Complete] (${tx}, ${tz})の聖地に社が完成しました！ (信仰力の産出+2、伝道者を購入可能に)`,
     },
 };
+
+/**
+ * 指定したマスが、指定した所有者の聖地(district: "sacredSite")かどうかを判定する。
+ * 聖地IDの文字列比較を宗教システム側(religion.js/turns.js/ui.js)に散らばらせないための
+ * 共有ヘルパー(宗教の創始条件・毎ターンの宗教的圧力付与・宗教メニュー表示のいずれもこれを使う)。
+ */
+export function isSacredSiteTile(tile, ownerId) {
+    return tile?.ownerId === ownerId && tile?.district?.id === "sacredSite";
+}
 
 export function getDistrictBuildingDef(id) {
     return DISTRICT_BUILDING_DEFS[id] ?? null;
@@ -204,7 +217,7 @@ export function tickDistrictConstruction(city, productionAmount, tiles, ownerId)
     if (lostTile || lostDistrict) {
         city.districtConstruction = null;
         if (targetTile && !isBuilding) delete targetTile.underDistrictConstruction;
-        return { done: true, cancelled: true, message: `§c⚠️ 【${def.label}】は建設中に対象を失ったため中止されました。` };
+        return { done: true, cancelled: true, message: `§c[Warning] 【${def.label}】は建設中に対象を失ったため中止されました。` };
     }
 
     construction.progress += productionAmount ?? 0;
@@ -219,7 +232,7 @@ export function tickDistrictConstruction(city, productionAmount, tiles, ownerId)
         const [txStr, tzStr] = construction.tileKey.split(",");
         const message = def.completeMessage
             ? def.completeMessage(Number(txStr), Number(tzStr))
-            : `§e🎉【${def.label}】が完成しました！`;
+            : `§e[Complete]【${def.label}】が完成しました！`;
         city.districtConstruction = null;
         return { done: true, message };
     }
@@ -236,21 +249,7 @@ export function tickDistrictConstruction(city, productionAmount, tiles, ownerId)
  * @returns {{ [yieldKey: string]: number }}
  */
 export function getDistrictPopulationYields(assignedTiles, population) {
-    const totals = {};
-    if (!Array.isArray(assignedTiles)) return totals;
-
-    for (const t of assignedTiles) {
-        const district = t.tile?.district;
-        if (!district) continue;
-        const def = DISTRICT_DEFS[district.id];
-        if (!def?.perPopulationYields) continue;
-
-        for (const key in def.perPopulationYields) {
-            totals[key] = (totals[key] ?? 0) + def.perPopulationYields[key] * population;
-        }
-    }
-
-    return totals;
+    return sumAssignedTileYields(assignedTiles, (tile) => tile?.district, DISTRICT_DEFS, "perPopulationYields", population);
 }
 
 /**
@@ -261,22 +260,7 @@ export function getDistrictPopulationYields(assignedTiles, population) {
  * @returns {{ [yieldKey: string]: number }}
  */
 export function getDistrictAdjacencyYields(assignedTiles, tiles) {
-    const totals = {};
-    if (!Array.isArray(assignedTiles)) return totals;
-
-    for (const t of assignedTiles) {
-        const district = t.tile?.district;
-        if (!district) continue;
-        const def = DISTRICT_DEFS[district.id];
-        if (!def?.adjacencyBonuses) continue;
-
-        const bonus = getAdjacencyBonus(t.tx, t.tz, tiles, def.adjacencyBonuses);
-        for (const key in bonus) {
-            totals[key] = (totals[key] ?? 0) + bonus[key];
-        }
-    }
-
-    return totals;
+    return sumAssignedTileAdjacencyYields(assignedTiles, tiles, (tile) => tile?.district, DISTRICT_DEFS);
 }
 
 /**
@@ -285,19 +269,16 @@ export function getDistrictAdjacencyYields(assignedTiles, tiles) {
  * @returns {{ [yieldKey: string]: number }}
  */
 export function getDistrictFlatYields(assignedTiles) {
-    const totals = {};
-    if (!Array.isArray(assignedTiles)) return totals;
+    return sumAssignedTileYields(assignedTiles, (tile) => tile?.district, DISTRICT_DEFS, "flatYields");
+}
 
-    for (const t of assignedTiles) {
-        const district = t.tile?.district;
-        if (!district) continue;
-        const def = DISTRICT_DEFS[district.id];
-        if (!def?.flatYields) continue;
-
-        for (const key in def.flatYields) {
-            totals[key] = (totals[key] ?? 0) + def.flatYields[key];
-        }
-    }
-
-    return totals;
+/**
+ * 都市が持つ区域専用建造物(city[id]が true のもの)から、flatYieldsを合算する
+ * (production.js の建造物における getFlagFlatYields(city, PRODUCTION_DEFS, "building") と同じ形。
+ * turns.js の getCityCurrentYields から呼ばれる)。
+ * @param {any} city 都市データ
+ * @returns {{ [yieldKey: string]: number }}
+ */
+export function getDistrictBuildingFlatYields(city) {
+    return getFlagFlatYields(city, DISTRICT_BUILDING_DEFS);
 }

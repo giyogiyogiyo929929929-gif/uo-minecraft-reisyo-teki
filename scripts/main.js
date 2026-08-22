@@ -7,7 +7,7 @@ import { openMainMenu } from "./ui.js";
 import { getTurnState, getTiles, getMapConfig, getStateVersion } from "./state.js";
 import { worldToTile, TERRAIN_TYPES, RESOURCE_TYPES } from "./mapGen.js";
 import { getCityCurrentYields, forceEndTurn } from "./turns.js";
-import { PRODUCTION_DEFS } from "./production.js";
+import { PRODUCTION_DEFS, getWorkerCount } from "./production.js";
 import { getDistrictDef } from "./districts.js";
 import { getEffectiveCombatStrength, getEffectiveRangedStrength, isRangedUnit } from "./combat.js";
 import { getActingPlayer, resolveCivName } from "./civs.js";
@@ -154,7 +154,7 @@ system.runInterval(() => {
         // 2. ゲーム中：足元のマスの詳細情報を表示
         // ==========================================
         if (!config || !tiles) {
-            player.onScreenDisplay.setActionBar("§c⚠ マップデータが読み込めません");
+            player.onScreenDisplay.setActionBar("§c[Warning] マップデータが読み込めません");
             continue;
         }
 
@@ -172,17 +172,17 @@ system.runInterval(() => {
             let resourceLabel = "なし";
             if (tile.resource && RESOURCE_TYPES[tile.resource]) {
                 const res = RESOURCE_TYPES[tile.resource];
-                const icon = tile.resource === "oil" ? "🛢️ " : "";
+                const icon = tile.resource === "oil" ? "[Oil] " : "";
                 resourceLabel = `${icon}${res.label} (${res.category})`;
             }
 
             // 領有プレイヤー名と都市名の整形
             const ownerText = tile.ownerName ? `§a${tile.ownerName}` : "§7中立";
-            const cityText = tile.city ? ` §e[🎪都市: ${tile.city.name} ([Pop]x${tile.city.population})]` : "";
-            const facilityText = tile.facility ? ` §7[🏗️施設: ${tile.facility.label ?? tile.facility.id}]` : "";
+            const cityText = tile.city ? ` §e[都市: ${tile.city.name} ([Pop]x${tile.city.population})]` : "";
+            const facilityText = tile.facility ? ` §7[施設: ${tile.facility.label ?? tile.facility.id}]` : "";
             const districtText = tile.district
-                ? ` §5[🏛️区域: ${tile.district.label ?? tile.district.id}]`
-                : (tile.underDistrictConstruction ? " §5[🏛️区域: 建設中...]" : "");
+                ? ` §5[区域: ${tile.district.label ?? tile.district.id}]`
+                : (tile.underDistrictConstruction ? " §5[区域: 建設中...]" : "");
             const combatUnit = tile.combatUnit;
             const combatUnitText = combatUnit
                 ? `§c[${combatUnit.domain === "naval" ? "Naval" : "Land"}] ${combatUnit.label ?? combatUnit.id} | HP: ${combatUnit.hp ?? 0}/${combatUnit.maxHp ?? 100} | 戦闘力: ${formatCombatStrengthText(combatUnit)} | 移動力: ${combatUnit.movementRemaining ?? combatUnit.movement ?? 0}/${combatUnit.movement ?? 0} | 攻撃距離: ${combatUnit.attackRange ?? combatUnit.movement ?? 0}`
@@ -205,9 +205,9 @@ system.runInterval(() => {
             if (cityTile && cityTile.city) {
                 // 💡 市民配置ロジックを考慮した「今」実際に出ている産出量
                 const yields = getCachedCityCurrentYields(cityKey, tiles);
-                const oilText = yields.oil > 0 ? ` §7| §b🛢️x${yields.oil}` : "";
-                const ironText = yields.iron > 0 ? ` §7| §7⚒x${yields.iron}` : "";
-                const faithText = (yields.faith ?? 0) > 0 ? ` §7| §d🙏x${yields.faith}` : "";
+                const oilText = yields.oil > 0 ? ` §7| §b[Oil]x${yields.oil}` : "";
+                const ironText = yields.iron > 0 ? ` §7| §7[Iron]x${yields.iron}` : "";
+                const faithText = (yields.faith ?? 0) > 0 ? ` §7| §d[Faith]x${yields.faith}` : "";
                 currentYieldLine = `\n§f今の産出(都市全体): §a[Food]x${yields.food} §7| §6[Prod]x${yields.production}${oilText}${ironText}${faithText}`;
 
                 // 💡 帰属都市そのものの詳細情報
@@ -225,19 +225,19 @@ system.runInterval(() => {
 
                 const tpText = c.tradingPost?.status === "active" ? " §7| §a[Trade]交易所稼働中" : "";
                 const missileText = (c.missiles ?? 0) > 0 ? ` §7| §c[Missile]x${c.missiles}` : "";
-                const faithStorageText = (c.faithStorage ?? 0) > 0 ? ` §7| §d🙏信仰力${c.faithStorage}` : "";
+                const faithStorageText = (c.faithStorage ?? 0) > 0 ? ` §7| §d[Faith]信仰力${c.faithStorage}` : "";
                 let districtProductionText = "";
                 if (c.districtConstruction) {
                     const districtDef = getDistrictDef(c.districtConstruction.id);
                     const districtProgressText = Math.floor(c.districtConstruction.progress * 10) / 10;
                     districtProductionText = ` §7| §5${districtDef?.icon ?? "[Sacred]"}${districtDef?.label ?? c.districtConstruction.id}区域建設中(${districtProgressText}/${c.districtConstruction.cost})`;
                 }
-                cityInfoLine = `\n§6【${c.isCapital ? "首都" : "都市"}: ${c.name}】§f 人口:§a${c.population}§f/§e${c.housing} §f| [Worker]${c.workers ?? 0}人 §f| [Food]貯留${c.foodStorage ?? 0} §f| §c飢餓${c.starvationTurns ?? 0}/3${productionText}${tpText}${missileText}${faithStorageText}${districtProductionText}`;
+                cityInfoLine = `\n§6【${c.isCapital ? "首都" : "都市"}: ${c.name}】§f 人口:§a${c.population}§f/§e${c.housing} §f| [Worker]${getWorkerCount(c)}人 §f| [Food]貯留${c.foodStorage ?? 0} §f| §c飢餓${c.starvationTurns ?? 0}/3${productionText}${tpText}${missileText}${faithStorageText}${districtProductionText}`;
             }
 
             // アクションバーへ出力
             player.onScreenDisplay.setActionBar(
-                `§b🗺️ 補正座標: [${tx}, ${tz}] §7| §f地形: §b${terrainLabel} §7| §f資源: §e${resourceLabel}\n` +
+                `§b[Map] 補正座標: [${tx}, ${tz}] §7| §f地形: §b${terrainLabel} §7| §f資源: §e${resourceLabel}\n` +
                 `§f領有: ${ownerText}${cityText}${facilityText}${districtText}\n` +
                 `§fベース産出: ${yieldText}\n${combatUnitText}${religiousUnitText}` +
                 currentYieldLine +
@@ -245,7 +245,7 @@ system.runInterval(() => {
             );
         } else {
             // 生成されたグリッドの範囲外にプレイヤーがいる場合
-            player.onScreenDisplay.setActionBar("§7❌ 国境線の外（未開の地）にいます");
+            player.onScreenDisplay.setActionBar("§7[Warning] 国境線の外（未開の地）にいます");
         }
     }
 }, 10);
