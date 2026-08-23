@@ -3,7 +3,8 @@ import { world, BlockPermutation } from "@minecraft/server";
 import { getTurnState, setTurnState, resetAll, getTiles, setTiles, getMapConfig, getStateVersion, getMatchSettings, broadcast } from "./state.js";
 import { PRODUCTION_DEFS, tickProduction } from "./production.js";
 import { grantProgressPoints, resetProgress, hasCompletedProgress } from "./progression.js";
-import { resetDiplomacy, getRelation } from "./diplomacy.js";
+import { resetDiplomacy, getRelation, isAtWar } from "./diplomacy.js";
+import { CITY_MAX_HP, CITY_HP_REGEN_PER_TURN } from "./combat.js";
 import { getCivStorageHandle, resolveCivName, isCivControllable, removeAllBots } from "./civs.js";
 import { getBuildingAdjacencyYields, getFlagFlatYields } from "./adjacency.js";
 import { getFacilityAdjacencyYields, getFacilityFlatYields } from "./facilities.js";
@@ -48,6 +49,19 @@ function syncTurnCaches() {
 }
 export function getPlayerColor(playerId) { return getTurnState().playerColors?.[playerId] ?? "white"; }
 function getPlayerNameById(id) { return resolveCivName(id); }
+
+/** 都市(tx,tz)が「包囲」されているか(隣接8マスに、戦争状態の敵の戦闘ユニットがいるか)を判定する。
+ *  §13: 包囲中は都心のHPが自然回復しない(processPlayerTurnStart参照)。 */
+function isCityBesieged(tx, tz, playerId, tiles) {
+    for (let dz = -1; dz <= 1; dz++) {
+        for (let dx = -1; dx <= 1; dx++) {
+            if (dx === 0 && dz === 0) continue;
+            const u = tiles[`${tx + dx},${tz + dz}`]?.combatUnit;
+            if (u && u.ownerId !== playerId && isAtWar(playerId, u.ownerId)) return true;
+        }
+    }
+    return false;
+}
 
 function countCheatingBlocks(dimension, tiles, tx, tz, config) {
     const tile = tiles[`${tx},${tz}`]; let extraFood = 0, extraProd = 0;
@@ -142,7 +156,7 @@ function findInterceptingAntiAirCity(tiles,targetTx,targetTz){for(const key in t
 
 export function resolveMissileImpact(config,targetTx,targetTz){const tiles=getTiles();const interceptor=findInterceptingAntiAirCity(tiles,targetTx,targetTz);if(interceptor){interceptor.city.antiAirUsedThisTurn=true;setTiles(tiles);return`§b[AntiAir]【${interceptor.city.name}】の対空砲が (${targetTx}, ${targetTz}) へのミサイルを迎撃しました！`;}const dimension=world.getDimension("overworld"),centerX=config.originX+targetTx*TILE_SIZE+2,centerZ=config.originZ+targetTz*TILE_SIZE+2,centerY=config.ySurface+2;try{dimension.spawnParticle("minecraft:huge_explosion_emitter",{x:centerX,y:centerY,z:centerZ});}catch(e){}try{dimension.playSound("random.explode",{x:centerX,y:centerY,z:centerZ},{volume:4,pitch:0.8});}catch(e){}const targetKey=`${targetTx},${targetTz}`,targetTile=tiles[targetKey];if(!targetTile?.city)return`§7[Missile] (${targetTx}, ${targetTz}) に着弾しましたが、そこに都市はありませんでした。`;const cityName=targetTile.city.name,ownerName=targetTile.ownerName??"不明";destroyCity(tiles,targetKey,config,dimension);setTiles(tiles);checkAndAnnounceVictory(tiles);return`§c[Impact] 【${cityName}】(${ownerName})がミサイル攻撃により破壊されました！`;}
 
-function processPlayerTurnStart(playerId){const config=getMapConfig();if(!config)return;const tiles=getTiles();if(checkAndAnnounceVictory(tiles))return;const playerCities=[];let movementRefreshed=false;for(const key in tiles){const t=tiles[key],unit=t.combatUnit;if(unit?.ownerId===playerId){unit.movementRemaining=unit.movement??0;movementRefreshed=true;}const religiousUnit=t.religiousUnit;if(religiousUnit?.ownerId===playerId){religiousUnit.movementRemaining=religiousUnit.movement??0;religiousUnit.hasProselytizedThisTurn=false;religiousUnit.hasAttackedThisTurn=false;movementRefreshed=true;}if(t.ownerId===playerId&&t.city){t.city.missileLaunchedThisTurn=false;t.city.antiAirUsedThisTurn=false;playerCities.push({key,tile:t});}}if(!playerCities.length){if(movementRefreshed)setTiles(tiles);return;}
+function processPlayerTurnStart(playerId){const config=getMapConfig();if(!config)return;const tiles=getTiles();if(checkAndAnnounceVictory(tiles))return;const playerCities=[];let movementRefreshed=false;for(const key in tiles){const t=tiles[key],unit=t.combatUnit;if(unit?.ownerId===playerId){unit.movementRemaining=unit.movement??0;movementRefreshed=true;}const religiousUnit=t.religiousUnit;if(religiousUnit?.ownerId===playerId){religiousUnit.movementRemaining=religiousUnit.movement??0;religiousUnit.hasProselytizedThisTurn=false;religiousUnit.hasAttackedThisTurn=false;movementRefreshed=true;}if(t.ownerId===playerId&&t.city){t.city.missileLaunchedThisTurn=false;t.city.antiAirUsedThisTurn=false;t.city.rangedAttackUsedThisTurn=false;const[ctx,ctz]=key.split(",").map(Number);if(!isCityBesieged(ctx,ctz,playerId,tiles)&&(t.city.hp??CITY_MAX_HP)<CITY_MAX_HP)t.city.hp=Math.min(CITY_MAX_HP,(t.city.hp??CITY_MAX_HP)+CITY_HP_REGEN_PER_TURN);t.city.attackedRecently=false;playerCities.push({key,tile:t});}}if(!playerCities.length){if(movementRefreshed)setTiles(tiles);return;}
     const summaryReport=[],dimension=world.getDimension("overworld"),cityFoodIncomes={},cityProductionIncomes={},cityFaithIncomes={};const strategicIncomes={};for(const r of STRATEGIC_RESOURCES)strategicIncomes[r.key]=0;
     // 💡 キャンパス(区域)由来の科学力は、都市の産出量パイプライン(getCityCurrentYields)経由で
     //    計算されるが、他のyieldと違って都市には蓄積されず、人口由来の科学力(totalPop)と

@@ -32,6 +32,7 @@
 import { hasCompletedProgress, getDefinition } from "./progression.js";
 import { isWaterTerrain } from "./mapGen.js";
 import { getAdjacentTiles } from "./adjacency.js";
+import { WALL_MAX_HP } from "./combat.js";
 
 /** 労働者1人が持つ行動回数。 */
 export const WORKER_ACTIONS_PER_UNIT = 3;
@@ -96,6 +97,11 @@ export function getTotalWorkerActionsRemaining(city) {
  * @property {string} label 表示名
  * @property {string} icon 表示アイコン(絵文字)
  * @property {"unit"|"building"} category カテゴリ(メニュー分類用)
+ * @property {string} [unitClass] 戦闘ユニット(category:"unit")の兵種("melee"/"antiCavalry"/
+ *   "cavalry"/"ranged"/"siege"/"naval")。combat.js の UNIT_CLASS_COUNTERS によるクラス相性
+ *   ボーナス(例: 対騎兵は騎兵相手に戦闘力+10)の判定に使う。この値はメニュー表示用の参照で、
+ *   実際の戦闘計算には onComplete が配置するユニット個体データ側の unitClass を使う(両方に
+ *   同じ値を設定しておくこと)。
  * @property {number} cost 完成に必要な生産力の合計値
  * @property {boolean} [uniquePerCity] true の場合、都市に既に存在する場合は再生産不可
  * @property {(city: any) => boolean} [hasBuilt] uniquePerCity 用: 既に保有済みか判定する関数
@@ -211,10 +217,11 @@ export const PRODUCTION_DEFS = {
         icon: "[Warrior]",
         category: "unit",
         cost: 30,
+        unitClass: "melee",
         requiresEmptyCombatTile: true,
         onComplete: (city, ctx) => placeProducedCombatUnit(ctx, (ownerId, ownerName) => ({
             // 💡 attackRange: 近接ユニットのため攻撃距離は移動力と同じ(1)。domain: 陸軍ユニット。
-            id: "warrior", label: "戦士", hp: 100, maxHp: 100, combatStrength: 20,
+            id: "warrior", label: "戦士", hp: 100, maxHp: 100, combatStrength: 20, unitClass: "melee",
             movement: 1, movementRemaining: 1, attackRange: 1, domain: "land", ownerId, ownerName,
         })),
         completeMessage: (city) => `§e[Warrior]【${city.name}】に戦士を配置しました！ (HP: 100/100、戦闘力: 20)`,
@@ -224,12 +231,13 @@ export const PRODUCTION_DEFS = {
         icon: "[Archer]",
         category: "unit",
         cost: 50,
+        unitClass: "ranged",
         requiresEmptyCombatTile: true,
         requiresTechnology: "archery",
         onComplete: (city, ctx) => placeProducedCombatUnit(ctx, (ownerId, ownerName) => ({
             // 💡 弓兵は遠距離戦闘ユニット: 遠距離戦闘力20、近距離戦闘力15の2種類の戦闘力を持つ。
             //    combatStrength は互換表示用に近距離戦闘力と同じ値を入れておく。domain: 陸軍ユニット。
-            id: "archer", label: "弓兵", hp: 100, maxHp: 100,
+            id: "archer", label: "弓兵", hp: 100, maxHp: 100, unitClass: "ranged",
             combatStrength: 15, rangedCombatStrength: 20, meleeCombatStrength: 15,
             movement: 1, movementRemaining: 1, attackRange: 2, domain: "land", ownerId, ownerName,
         })),
@@ -252,11 +260,12 @@ export const PRODUCTION_DEFS = {
         icon: "[Battleship]",
         category: "unit",
         cost: 60,
+        unitClass: "naval",
         // 💡 都市自身のマスではなく、隣接する水上マス(海・川・池・湖)に配置される海軍ユニット。
         //    隣接する水上マスが無い(内陸の都市)場合は生産完了時に中止される。
         onComplete: (city, ctx) => placeProducedNavalUnit(ctx, (ownerId, ownerName) => ({
             // 💡 domain: 海軍ユニット。水上マスにしか進入できない。
-            id: "battleship", label: "軍艦", hp: 100, maxHp: 100, combatStrength: 25,
+            id: "battleship", label: "軍艦", hp: 100, maxHp: 100, combatStrength: 25, unitClass: "naval",
             movement: 2, movementRemaining: 2, attackRange: 3, domain: "naval", ownerId, ownerName,
         })),
         completeMessage: (city) => `§e[Battleship]【${city.name}】に軍艦を配置しました！ (HP: 100/100、戦闘力: 25)`,
@@ -266,23 +275,27 @@ export const PRODUCTION_DEFS = {
         icon: "[Spearman]",
         category: "unit",
         cost: 45,
+        unitClass: "antiCavalry",
         requiresEmptyCombatTile: true,
         requiresTechnology: "bronzeWorking",
         onComplete: (city, ctx) => placeProducedCombatUnit(ctx, (ownerId, ownerName) => ({
-            id: "spearman", label: "槍兵", hp: 100, maxHp: 100, combatStrength: 32,
+            // 💡 対騎兵(antiCavalry): 単体の戦闘力は控えめだが、騎兵(cavalry)クラス相手には
+            //    combat.js の UNIT_CLASS_COUNTERS により戦闘力+10される専門兵科。
+            id: "spearman", label: "槍兵", hp: 100, maxHp: 100, combatStrength: 32, unitClass: "antiCavalry",
             movement: 1, movementRemaining: 1, attackRange: 1, domain: "land", ownerId, ownerName,
         })),
-        completeMessage: (city) => `§e[Spearman]【${city.name}】に槍兵を配置しました！ (HP: 100/100、戦闘力: 32)`,
+        completeMessage: (city) => `§e[Spearman]【${city.name}】に槍兵を配置しました！ (HP: 100/100、戦闘力: 32、対騎兵+10)`,
     },
     horseman: {
         label: "騎兵",
         icon: "[Horseman]",
         category: "unit",
         cost: 75,
+        unitClass: "cavalry",
         requiresEmptyCombatTile: true,
         requiresTechnology: "horsebackRiding",
         onComplete: (city, ctx) => placeProducedCombatUnit(ctx, (ownerId, ownerName) => ({
-            id: "horseman", label: "騎兵", hp: 100, maxHp: 100, combatStrength: 30,
+            id: "horseman", label: "騎兵", hp: 100, maxHp: 100, combatStrength: 30, unitClass: "cavalry",
             movement: 3, movementRemaining: 3, attackRange: 1, domain: "land", ownerId, ownerName,
         })),
         completeMessage: (city) => `§e[Horseman]【${city.name}】に騎兵を配置しました！ (HP: 100/100、戦闘力: 30、移動力: 3)`,
@@ -292,10 +305,11 @@ export const PRODUCTION_DEFS = {
         icon: "[Swordsman]",
         category: "unit",
         cost: 90,
+        unitClass: "melee",
         requiresEmptyCombatTile: true,
         requiresTechnology: "ironWorking",
         onComplete: (city, ctx) => placeProducedCombatUnit(ctx, (ownerId, ownerName) => ({
-            id: "swordsman", label: "剣士", hp: 100, maxHp: 100, combatStrength: 48,
+            id: "swordsman", label: "剣士", hp: 100, maxHp: 100, combatStrength: 48, unitClass: "melee",
             movement: 1, movementRemaining: 1, attackRange: 1, domain: "land", ownerId, ownerName,
         })),
         completeMessage: (city) => `§e[Swordsman]【${city.name}】に剣士を配置しました！ (HP: 100/100、戦闘力: 48)`,
@@ -305,11 +319,12 @@ export const PRODUCTION_DEFS = {
         icon: "[Catapult]",
         category: "unit",
         cost: 100,
+        unitClass: "siege",
         requiresEmptyCombatTile: true,
         requiresTechnology: "engineering",
         onComplete: (city, ctx) => placeProducedCombatUnit(ctx, (ownerId, ownerName) => ({
             // 💡 攻城ユニット: 遠距離戦闘力40だが近距離戦闘力(反撃を受けた際の値)は12と低め。
-            id: "catapult", label: "カタパルト", hp: 100, maxHp: 100,
+            id: "catapult", label: "カタパルト", hp: 100, maxHp: 100, unitClass: "siege",
             combatStrength: 12, rangedCombatStrength: 40, meleeCombatStrength: 12,
             movement: 1, movementRemaining: 1, attackRange: 2, domain: "land", ownerId, ownerName,
         })),
@@ -320,10 +335,11 @@ export const PRODUCTION_DEFS = {
         icon: "[Crossbowman]",
         category: "unit",
         cost: 110,
+        unitClass: "ranged",
         requiresEmptyCombatTile: true,
         requiresTechnology: "machinery",
         onComplete: (city, ctx) => placeProducedCombatUnit(ctx, (ownerId, ownerName) => ({
-            id: "crossbowman", label: "重装弓兵", hp: 100, maxHp: 100,
+            id: "crossbowman", label: "重装弓兵", hp: 100, maxHp: 100, unitClass: "ranged",
             combatStrength: 25, rangedCombatStrength: 38, meleeCombatStrength: 25,
             movement: 1, movementRemaining: 1, attackRange: 2, domain: "land", ownerId, ownerName,
         })),
@@ -334,10 +350,11 @@ export const PRODUCTION_DEFS = {
         icon: "[Cruiser]",
         category: "unit",
         cost: 140,
+        unitClass: "naval",
         requiresTechnology: "shipBuilding",
         // 💡 軍艦と同じく、都市に隣接する水上マスへ配置される海軍ユニット。
         onComplete: (city, ctx) => placeProducedNavalUnit(ctx, (ownerId, ownerName) => ({
-            id: "cruiser", label: "巡洋艦", hp: 100, maxHp: 100, combatStrength: 50,
+            id: "cruiser", label: "巡洋艦", hp: 100, maxHp: 100, combatStrength: 50, unitClass: "naval",
             movement: 3, movementRemaining: 3, attackRange: 4, domain: "naval", ownerId, ownerName,
         })),
         completeMessage: (city) => `§e[Cruiser]【${city.name}】に巡洋艦を配置しました！ (HP: 100/100、戦闘力: 50)`,
@@ -430,6 +447,21 @@ export const PRODUCTION_DEFS = {
         flatYields: { production: 2 },
         onComplete: (city) => { city.trainingGround = true; },
         completeMessage: (city) => `§e[Complete]【${city.name}】訓練場が完成しました！ (生産力+2)`,
+    },
+    wall: {
+        label: "防壁",
+        icon: "[Wall]",
+        category: "building",
+        cost: 80,
+        uniquePerCity: true,
+        hasBuilt: (city) => !!city.wall,
+        requiresTechnology: "masonry",
+        // 💡 効果そのもの(遠距離攻撃の解禁、被ダメージ軽減、+100のシールドHP)はflatYields等では
+        //    表現できない特殊効果のため、combat.js の resolveCityAttack/getWallDamageMultiplier や
+        //    commands.js の都市の遠距離攻撃コマンドが city.wall / city.wallHp を直接見て判定する
+        //    (§13参照)。
+        onComplete: (city) => { city.wall = true; city.wallHp = WALL_MAX_HP; },
+        completeMessage: (city) => `§e[Complete]【${city.name}】に防壁が完成しました！ (シールドHP+${WALL_MAX_HP}、遠距離攻撃が可能に、被ダメージ軽減: 近接15%/遠隔50%/攻城100%)`,
     },
     capital: {
         label: "遷都",

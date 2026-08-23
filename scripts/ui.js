@@ -14,7 +14,11 @@ import {
 } from "./religion.js";
 import { getDefinitions, getKindLabel, getPointsLabel, getProgressState, hasCompletedProgress, getDefinition } from "./progression.js";
 import { getRelation, sendRequest, getRequestsFor, acceptRequest, rejectRequest, breakRelation, declareWar, isAtWar, hasDiplomaticAgreement } from "./diplomacy.js";
-import { getAttackRange, getAttackableTargets, getEffectiveCombatStrength, isRangedUnit, getEffectiveRangedStrength, canUnitEnterTile, canTravelPath } from "./combat.js";
+import {
+    getAttackRange, getAttackableTargets, getAttackableCityTargets, getEffectiveCombatStrength,
+    isRangedUnit, getEffectiveRangedStrength, canUnitEnterTile, canTravelPath, getUnitClassLabel,
+    CITY_MAX_HP, WALL_MAX_HP, CITY_RANGED_ATTACK_RANGE, getBestRangedCombatStrength,
+} from "./combat.js";
 import { resolveOwningCityKey, getAdjacentTileEntries } from "./adjacency.js";
 import { getRealPlayer, getControllableCivs, getActiveCivId, setActiveCivId, addVirtualCiv, removeVirtualCiv, getCivStorageHandle, resolveCivName, getVirtualCivById } from "./civs.js";
 import { refreshUnitLabelAt } from "./unitLabels.js";
@@ -165,6 +169,7 @@ function describeMapViewTile(tx, tz, tile) {
 
     if (tile.city) {
         const color = tile.ownerId ? getPlayerColor(tile.ownerId) : "white";
+        lore.push(`§c[HP] ${Math.max(0, Math.round(tile.city.hp ?? CITY_MAX_HP))}/${CITY_MAX_HP}${tile.city.wall ? ` §b[Wall] ${Math.max(0, Math.round(tile.city.wallHp ?? WALL_MAX_HP))}/${WALL_MAX_HP}` : ""}`);
         return {
             icon: `minecraft:${color}_banner`,
             name: `§e[City] ${tile.city.name ?? "都市"}${tile.city.isCapital ? " §6(首都)" : ""}`,
@@ -364,8 +369,14 @@ export async function openMainMenu(player) {
                     || currentTile.ownerId === player.id
                     || hasDiplomaticAgreement(player.id, currentTile.ownerId);
 
+                // 💡 都心のHP/防壁シールドは「攻め落とせるかどうか」の判断に直結する軍事情報のため、
+                //    人口・生産などとは違い、敵国の都市でも常に表示する(§13)。
+                const cityHpText = `§c[HP] ${Math.max(0, Math.round(city.hp ?? CITY_MAX_HP))}/${CITY_MAX_HP}` +
+                    (city.wall ? ` §f| §b[Wall] ${Math.max(0, Math.round(city.wallHp ?? WALL_MAX_HP))}/${WALL_MAX_HP}` : " §7(防壁なし)");
+
                 if (!isFriendlyCity) {
                     body.push(`\n§6【${city.isCapital ? "首都" : "地方都市"}: ${city.name}】 §7(他国の都市のため詳細情報は非表示)`);
+                    body.push(`§f  - ${cityHpText}`);
                 } else {
                 const threshold = 10 + (city.population - 1) * 2;
                 const totalIncome = incomes[`${tx},${tz}`] ?? 0;
@@ -373,6 +384,7 @@ export async function openMainMenu(player) {
                 const currentYields = getCityCurrentYields(`${tx},${tz}`, allTiles);
 
                 body.push(`\n§6【${city.isCapital ? "首都" : "地方都市"}: ${city.name}】`);
+                body.push(`§f  - ${cityHpText}`);
                 body.push(`§f  - 人口: §a${city.population} §f/ 住宅上限: §e${city.housing} §f| [Worker] 労働者: §b${getWorkerCount(city)} 人 §7(残り行動:${getTotalWorkerActionsRemaining(city)})`);
                 body.push(`§f  - [Yield] 現市民の選択総出力: §6[Food]x${currentYields.food} §f/ §e[Prod]x${currentYields.production} §f/ §d[Faith]x${currentYields.faith ?? 0} §f/ §7[Iron]x${currentYields.iron ?? 0}${currentYields.science ? ` §f/ §b[Science]x${currentYields.science}` : ""}`);
 
@@ -510,6 +522,14 @@ export async function openMainMenu(player) {
     if (currentTile && currentTile.city && currentTile.ownerId === player.id && hasFoundedReligion(player)) {
         buttons.push({ text: "§d[Faith] 宗教ユニットを購入する", action: "buyreligious" });
     }
+    if (currentTile && currentTile.city && currentTile.ownerId === player.id && currentTile.city.wall) {
+        if (!currentTile.city.rangedAttackUsedThisTurn) {
+            buttons.push({ text: "§c[Siege] 都市の遠距離攻撃", action: "citychargedattack" });
+        }
+        if ((currentTile.city.wallHp ?? WALL_MAX_HP) < WALL_MAX_HP && !currentTile.city.attackedRecently) {
+            buttons.push({ text: "§a[Repair] 防壁を修理する (労働者の行動回数を1消費)", action: "repairwall" });
+        }
+    }
     if (currentTile?.combatUnit?.ownerId === player.id) {
         buttons.push({ text: "§f ユニットの移動", action: "moveunit" });
         buttons.push({ text: "§c[Combat] ユニットの攻撃", action: "attackunit" });
@@ -626,6 +646,12 @@ export async function openMainMenu(player) {
             break;
         case "healunit":
             if (currentTile?.combatUnit?.ownerId === player.id) (await import("./commands.js")).cmdHealCombatUnit(player, tx, tz);
+            break;
+        case "citychargedattack":
+            if (currentTile?.city && currentTile.ownerId === player.id) await openCityRangedAttackMenu(player, tx, tz);
+            break;
+        case "repairwall":
+            if (currentTile?.city && currentTile.ownerId === player.id) (await import("./commands.js")).cmdRepairWall(player, tx, tz);
             break;
 
         // 💡 新機能: 生産メニュー(ユニット/建造物)を開く
@@ -1760,7 +1786,8 @@ async function openProductionCategoryMenu(player, tx, tz, category) {
             }
 
             const estTurns = production > 0 ? Math.ceil(def.cost / production) : "--";
-            buttons.push({ text: `${def.icon} ${def.label}を生産する (必要生産力:${def.cost}、予測:約${estTurns}T)`, action: `start:${id}` });
+            const classTag = def.unitClass ? `§7[${getUnitClassLabel(def.unitClass)}]§r ` : "";
+            buttons.push({ text: `${classTag}${def.icon} ${def.label}を生産する (必要生産力:${def.cost}、予測:約${estTurns}T)`, action: `start:${id}` });
         }
     }
 
@@ -2330,7 +2357,7 @@ async function openCombatUnitAttackMenu(player, fromTx, fromTz) {
     const range = getAttackRange(unit);
     const items = [];
     const body = [
-        `${unit.label ?? "戦闘ユニット"}  HP: ${unit.hp ?? 0}/${unit.maxHp ?? 100}  戦闘力: ${getEffectiveCombatStrength(unit)}(基本${unit.combatStrength ?? 0})`,
+        `${unit.label ?? "戦闘ユニット"} §7(${getUnitClassLabel(unit.unitClass)})§r  HP: ${unit.hp ?? 0}/${unit.maxHp ?? 100}  戦闘力: ${getEffectiveCombatStrength(unit)}(基本${unit.combatStrength ?? 0})`,
         `攻撃距離: ${range} | 残り移動力: ${remaining}`,
     ];
     const config = getMapConfig();
@@ -2339,20 +2366,29 @@ async function openCombatUnitAttackMenu(player, fromTx, fromTz) {
     if (remaining > 0) {
         // 💡 攻撃できるのは宣戦布告済み(戦争状態)の相手のみ。hasAgreementFnは「除外する」述語なので、
         //    戦争状態でない相手を除外する形で渡す。
-        const attackTargets = getAttackableTargets(fromTx, fromTz, player.id, unit, tiles, config, (a, b) => !isAtWar(a, b));
+        const hasAgreementFn = (a, b) => !isAtWar(a, b);
+        const attackTargets = getAttackableTargets(fromTx, fromTz, player.id, unit, tiles, config, hasAgreementFn);
         for (const t of attackTargets) {
             const enemyUnit = t.unit;
-            const cityText = t.tile.city ? ` | 都市: ${t.tile.city.name}` : "";
             items.push({
-                text: `[Combat] (${t.tx}, ${t.tz}) | ${enemyUnit.label ?? enemyUnit.id} HP:${Math.max(0, Math.round(enemyUnit.hp ?? 0))}/${enemyUnit.maxHp ?? 100} 戦闘力:${getEffectiveCombatStrength(enemyUnit)}${cityText}`,
-                action: { tx: t.tx, tz: t.tz },
+                text: `[Combat] (${t.tx}, ${t.tz}) | ${enemyUnit.label ?? enemyUnit.id}(${getUnitClassLabel(enemyUnit.unitClass)}) HP:${Math.max(0, Math.round(enemyUnit.hp ?? 0))}/${enemyUnit.maxHp ?? 100} 戦闘力:${getEffectiveCombatStrength(enemyUnit)}`,
+                action: { type: "unit", tx: t.tx, tz: t.tz },
+            });
+        }
+        // 💡 都市(都心)は駐留ユニットとは別枠の攻撃対象(§13)。HP・防壁シールドを表示する。
+        const cityTargets = getAttackableCityTargets(fromTx, fromTz, player.id, unit, tiles, config, hasAgreementFn);
+        for (const t of cityTargets) {
+            const wallText = t.city.wall ? ` §b[Wall]${Math.max(0, Math.round(t.city.wallHp ?? WALL_MAX_HP))}/${WALL_MAX_HP}` : "";
+            items.push({
+                text: `[Siege] (${t.tx}, ${t.tz}) | 都市【${t.city.name}】 HP:${Math.max(0, Math.round(t.city.hp ?? CITY_MAX_HP))}/${CITY_MAX_HP}${wallText}`,
+                action: { type: "city", tx: t.tx, tz: t.tz },
             });
         }
     } else {
         body.push("§7移動力が残っていないため攻撃できません。次の自分のターン開始時に回復します。");
     }
 
-    if (items.length === 0 && remaining > 0) body.push("§7攻撃可能な対象(攻撃距離内の敵ユニット)がありません。");
+    if (items.length === 0 && remaining > 0) body.push("§7攻撃可能な対象(攻撃距離内の敵ユニット・都市)がありません。");
 
     await showPaginatedMenu(
         getRealPlayer(player),
@@ -2360,8 +2396,47 @@ async function openCombatUnitAttackMenu(player, fromTx, fromTz) {
         body.join("\n"),
         items,
         async (action) => {
-            (await import("./commands.js")).cmdAttackCombatUnit(player, fromTx, fromTz, action.tx, action.tz);
+            const commands = await import("./commands.js");
+            if (action.type === "city") commands.cmdAttackCity(player, fromTx, fromTz, action.tx, action.tz);
+            else commands.cmdAttackCombatUnit(player, fromTx, fromTz, action.tx, action.tz);
         },
+        async () => { await openMainMenu(player); },
+    );
+}
+
+/** [Siege] 防壁を持つ都市の遠距離攻撃メニュー。範囲内(CITY_RANGED_ATTACK_RANGE)の敵ユニットを一覧表示する。 */
+async function openCityRangedAttackMenu(player, cityTx, cityTz) {
+    const tile = getTile(cityTx, cityTz);
+    const city = tile?.city;
+    if (!city || tile.ownerId !== player.id || !city.wall) { await openMainMenu(player); return; }
+
+    const config = getMapConfig();
+    const tiles = getTiles();
+    const cityRangedStrength = getBestRangedCombatStrength(player.id, tiles);
+    const body = [`【${city.name}】の遠距離攻撃 (戦闘力:${cityRangedStrength}、範囲:${CITY_RANGED_ATTACK_RANGE})`];
+    const items = [];
+
+    if (city.rangedAttackUsedThisTurn) {
+        body.push("§7この都市は今ターン既に遠距離攻撃を行いました。(1ターン1回まで)");
+    } else {
+        // 💡 都市の遠距離攻撃は「移動力」を持たないため、攻撃範囲だけを持つ疑似ユニットを
+        //    getAttackableTargets に渡して、既存の範囲探索ロジックをそのまま再利用する。
+        const pseudoUnit = { attackRange: CITY_RANGED_ATTACK_RANGE };
+        const targets = getAttackableTargets(cityTx, cityTz, player.id, pseudoUnit, tiles, config, (a, b) => !isAtWar(a, b));
+        for (const t of targets) {
+            const enemyUnit = t.unit;
+            items.push({
+                text: `[Combat] (${t.tx}, ${t.tz}) | ${enemyUnit.label ?? enemyUnit.id}(${getUnitClassLabel(enemyUnit.unitClass)}) HP:${Math.max(0, Math.round(enemyUnit.hp ?? 0))}/${enemyUnit.maxHp ?? 100} 戦闘力:${getEffectiveCombatStrength(enemyUnit)}`,
+                action: { tx: t.tx, tz: t.tz },
+            });
+        }
+        body.push("§7攻撃対象を選んでください(反撃はありません)。");
+        if (items.length === 0) body.push("§7範囲内に敵ユニットがいません。");
+    }
+
+    await showPaginatedMenu(
+        getRealPlayer(player), "[Siege] 都市の遠距離攻撃", body.join("\n"), items,
+        async (action) => { (await import("./commands.js")).cmdCityRangedAttack(player, cityTx, cityTz, action.tx, action.tz); },
         async () => { await openMainMenu(player); },
     );
 }

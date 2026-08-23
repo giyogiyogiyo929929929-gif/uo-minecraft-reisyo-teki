@@ -6,7 +6,13 @@ import { joinGame, turnInfoText, isPlayersTurn, endGame, getTurnState, setTurnSt
 import { PRODUCTION_DEFS, canStartProduction, startProduction, cancelProduction, addWorkers, consumeWorkerAction, hasAvailableWorkerAction, getProductionIds } from "./production.js";
 import { getDefinition, getKindLabel, startProgress, getDefinitions } from "./progression.js";
 import { hasDiplomaticAgreement, signAgreement, isAtWar } from "./diplomacy.js";
-import { getAttackRange, resolveCombat, tileDistance, canUnitEnterTerrain, canUnitEnterOwnership, countFlankingAllies, getFlankingBonus, canTravelPath } from "./combat.js";
+import {
+    getAttackRange, resolveCombat, tileDistance, canUnitEnterTerrain, canUnitEnterOwnership,
+    canUnitEnterCityTile, countFlankingAllies, getFlankingBonus, canTravelPath,
+    getAttackableCityTargets, getCityCombatStrength, getBestRangedCombatStrength,
+    resolveCityAttack, resolveCityRangedAttack, isMeleeUnitClass,
+    CITY_MAX_HP, WALL_MAX_HP, CITY_RANGED_ATTACK_RANGE,
+} from "./combat.js";
 import { addVirtualCiv, getControllableCivs, getActiveCivId, setActiveCivId, getActingPlayer, getOnlinePlayerById, getRealPlayer } from "./civs.js";
 import { getFacilityDef, canInstallFacility, installFacility, getFacilityIds } from "./facilities.js";
 import { resolveOwningCityKey } from "./adjacency.js";
@@ -645,7 +651,8 @@ export function cmdSettle(player) {
         isCapital: isCapital,
         tradingPost: null,     // 交易所データ用の初期スロット(完成すると { status: "active", routes: [] } になる)
         production: null,      // 💡 進行中の生産 { id, progress, cost } | null (production.js で管理)
-        productionCarry: 0     // 💡 中断/完了時に余った生産力(次の生産に引き継ぐ)
+        productionCarry: 0,    // 💡 中断/完了時に余った生産力(次の生産に引き継ぐ)
+        hp: CITY_MAX_HP,        // 💡 都心のHP(§13)。0になるまで敵ユニットは進入できない
     };
     if (initWorkers > 0) addWorkers(tile.city, initWorkers);
     if (isCapital) player.setDynamicProperty("civ:hasFoundedCapital", true);
@@ -1491,6 +1498,10 @@ export function cmdMoveCombatUnit(player, fromTx, fromTz, toTx, toTz) {
         reply(player, "§c「関係なし」の相手の領土には移動できません。宣戦布告するか、不可侵条約/同盟を結んでください。");
         return { ok: false };
     }
+    if (!canUnitEnterCityTile(unit, target)) {
+        reply(player, `§c【${target.city.name}】はまだ都心のHPが残っているため進入できません。(現在HP: ${Math.max(0, Math.round(target.city.hp ?? CITY_MAX_HP))}/${CITY_MAX_HP})`);
+        return { ok: false };
+    }
 
     const distance = Math.max(Math.abs(toTx - fromTx), Math.abs(toTz - fromTz));
     const remaining = unit.movementRemaining ?? unit.movement ?? 0;
@@ -1524,6 +1535,9 @@ export function cmdAttackCombatUnit(player, fromTx, fromTz, toTx, toTz) {
     const attacker = source?.combatUnit;
     if (!attacker || attacker.ownerId !== player.id) { reply(player, "§cこのマスに攻撃可能なあなたの戦闘ユニットはいません。"); return { ok: false }; }
     if (!target) { reply(player, "§c攻撃先がマップ外です。"); return { ok: false }; }
+    // 💡 都市のマスに駐留するユニットは、都市自身が防衛の主体になるため直接攻撃できない
+    //    (§13)。都市そのものを攻撃するには cmdAttackCity を使う。
+    if (target.city) { reply(player, "§cこのマスには都市があります。都市への攻撃は別のコマンド/メニューから行ってください。"); return { ok: false }; }
 
     const defender = target.combatUnit;
     if (!defender) { reply(player, "§c攻撃先に戦闘ユニットが存在しません。"); return { ok: false }; }
@@ -1583,6 +1597,74 @@ export function cmdAttackCombatUnit(player, fromTx, fromTz, toTx, toTz) {
 }
 
 /**
+ * 戦闘ユニットで、攻撃距離内にある敵の都市(都心)を攻撃する。都市のマスに戦闘ユニットが
+ * 駐留していても、都市自身が防衛の主体になるため(§13)、cmdAttackCombatUnitとは別のこの
+ * コマンドを使う(駐留ユニット自体は直接の攻撃対象にならない。都市戦闘力の算出に寄与するのみ)。
+ * 攻撃を行うと、そのユニットは今ターンの残り移動力を使い切る。
+ */
+export function cmdAttackCity(player, fromTx, fromTz, cityTx, cityTz) {
+    const config = getMapConfig();
+    if (!config) { reply(player, "§cマップ未生成です。"); return { ok: false }; }
+    if (!isPlayersTurn(player)) { reply(player, "§cあなたのターンではありません。"); return { ok: false }; }
+
+    const source = getTile(fromTx, fromTz);
+    const attacker = source?.combatUnit;
+    if (!attacker || attacker.ownerId !== player.id) { reply(player, "§cこのマスに攻撃可能なあなたの戦闘ユニットはいません。"); return { ok: false }; }
+
+    const allTiles = getTiles();
+    const target = allTiles[`${cityTx},${cityTz}`];
+    if (!target?.city) { reply(player, "§c攻撃先に都市がありません。"); return { ok: false }; }
+    if (target.ownerId === player.id) { reply(player, "§c自分の都市は攻撃できません。"); return { ok: false }; }
+    if (!isAtWar(player.id, target.ownerId)) { reply(player, "§c宣戦布告していない相手の都市は攻撃できません。外交メニューから宣戦布告してください。"); return { ok: false }; }
+
+    const remaining = attacker.movementRemaining ?? attacker.movement ?? 0;
+    if (remaining <= 0) { reply(player, "§c移動力が残っていないため攻撃できません。"); return { ok: false }; }
+
+    const range = getAttackRange(attacker);
+    const distance = tileDistance(fromTx, fromTz, cityTx, cityTz);
+    if (distance < 1 || distance > range) { reply(player, "§cそのマスは攻撃距離外です。"); return { ok: false }; }
+
+    const attackerLabel = attacker.label ?? "戦闘ユニット";
+    const cityName = target.city.name;
+
+    const garrisonUnit = target.combatUnit?.ownerId === target.ownerId ? target.combatUnit : null;
+    const cityStrength = getCityCombatStrength(target.ownerId, allTiles, garrisonUnit);
+    const result = resolveCityAttack(attacker, target.city, cityStrength);
+    attacker.movementRemaining = 0;
+    source.combatUnit = attacker;
+
+    const lines = [];
+    lines.push(`§c[Siege] ${player.name} の${attackerLabel} (${fromTx}, ${fromTz}) が【${cityName}】(${cityTx}, ${cityTz}) を攻撃！`);
+    lines.push(target.city.wall
+        ? `§7防壁軽減後ダメージ: ${result.damage} (シールド: -${result.wallDamage} / 都心HP: -${result.hpDamage})`
+        : `§7ダメージ: ${result.damage}`);
+
+    if (result.cityDestroyed) {
+        lines.push(`§c[Fall]【${cityName}】の都心HPが0になりました！ 敵ユニットが進入・占領できるようになります。`);
+    } else {
+        const wallText = target.city.wall ? ` §7| シールド: ${Math.max(0, Math.round(target.city.wallHp ?? 0))}/${WALL_MAX_HP}` : "";
+        lines.push(`§7  -> 【${cityName}】 残りHP: ${Math.max(0, Math.round(target.city.hp))}/${CITY_MAX_HP}${wallText}`);
+        if (result.counterSkippedReason === "notMelee") {
+            lines.push(`§7遠距離/攻城ユニットのため、都市からの反撃はありません。`);
+        } else {
+            lines.push(`§7都市からの反撃ダメージ: ${result.counterDamage} (都市戦闘力: ${cityStrength})`);
+            if (result.attackerDestroyed) {
+                lines.push(`§c[Defeated] ${attackerLabel}は都市の反撃により撃破されました！`);
+                source.combatUnit = null;
+                refreshUnitLabelAt(fromTx, fromTz);
+            } else {
+                lines.push(`§7  -> ${attackerLabel} 残りHP: ${Math.max(0, Math.round(attacker.hp))}/${attacker.maxHp ?? 100}`);
+            }
+        }
+    }
+
+    setTile(fromTx, fromTz, source);
+    setTile(cityTx, cityTz, target);
+    broadcast(lines.join("\n"));
+    return { ok: true, result };
+}
+
+/**
  * 都市に自分の戦闘ユニットが存在し、かつそのユニットの移動力が最大値のまま(今ターン未行動)
  * であれば、その都市を占領してオーナーを自分に切り替える。
  * この都市に帰属していた領有マス(belongsToCityKey が一致するマス)も同時に占領する。
@@ -1614,6 +1696,13 @@ export function cmdCaptureCity(player, tx, tz) {
     tile.ownerName = player.name;
     unit.movementRemaining = 0;
     tile.combatUnit = unit;
+
+    // 💡 占領した都市の都心HP・防壁シールドは満タンに戻す(占領直後にすぐ奪い返されるのを防ぐ、
+    //    新しい統治下での再出発という位置づけ)。防壁そのものは破壊せず引き継ぐ(他の建造物と同じ)。
+    tile.city.hp = CITY_MAX_HP;
+    if (tile.city.wall) tile.city.wallHp = WALL_MAX_HP;
+    tile.city.attackedRecently = false;
+    tile.city.rangedAttackUsedThisTurn = false;
 
     // 💡 占領した都市はそのまま自分の首都にはならない(通常の都市として扱う)。
     //    首都を占領しても占領側にそのまま首都権が移ってしまうバグの修正。
@@ -1680,6 +1769,77 @@ export function cmdCaptureCity(player, tx, tz) {
     const capitalText = capturedCapital ? " §c(相手の首都を陥落させました！)" : "";
     broadcast(`§6[Capture] ${player.name} が ${previousOwnerName} の【${cityName}】を占領しました！${extraText}${capitalText}`);
     checkAndAnnounceVictory(tiles);
+    return { ok: true };
+}
+
+/**
+ * 防壁(city.wall)を持つ都市が、範囲CITY_RANGED_ATTACK_RANGE内の敵ユニットへ遠距離攻撃する。
+ * 戦闘力は自国最強の遠距離系ユニットの遠距離戦闘力(getBestRangedCombatStrength)と等しい。
+ * 反撃は発生しない(都市は動けないため、防御側の攻撃範囲を問わず一方的に成立する)。
+ * 1都市につき1ターン1回まで(city.rangedAttackUsedThisTurn。processPlayerTurnStartでリセット)。
+ */
+export function cmdCityRangedAttack(player, cityTx, cityTz, targetTx, targetTz) {
+    const config = getMapConfig();
+    if (!config) { reply(player, "§cマップ未生成です。"); return { ok: false }; }
+    if (!isPlayersTurn(player)) { reply(player, "§cあなたのターンではありません。"); return { ok: false }; }
+
+    const allTiles = getTiles();
+    const cityTile = allTiles[`${cityTx},${cityTz}`];
+    if (!cityTile?.city || cityTile.ownerId !== player.id) { reply(player, "§cそのマスにあなたの都市がありません。"); return { ok: false }; }
+    if (!cityTile.city.wall) { reply(player, "§cこの都市には防壁が無いため、遠距離攻撃できません。"); return { ok: false }; }
+    if (cityTile.city.rangedAttackUsedThisTurn) { reply(player, "§cこの都市は今ターン既に遠距離攻撃を行いました。(1ターン1回まで)"); return { ok: false }; }
+
+    const distance = tileDistance(cityTx, cityTz, targetTx, targetTz);
+    if (distance < 1 || distance > CITY_RANGED_ATTACK_RANGE) { reply(player, "§cそのマスは都市の遠距離攻撃範囲外です。"); return { ok: false }; }
+
+    const targetTile = allTiles[`${targetTx},${targetTz}`];
+    const defender = targetTile?.combatUnit;
+    if (!defender) { reply(player, "§c攻撃先に戦闘ユニットが存在しません。"); return { ok: false }; }
+    if (defender.ownerId === player.id) { reply(player, "§c自分のユニットは攻撃できません。"); return { ok: false }; }
+    if (!isAtWar(player.id, defender.ownerId)) { reply(player, "§c宣戦布告していない相手のユニットは攻撃できません。外交メニューから宣戦布告してください。"); return { ok: false }; }
+
+    const cityRangedStrength = getBestRangedCombatStrength(player.id, allTiles);
+    const result = resolveCityRangedAttack(cityRangedStrength, defender);
+    cityTile.city.rangedAttackUsedThisTurn = true;
+
+    const defenderLabel = defender.label ?? "戦闘ユニット";
+    let message = `§c[Siege] ${player.name} の【${cityTile.city.name}】(遠距離戦闘力:${cityRangedStrength})が (${targetTx}, ${targetTz}) の${defenderLabel}に${result.damage}ダメージ！`;
+
+    if (result.defenderDestroyed) {
+        message += ` §c撃破した！`;
+        targetTile.combatUnit = null;
+        refreshUnitLabelAt(targetTx, targetTz);
+    } else {
+        message += ` §7(残りHP: ${Math.max(0, Math.round(defender.hp))}/${defender.maxHp ?? 100})`;
+    }
+
+    setTile(cityTx, cityTz, cityTile);
+    setTile(targetTx, targetTz, targetTile);
+    broadcast(message);
+    return { ok: true };
+}
+
+/**
+ * 防壁の耐久(city.wallHp)を修理する。都市が直近で攻撃を受けていない(city.attackedRecently が
+ * false)場合のみ、帰属都市の労働者の行動回数を1消費して、シールドHPを満タンまで回復する。
+ */
+export function cmdRepairWall(player, tx, tz) {
+    const config = getMapConfig();
+    if (!config) { reply(player, "§cマップ未生成です。"); return { ok: false }; }
+    if (!isPlayersTurn(player)) { reply(player, "§cあなたのターンではありません。"); return { ok: false }; }
+
+    const tile = getTile(tx, tz);
+    if (!tile?.city || tile.ownerId !== player.id) { reply(player, "§cそのマスにあなたの都市がありません。"); return { ok: false }; }
+    if (!tile.city.wall) { reply(player, "§cこの都市には防壁がありません。"); return { ok: false }; }
+    if ((tile.city.wallHp ?? WALL_MAX_HP) >= WALL_MAX_HP) { reply(player, "§c防壁は既に満タンです。"); return { ok: false }; }
+    if (tile.city.attackedRecently) { reply(player, "§c直近のターンで攻撃を受けた都市の防壁は修理できません。"); return { ok: false }; }
+    if (!hasAvailableWorkerAction(tile.city)) { reply(player, `§c[Fail] 労働者が足りません！この作業には帰属都市【${tile.city.name}】の労働者が必要です。`); return { ok: false }; }
+
+    consumeWorkerAction(tile.city);
+    tile.city.wallHp = WALL_MAX_HP;
+    setTile(tx, tz, tile);
+
+    broadcast(`§e[Repair] ${player.name} が【${tile.city.name}】の防壁を修理しました！ (シールドHP: ${WALL_MAX_HP}/${WALL_MAX_HP})`);
     return { ok: true };
 }
 

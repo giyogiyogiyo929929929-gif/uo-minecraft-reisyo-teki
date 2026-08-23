@@ -33,6 +33,8 @@ export const TECHNOLOGIES = {
     engineering: { label: "工学", cost: 150, prerequisites: ["apprenticeship"], effect: "ユニット「カタパルト」を解放" },
     // 💡 機械工学: 前提は工学。取得後、ユニット「重装弓兵」を生産できるようになる。
     machinery: { label: "機械工学", cost: 220, prerequisites: ["engineering"], effect: "ユニット「重装弓兵」を解放" },
+    // 💡 石工術: 前提は採掘。取得後、都市に建造物「防壁」を建設できるようになる(§13参照)。
+    masonry: { label: "石工術", cost: 80, prerequisites: ["mining"], effect: "建造物「防壁」を解放" },
 };
 
 export const CIVICS = {

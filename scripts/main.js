@@ -10,7 +10,7 @@ import { getCityCurrentYields } from "./turns.js";
 import { forceEndTurnAuto } from "./bots.js";
 import { PRODUCTION_DEFS, getWorkerCount } from "./production.js";
 import { getDistrictDef } from "./districts.js";
-import { getEffectiveCombatStrength, getEffectiveRangedStrength, isRangedUnit } from "./combat.js";
+import { getEffectiveCombatStrength, getEffectiveRangedStrength, isRangedUnit, getUnitClassLabel, CITY_MAX_HP, WALL_MAX_HP } from "./combat.js";
 import { getActingPlayer, getActiveCivId, resolveCivName } from "./civs.js";
 import { hasDiplomaticAgreement } from "./diplomacy.js";
 import { syncUnitLabels } from "./unitLabels.js";
@@ -190,8 +190,13 @@ system.runInterval(() => {
 
             // 領有プレイヤー名と都市名の整形(人口は自国・同盟国の都市のみ表示)
             const ownerText = tile.ownerName ? `§a${tile.ownerName}` : "§7中立";
+            // 💡 都心のHP/防壁シールドは、人口などと違い敵国の都市でも常に表示する
+            //    (攻め落とせるかどうかの判断に直結する軍事情報のため。§13)。
+            const cityHpText = tile.city
+                ? ` §c[HP]${Math.max(0, Math.round(tile.city.hp ?? CITY_MAX_HP))}/${CITY_MAX_HP}${tile.city.wall ? ` §b[Wall]${Math.max(0, Math.round(tile.city.wallHp ?? WALL_MAX_HP))}/${WALL_MAX_HP}` : ""}`
+                : "";
             const cityText = tile.city
-                ? (isFriendlyOwner(tile.ownerId) ? ` §e[都市: ${tile.city.name} ([Pop]x${tile.city.population})]` : ` §e[都市: ${tile.city.name}]`)
+                ? (isFriendlyOwner(tile.ownerId) ? ` §e[都市: ${tile.city.name} ([Pop]x${tile.city.population})]${cityHpText}` : ` §e[都市: ${tile.city.name}]${cityHpText}`)
                 : "";
             const facilityText = tile.facility ? ` §7[施設: ${tile.facility.label ?? tile.facility.id}]` : "";
             const districtText = tile.district
@@ -199,7 +204,7 @@ system.runInterval(() => {
                 : (tile.underDistrictConstruction ? " §5[区域: 建設中...]" : "");
             const combatUnit = tile.combatUnit;
             const combatUnitText = combatUnit
-                ? `§c[${combatUnit.domain === "naval" ? "Naval" : "Land"}] ${combatUnit.label ?? combatUnit.id} | HP: ${combatUnit.hp ?? 0}/${combatUnit.maxHp ?? 100} | 戦闘力: ${formatCombatStrengthText(combatUnit)} | 移動力: ${combatUnit.movementRemaining ?? combatUnit.movement ?? 0}/${combatUnit.movement ?? 0} | 攻撃距離: ${combatUnit.attackRange ?? combatUnit.movement ?? 0}`
+                ? `§c[${combatUnit.domain === "naval" ? "Naval" : "Land"}] ${combatUnit.label ?? combatUnit.id} §7(${getUnitClassLabel(combatUnit.unitClass)})§r | HP: ${combatUnit.hp ?? 0}/${combatUnit.maxHp ?? 100} | 戦闘力: ${formatCombatStrengthText(combatUnit)} | 移動力: ${combatUnit.movementRemaining ?? combatUnit.movement ?? 0}/${combatUnit.movement ?? 0} | 攻撃距離: ${combatUnit.attackRange ?? combatUnit.movement ?? 0}`
                 : "§7戦闘ユニット: なし";
             const religiousUnit = tile.religiousUnit;
             const religiousUnitText = religiousUnit

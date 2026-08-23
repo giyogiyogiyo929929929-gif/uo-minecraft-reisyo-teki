@@ -59,6 +59,17 @@
 //   という戦術的な選択を後押しする。反撃側の戦闘力には影響しない(包囲は「攻める側」の
 //   有利さであり、囲まれている防御側の反撃の強さ自体は変えない)。呼び出し元
 //   (commands.js の cmdAttackCombatUnit)が攻撃実行時の盤面から算出し、resolveCombat に渡す。
+//
+// 【兵種(unitClass)とクラス相性ボーナス】
+// 陸軍ユニットは production.js の定義・配置される個体データの両方に unitClass
+// ("melee"/"antiCavalry"/"cavalry"/"ranged"/"siege"。海軍は"naval")を持つ。
+// UNIT_CLASS_COUNTERS に「このクラスは、あのクラス相手なら戦闘力+n」という relationship を
+// 定義しておくと、getClassMatchupBonus() がそれを見て自動的にボーナスを算出する
+// (例: 対騎兵(spearman)は騎兵(horseman)相手に+10)。このボーナスは「攻撃側/防御側」ではなく
+// 「そのユニット自身の戦闘力」に乗るため、対騎兵ユニットが騎兵を攻撃する場合も、逆に騎兵に
+// 攻撃された場合(防御・反撃のいずれも)も等しく効く。resolveCombat/canGuaranteeKill の
+// 両方に組み込まれており、新しい relationship を UNIT_CLASS_COUNTERS に追加するだけで
+// 反映側のコードは変更不要(adjacency.js の隣接ボーナスと同じ設計思想)。
 
 import { isWaterTerrain, isImpassableTerrain } from "./mapGen.js";
 import { canEnterTerritory } from "./diplomacy.js";
@@ -74,6 +85,70 @@ const RANGED_UNIT_ATTACK_RANGE_THRESHOLD = 2;
 // 包囲ボーナス: 攻撃対象に隣接する自軍ユニット1体につき与える先制攻撃力ボーナス、およびその上限体数。
 const FLANKING_BONUS_PER_ALLY = 3;
 const FLANKING_MAX_ALLIES = 4;
+
+// 【都市(都心)の耐久力・防壁】
+// 都市自身のマス("都心")は、通常の戦闘ユニットとは別に独自のHP・戦闘力を持つ防衛拠点として
+// 機能する(§13参照)。都心のHPが0を超えている間、敵(自国でも同盟・不可侵条約の相手でもない)
+// ユニットはそのマスへ進入できない(canUnitEnterCityTile)。
+export const CITY_MAX_HP = 200;
+export const CITY_HP_REGEN_PER_TURN = 30;
+// 都市戦闘力 = 自国最強の近接系ユニットの戦闘力 - このペナルティ、または都市に駐留中の
+// ユニットの実効戦闘力、のどちらか大きい方(getCityCombatStrength)。
+export const CITY_COMBAT_STRENGTH_PENALTY = 10;
+// 防壁が無ければ都市は遠距離攻撃できない。防壁完成後の遠距離攻撃の射程。
+export const CITY_RANGED_ATTACK_RANGE = 3;
+export const WALL_MAX_HP = 100;
+// 💡 防壁があるときの被ダメージ倍率。攻城(siege)ユニットだけは防壁の軽減効果をすり抜ける
+//    (Civilization VIの「攻城兵器は城壁の防御を無視する」という考え方を踏襲)。
+const WALL_DAMAGE_MULTIPLIERS = { melee: 0.15, antiCavalry: 0.15, cavalry: 0.15, ranged: 0.5, siege: 1 };
+// 💡 「近接ユニット」として扱う兵種の集合。都市戦闘力の算出基準(近接系ユニットの中で最強)・
+//    都市への反撃の可否(近接系からの攻撃にのみ都市は反撃する)・防壁の被ダメージ倍率の
+//    いずれもこの集合を基準にする。
+const MELEE_LIKE_CLASSES = new Set(["melee", "antiCavalry", "cavalry"]);
+
+/** unitClass が近接系(melee/antiCavalry/cavalry)かどうか。 */
+export function isMeleeUnitClass(unitClass) {
+    return MELEE_LIKE_CLASSES.has(unitClass);
+}
+
+/** 兵種(unitClass)の表示名。UIやHUDでの表示に使う(未分類のユニットは呼び出し元でフォールバックする)。 */
+export const UNIT_CLASS_LABELS = {
+    melee: "近接",
+    antiCavalry: "対騎兵",
+    cavalry: "騎兵",
+    ranged: "遠隔",
+    siege: "攻城",
+    naval: "海軍",
+};
+
+/** 兵種の表示名を取得する(未知の値ならそのまま返す)。 */
+export function getUnitClassLabel(unitClass) {
+    return UNIT_CLASS_LABELS[unitClass] ?? unitClass ?? "不明";
+}
+
+// 💡 「このクラスは、あのクラス相手なら戦闘力+n」という一方向の relationship の一覧。
+//    対騎兵(スピアマン系)は騎兵の機動力を封じる専門兵科という位置づけで、騎兵と戦う間
+//    (攻撃・防御・反撃のいずれでも)+10される。近接ユニットは、対騎兵ユニットの得意分野
+//    (騎兵封じ)の裏を返す形で+5される(騎兵ほどではないが、対騎兵は近接戦での取り回しに
+//    やや劣るという位置づけ)。新しい relationship を1行足すだけで、
+//    resolveCombat/canGuaranteeKillの両方に自動的に反映される。
+const UNIT_CLASS_COUNTERS = [
+    { attackerClass: "antiCavalry", targetClass: "cavalry", bonus: 10 },
+    { attackerClass: "melee", targetClass: "antiCavalry", bonus: 5 },
+];
+
+/**
+ * unit(の兵種)が opponent(の兵種)を相手にしているとき受け取る戦闘力ボーナスを算出する。
+ * 複数の relationship に一致する場合は合算する(現状は1つしか無いが、将来の拡張に備える)。
+ */
+export function getClassMatchupBonus(unit, opponent) {
+    if (!unit?.unitClass || !opponent?.unitClass) return 0;
+    let bonus = 0;
+    for (const rule of UNIT_CLASS_COUNTERS) {
+        if (rule.attackerClass === unit.unitClass && rule.targetClass === opponent.unitClass) bonus += rule.bonus;
+    }
+    return bonus;
+}
 
 /** ユニットの攻撃距離を取得する。明示的な attackRange が無ければ移動力(movement)と同じ範囲を使う。 */
 export function getAttackRange(unit) {
@@ -114,11 +189,21 @@ export function canUnitEnterOwnership(unit, tile) {
 }
 
 /**
+ * 指定したタイルが他国の都市(都心)で、かつそのHPがまだ0を超えている場合、そのユニットは
+ * 進入できない(都心はHPを0にしない限り突破できない防衛拠点として機能する。§13参照)。
+ * 自国の都市には常に進入できる。
+ */
+export function canUnitEnterCityTile(unit, tile) {
+    if (!tile?.city || tile.ownerId === unit?.ownerId) return true;
+    return (tile.city.hp ?? CITY_MAX_HP) <= 0;
+}
+
+/**
  * 指定した戦闘ユニットが、指定したタイルへ進入できるかどうかを総合判定する
- * (地形適性 + 所有者との外交関係の両方を満たす必要がある)。
+ * (地形適性 + 所有者との外交関係 + 都心のHPの3つすべてを満たす必要がある)。
  */
 export function canUnitEnterTile(unit, tile) {
-    return canUnitEnterTerrain(unit, tile) && canUnitEnterOwnership(unit, tile);
+    return canUnitEnterTerrain(unit, tile) && canUnitEnterOwnership(unit, tile) && canUnitEnterCityTile(unit, tile);
 }
 
 /**
@@ -228,10 +313,12 @@ export function getFlankingBonus(flankingAllyCount) {
  * true を返す安全側の見積もりになる(実際には最低値以上のダメージが出ることが多いため、
  * この判定が false でも運良く倒せることはあるが、逆にtrueなのに倒せないことは無い)。
  * 複数の攻撃対象から確実に仕留められる相手を優先する(pickBestAttackTarget)ために使う。
+ * クラス相性ボーナス(getClassMatchupBonus。例: 対騎兵が騎兵を攻撃する場合)も加味する。
  */
 export function canGuaranteeKill(attacker, defender, flankingBonus = 0) {
-    const attackerStrength = getFirstStrikeStrength(attacker) + flankingBonus;
-    const diff = attackerStrength - getEffectiveCombatStrength(defender);
+    const attackerStrength = getFirstStrikeStrength(attacker) + getClassMatchupBonus(attacker, defender) + flankingBonus;
+    const defenderStrength = getEffectiveCombatStrength(defender) + getClassMatchupBonus(defender, attacker);
+    const diff = attackerStrength - defenderStrength;
     const minDamage = Math.floor(DAMAGE_MIN * Math.exp(diff * DAMAGE_EXPONENT_SCALE));
     const hp = defender?.hp ?? defender?.maxHp ?? 0;
     return hp <= minDamage;
@@ -242,6 +329,8 @@ export function canGuaranteeKill(attacker, defender, flankingBonus = 0) {
  * hasAgreementFn(playerId, otherOwnerId) が true を返した相手のユニットは対象から除外する。
  * 呼び出し元は「戦争状態でない(=攻撃できない)相手」を除外する述語(例:
  * `(a, b) => !isAtWar(a, b)`)を渡す(commands.js の cmdAttackCombatUnit と同じ判定基準)。
+ * 💡 都市のマスに駐留するユニットは対象に含めない。都市自身が防衛の主体になる(§13)ため、
+ *    直接の攻撃対象は都市そのもの(getAttackableCityTargets)になる。
  * @returns {{ tx: number, tz: number, tile: any, unit: any }[]}
  */
 export function getAttackableTargets(fromTx, fromTz, playerId, unit, tiles, config, hasAgreementFn) {
@@ -259,11 +348,42 @@ export function getAttackableTargets(fromTx, fromTz, playerId, unit, tiles, conf
             if (tx < 0 || tz < 0 || tx >= config.width || tz >= config.height) continue;
 
             const tile = tiles[`${tx},${tz}`];
+            if (tile?.city) continue;
             const enemyUnit = tile?.combatUnit;
             if (!enemyUnit || enemyUnit.ownerId === playerId) continue;
             if (hasAgreementFn?.(playerId, enemyUnit.ownerId)) continue;
 
             targets.push({ tx, tz, tile, unit: enemyUnit });
+        }
+    }
+    return targets;
+}
+
+/**
+ * 指定した戦闘ユニットが今攻撃できる、敵の都市(都心)が存在するマスの一覧を返す。
+ * 駐留ユニットの有無に関わらず都市自体を対象として返す(getAttackableTargetsと同じ
+ * hasAgreementFnの使い方)。
+ * @returns {{ tx: number, tz: number, tile: any, city: any }[]}
+ */
+export function getAttackableCityTargets(fromTx, fromTz, playerId, unit, tiles, config, hasAgreementFn) {
+    const targets = [];
+    const range = getAttackRange(unit);
+    if (range <= 0 || !config) return targets;
+
+    for (let dz = -range; dz <= range; dz++) {
+        for (let dx = -range; dx <= range; dx++) {
+            const distance = Math.max(Math.abs(dx), Math.abs(dz));
+            if (distance === 0 || distance > range) continue;
+
+            const tx = fromTx + dx;
+            const tz = fromTz + dz;
+            if (tx < 0 || tz < 0 || tx >= config.width || tz >= config.height) continue;
+
+            const tile = tiles[`${tx},${tz}`];
+            if (!tile?.city || !tile.ownerId || tile.ownerId === playerId) continue;
+            if (hasAgreementFn?.(playerId, tile.ownerId)) continue;
+
+            targets.push({ tx, tz, tile, city: tile.city });
         }
     }
     return targets;
@@ -319,10 +439,17 @@ function getCounterStrength(defender, attacker, distance) {
  * }}
  */
 export function resolveCombat(attacker, defender, distance = 1, flankingBonus = 0) {
+    // 💡 クラス相性ボーナス(getClassMatchupBonus。例: 対騎兵は騎兵相手に+10)は、攻撃側/防御側の
+    //    役割ではなく「そのユニット自身の戦闘力」に乗る。そのため、攻撃側は先制攻撃(offense)にも
+    //    反撃を受ける際の抵抗力(defense)にも同じattackerBonusが、防御側は抵抗力(defense)にも
+    //    反撃時の攻撃力(offense)にも同じdefenderBonusが、一貫して加算される。
+    const attackerBonus = getClassMatchupBonus(attacker, defender);
+    const defenderBonus = getClassMatchupBonus(defender, attacker);
+
     // 1. 先制攻撃(攻撃側 → 防御側)。
     //    攻撃側の攻撃力は先制攻撃のルールに従って選択し、防御側の抵抗力は常に近距離戦闘力を用いる。
-    const firstStrikeStrength = getFirstStrikeStrength(attacker) + flankingBonus;
-    const firstDamage = rollDamage(firstStrikeStrength, getEffectiveCombatStrength(defender));
+    const firstStrikeStrength = getFirstStrikeStrength(attacker) + attackerBonus + flankingBonus;
+    const firstDamage = rollDamage(firstStrikeStrength, getEffectiveCombatStrength(defender) + defenderBonus);
     defender.hp = (defender.hp ?? 0) - firstDamage;
     const defenderDestroyed = defender.hp <= 0;
 
@@ -339,11 +466,129 @@ export function resolveCombat(attacker, defender, distance = 1, flankingBonus = 
     } else {
         // 2. 反撃(防御側 → 攻撃側)。
         //    防御側は今受けたばかりのダメージによる戦闘力低下(HP10減少ごとに-1)が反撃にも反映される。
-        const counterStrength = getCounterStrength(defender, attacker, distance);
-        counterDamage = rollDamage(counterStrength, getEffectiveCombatStrength(attacker));
+        const counterStrength = getCounterStrength(defender, attacker, distance) + defenderBonus;
+        counterDamage = rollDamage(counterStrength, getEffectiveCombatStrength(attacker) + attackerBonus);
         attacker.hp = (attacker.hp ?? 0) - counterDamage;
         attackerDestroyed = attacker.hp <= 0;
     }
 
     return { firstDamage, counterDamage, defenderDestroyed, attackerDestroyed, counterSkippedReason };
+}
+
+// 【都市(都心)の攻防】
+// 都市自身のマスを直接攻撃できるようにする一連の関数。§13/README参照。
+
+/** civId が保有する近接系(melee/antiCavalry/cavalry)ユニット(海軍除く)の中で最も高い戦闘力(基礎値)。無ければ0。 */
+export function getBestMeleeCombatStrength(civId, tiles) {
+    let best = 0;
+    for (const key in tiles) {
+        const unit = tiles[key].combatUnit;
+        if (unit?.ownerId !== civId || unit.domain === "naval") continue;
+        if (!isMeleeUnitClass(unit.unitClass)) continue;
+        best = Math.max(best, unit.combatStrength ?? 0);
+    }
+    return best;
+}
+
+/** civId が保有する遠距離系ユニット(海軍除く)の中で最も高い遠距離戦闘力(基礎値)。無ければ0。 */
+export function getBestRangedCombatStrength(civId, tiles) {
+    let best = 0;
+    for (const key in tiles) {
+        const unit = tiles[key].combatUnit;
+        if (unit?.ownerId !== civId || unit.domain === "naval") continue;
+        if (!isRangedUnit(unit)) continue;
+        best = Math.max(best, unit.rangedCombatStrength ?? unit.combatStrength ?? 0);
+    }
+    return best;
+}
+
+/**
+ * 都市戦闘力(近接ユニットに攻撃された際、都市が反撃・抵抗に用いる戦闘力)を算出する。
+ * = max(自国最強の近接系ユニットの戦闘力 - CITY_COMBAT_STRENGTH_PENALTY, 駐留ユニットの実効戦闘力)
+ * 駐留ユニットは「今そのマスに実在する個体」なのでHPによる低下(getEffectiveCombatStrength)を
+ * 反映するが、国内最強ユニットの項は「自国の軍事力の目安」という位置づけのため基礎値を使う。
+ * @param {string} civId 都市の所有国家ID
+ * @param {any} tiles 全タイルデータ
+ * @param {any} [garrisonUnit] 都市のマスに駐留中の戦闘ユニット(いなければ省略可)
+ */
+export function getCityCombatStrength(civId, tiles, garrisonUnit) {
+    const nationalBaseline = Math.max(0, getBestMeleeCombatStrength(civId, tiles) - CITY_COMBAT_STRENGTH_PENALTY);
+    const garrisonStrength = garrisonUnit ? getEffectiveCombatStrength(garrisonUnit) : 0;
+    return Math.max(nationalBaseline, garrisonStrength);
+}
+
+/** 防壁があるときの被ダメージ倍率を、攻撃側の兵種から算出する(未分類は軽減なし=1倍、安全側)。 */
+export function getWallDamageMultiplier(unitClass) {
+    return WALL_DAMAGE_MULTIPLIERS[unitClass] ?? 1;
+}
+
+/**
+ * 戦闘ユニットが都市(都心)を攻撃した場合のダメージ処理。resolveCombatと似ているが、
+ * 防御側が「都市」であるため、戦闘力の算出方法・防壁による軽減・反撃の有無が異なる:
+ * ・攻撃側の攻撃力は通常どおり近接/遠距離を自動選択する(getFirstStrikeStrength)。
+ *   都市側にはクラス相性ボーナス(対騎兵など)は適用されない(ユニット同士の相性であり、
+ *   都市はどのクラスにも属さないため)。
+ * ・防壁(city.wall)があれば、算出したダメージに攻撃側の兵種に応じた倍率
+ *   (getWallDamageMultiplier。近接系15%/遠隔50%/攻城100%)をかけてから適用し、
+ *   まず防壁の残りHP(city.wallHp)を削り、削りきれなかった分だけ都心のHP(city.hp)を削る。
+ *   防壁が無ければ倍率をかけず、ダメージはそのまま都心のHPに直接入る。
+ * ・都市が反撃するのは近接系(melee/antiCavalry/cavalry)ユニットから攻撃された場合のみ
+ *   (遠距離・攻城ユニットからの一方的な攻撃には反撃しない。都市が既に撃破された場合も反撃なし)。
+ * city オブジェクトの hp/wallHp/attackedRecently を直接更新する。
+ * @param {any} attacker 攻撃側の戦闘ユニット
+ * @param {any} city 対象都市のデータ(tile.city)
+ * @param {number} cityCombatStrength getCityCombatStrength() で算出した都市の戦闘力
+ * @returns {{
+ *   damage: number, wallDamage: number, hpDamage: number, cityDestroyed: boolean,
+ *   counterDamage: number, attackerDestroyed: boolean,
+ *   counterSkippedReason: "cityDestroyed" | "notMelee" | null
+ * }}
+ */
+export function resolveCityAttack(attacker, city, cityCombatStrength) {
+    const attackerStrength = getFirstStrikeStrength(attacker);
+    const rawDamage = rollDamage(attackerStrength, cityCombatStrength);
+
+    const hasWall = !!city.wall;
+    const multiplier = hasWall ? getWallDamageMultiplier(attacker?.unitClass) : 1;
+    const damage = Math.max(0, Math.floor(rawDamage * multiplier));
+
+    const wallHpBefore = hasWall ? (city.wallHp ?? WALL_MAX_HP) : 0;
+    const wallDamage = Math.min(damage, wallHpBefore);
+    const hpDamage = damage - wallDamage;
+
+    if (hasWall) city.wallHp = wallHpBefore - wallDamage;
+    city.hp = (city.hp ?? CITY_MAX_HP) - hpDamage;
+    // 💡 修理(cmdRepairWall)・回復判定の両方が参照する「最近攻撃を受けた」フラグ。
+    //    都市所有者の次の手番開始時(processPlayerTurnStart)にリセットされる。
+    city.attackedRecently = true;
+    const cityDestroyed = city.hp <= 0;
+
+    let counterDamage = 0;
+    let attackerDestroyed = false;
+    let counterSkippedReason = null;
+
+    if (cityDestroyed) {
+        counterSkippedReason = "cityDestroyed";
+    } else if (!isMeleeUnitClass(attacker?.unitClass)) {
+        counterSkippedReason = "notMelee";
+    } else {
+        counterDamage = rollDamage(cityCombatStrength, getEffectiveCombatStrength(attacker));
+        attacker.hp = (attacker.hp ?? 0) - counterDamage;
+        attackerDestroyed = attacker.hp <= 0;
+    }
+
+    return { damage, wallDamage, hpDamage, cityDestroyed, counterDamage, attackerDestroyed, counterSkippedReason };
+}
+
+/**
+ * 防壁を持つ都市が、遠距離攻撃で敵ユニットを攻撃した場合のダメージを算出する(反撃なし。
+ * 都市は動けないため、防御側の攻撃範囲を問わず一方的に攻撃が成立する)。
+ * defender オブジェクトの hp を直接更新する。
+ * @param {number} cityRangedStrength getBestRangedCombatStrength() で算出した都市の遠距離戦闘力
+ * @param {any} defender 攻撃対象の戦闘ユニット
+ */
+export function resolveCityRangedAttack(cityRangedStrength, defender) {
+    const damage = rollDamage(cityRangedStrength, getEffectiveCombatStrength(defender));
+    defender.hp = (defender.hp ?? 0) - damage;
+    return { damage, defenderDestroyed: defender.hp <= 0 };
 }

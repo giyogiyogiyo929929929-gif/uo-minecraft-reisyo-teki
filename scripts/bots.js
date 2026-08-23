@@ -104,23 +104,26 @@
 //     1発だけミサイルを発射する(都市を一撃で消滅させる切り札のため、1ターンにつき最大1発)。
 // 12. 自国の戦闘ユニットごとに、次の優先順で1つだけ行動する(攻撃・追跡・占領は戦争状態の
 //     相手のみが対象。「関係なし」・不可侵条約・同盟の相手は対象にしない)。近接ユニット
-//     (戦士等)を遠距離ユニット(弓兵等)より先に処理することで、(f)の移動判断が同ターン内の
+//     (戦士等)を遠距離ユニット(弓兵等)より先に処理することで、(g)の移動判断が同ターン内の
 //     戦士の前進結果を踏まえられるようにしている:
-//     (a) 無防備な敵都市の上で今ターン未行動なら占領する。
+//     (a) 無防備な敵都市(都心のHPが既に0)の上で今ターン未行動なら占領する。
 //     (b) 同じマスに敵(同盟関係の無い)の宗教ユニットがいて移動力が満タンなら、異教徒として
 //         排除する(cmdPurgeHeretic)。一方的かつ確実に成功するため、成否がランダムな
 //         攻撃(c)より先に判定する。
-//     (c) 攻撃範囲内に敵がいれば、まず「今の攻撃力(包囲ボーナス込み)で最低ダメージロールでも
-//         確実に撃破できる相手」(combat.js の canGuaranteeKill)を最優先で狙う(中途半端に
-//         複数体を削るより確実に数を減らす)。確実に倒せる相手が複数/皆無の場合は、その中で
-//         包囲ボーナス(countFlankingAllies。既にその敵に隣接している味方ユニットの数)が
-//         最大の相手を選び、同数ならHPが最も低い相手を選んで攻撃する。
-//     (d) HPが低ければ(RETREAT_HP_RATIO未満)、最寄りの自都市へ撤退する。
-//     (e) 自都市を守備中で、近く(GARRISON_ALERT_RADIUS以内)に敵がいなければ持ち場を守る。
-//     (f) 自分は健在で、近く(ESCORT_RADIUS以内)に撤退中の負傷した味方がいれば
+//     (c) 攻撃範囲内に敵ユニットがいれば、まず「今の攻撃力(包囲ボーナス込み)で最低ダメージ
+//         ロールでも確実に撃破できる相手」(combat.js の canGuaranteeKill)を最優先で狙う
+//         (中途半端に複数体を削るより確実に数を減らす)。確実に倒せる相手が複数/皆無の場合は、
+//         その中で包囲ボーナス(countFlankingAllies。既にその敵に隣接している味方ユニットの数)
+//         が最大の相手を選び、同数ならHPが最も低い相手を選んで攻撃する。
+//     (d) 攻撃範囲内に敵ユニットはいないが敵の都市(都心)があれば、都心のHPが最も低い都市を
+//         優先して攻城する(cmdAttackCity。§13。都心はHPを0にしない限り占領できないため、
+//         これが無いとBotは都市を一切陥落させられなくなる)。
+//     (e) HPが低ければ(RETREAT_HP_RATIO未満)、最寄りの自都市へ撤退する。
+//     (f) 自都市を守備中で、近く(GARRISON_ALERT_RADIUS以内)に敵がいなければ持ち場を守る。
+//     (g) 自分は健在で、近く(ESCORT_RADIUS以内)に撤退中の負傷した味方がいれば
 //         (かつ最寄りの敵と同じかそれ以上に近ければ)、敵を追うより先にその護衛(合流)へ
 //         向かう(単独で撤退する負傷ユニットが道中で各個撃破されるのを防ぐ)。
-//     (g) それ以外は最も近い敵(ユニットまたは都市)へ向けて移動する(8方向のうち目標に
+//     (h) それ以外は最も近い敵(ユニットまたは都市)へ向けて移動する(8方向のうち目標に
 //         最も近づけるマスを選ぶ簡易な経路探索。1手先読みの貪欲法であり、行き止まりを
 //         事前に見抜いて迂回するような本格的なパス探索ではないが、直進ルートが地形・
 //         他国領土・占有マスで塞がっていても、他の方向から迂回できればそちらを選べる)。
@@ -151,13 +154,13 @@ import { canStartProduction, getWorkerCount } from "./production.js";
 import { getDefinitions, getProgressState, startProgress, hasCompletedProgress } from "./progression.js";
 import { getFacilityIds, getFacilityDef, canInstallFacility } from "./facilities.js";
 import { getDistrictIds, getDistrictDef, canStartDistrict, getDistrictBuildingIds, canStartDistrictBuilding } from "./districts.js";
-import { canUnitEnterTile, tileDistance, getAttackableTargets, isRangedUnit, countFlankingAllies, getFlankingBonus, canGuaranteeKill } from "./combat.js";
+import { canUnitEnterTile, tileDistance, getAttackableTargets, getAttackableCityTargets, isRangedUnit, countFlankingAllies, getFlankingBonus, canGuaranteeKill, CITY_MAX_HP } from "./combat.js";
 import { getRelation, getRequestsFor, sendRequest, acceptRequest, hasDiplomaticAgreement, isAtWar, declareWar, breakRelation } from "./diplomacy.js";
 import { hasFoundedReligion, getReligiousUnitDef, getReligiousUnitIds, getCityDominantReligion, getReligiousUnitCost, hasStartedInquisition } from "./religion.js";
 import {
     cmdClaim, cmdSettle, cmdBuyRights, cmdStartProduction,
     cmdInstallFacility, cmdStartDistrict, cmdStartDistrictBuilding,
-    cmdMoveCombatUnit, cmdAttackCombatUnit, cmdCaptureCity, cmdHealCombatUnit, cmdPurgeHeretic,
+    cmdMoveCombatUnit, cmdAttackCombatUnit, cmdAttackCity, cmdCaptureCity, cmdHealCombatUnit, cmdPurgeHeretic,
     cmdLaunchMissile,
     cmdFoundReligion, cmdBuyReligiousUnit, cmdMoveReligiousUnit, cmdProselytize,
     cmdAttackReligiousUnit, cmdStartInquisition, cmdInquisitorSuppress,
@@ -183,8 +186,8 @@ const MELEE_UNIT_IDS = [...MELEE_UNIT_PRIORITY];
 const RANGED_UNIT_IDS = [...RANGED_UNIT_PRIORITY];
 // 💡 生産の優先順位。労働者が少ないうちは労働者を優先し、増えたら建造物/防衛ユニットへ回す。
 // 脅威(THREAT_RADIUS以内の敵ユニット)が無い間の優先順位。
-const PRODUCTION_PRIORITY_SAFE_EARLY = ["worker", "granary", "tradingPost", "market", "obelisk", "trainingGround", ...MELEE_UNIT_PRIORITY, ...RANGED_UNIT_PRIORITY];
-const PRODUCTION_PRIORITY_SAFE_LATE = ["granary", "tradingPost", "market", "obelisk", "trainingGround", ...MELEE_UNIT_PRIORITY, ...RANGED_UNIT_PRIORITY, "worker"];
+const PRODUCTION_PRIORITY_SAFE_EARLY = ["worker", "granary", "tradingPost", "market", "obelisk", "trainingGround", "wall", ...MELEE_UNIT_PRIORITY, ...RANGED_UNIT_PRIORITY];
+const PRODUCTION_PRIORITY_SAFE_LATE = ["granary", "tradingPost", "market", "obelisk", "trainingGround", "wall", ...MELEE_UNIT_PRIORITY, ...RANGED_UNIT_PRIORITY, "worker"];
 const WORKER_COUNT_THRESHOLD = 3;
 // 💡 脅威時でも際限なく戦士/弓兵を生産し続けると、経済(労働者・建造物)が完全に止まり、
 //    かつ同じユニットばかりになってしまうため、都市数に対してこの倍率までの戦闘ユニット
@@ -255,11 +258,11 @@ const MAX_MISSILE_STOCKPILE = 2;
 //    されなくなるわけではない(優先度が下がるだけ)。
 const TECH_PRIORITY_SAFE = [
     "pottery", "writing", "astrology", "mining", "animalHusbandry", "archery",
-    "sailing", "currency", "smelting", "education", "apprenticeship",
+    "sailing", "currency", "smelting", "masonry", "education", "apprenticeship",
     "bronzeWorking", "horsebackRiding", "ironWorking", "shipBuilding", "engineering", "machinery",
 ];
 const TECH_PRIORITY_THREATENED = [
-    "animalHusbandry", "archery", "mining", "bronzeWorking", "horsebackRiding",
+    "animalHusbandry", "archery", "mining", "masonry", "bronzeWorking", "horsebackRiding",
     "pottery", "writing", "astrology", "smelting", "ironWorking", "apprenticeship",
     "engineering", "machinery", "sailing", "currency", "education", "shipBuilding",
 ];
@@ -497,7 +500,12 @@ function pickProductionChoice(city, tile, botIdentity, threatened, unitCounts, t
         priority = insertAfter(priority, "tradingPost", "battleship");
         priority = insertAfter(priority, "tradingPost", "cruiser");
     }
-    if (unitCounts.atWar) priority = insertAfter(priority, "granary", "antiAir");
+    // 💡 戦争中は都心の耐久力を上げる防壁(§13)を、対空砲よりさらに優先して割り込ませる
+    //    (壁は都心のHP自体を守る基礎防衛、対空砲はミサイルという特定脅威への対策のため)。
+    if (unitCounts.atWar) {
+        priority = insertAfter(priority, "granary", "antiAir");
+        priority = insertAfter(priority, "granary", "wall");
+    }
     for (const id of priority) {
         if (canStartProduction(city, id, tile, botIdentity).ok) return id;
     }
@@ -1084,19 +1092,22 @@ function runBotReligion(civId, botIdentity, tiles, config) {
 
 /**
  * 1体の戦闘ユニットの行動を決定・実行する。優先順位:
- * (a) 無防備な敵都市の上で今ターン未行動なら占領する。
+ * (a) 無防備な敵都市(都心のHPが既に0)の上で今ターン未行動なら占領する。
  * (b) 同じマスに敵(同盟関係の無い)の宗教ユニットがいて移動力が満タンなら、異教徒として
  *     排除する(cmdPurgeHeretic。確実に成功する一方的な排除のため、成否がランダムな攻撃(c)
  *     より先に判定する)。
- * (c) 攻撃範囲内に敵がいれば、確実に撃破できる相手(canGuaranteeKill)を最優先し、
+ * (c) 攻撃範囲内に敵ユニットがいれば、確実に撃破できる相手(canGuaranteeKill)を最優先し、
  *     いなければその中から包囲ボーナス(既にその相手に隣接している味方の数)が最大の相手を
  *     優先し、同数ならHPが最も低い相手を攻撃する。
- * (d) HPが低ければ(RETREAT_HP_RATIO未満)、最寄りの自都市へ撤退する。
- * (e) 自都市を守っている最中で、近く(GARRISON_ALERT_RADIUS以内)に敵がいなければ、
+ * (d) 攻撃範囲内に敵ユニットはいないが敵の都市(都心)があれば、都心のHPが最も低い(最も
+ *     陥落に近い)都市を優先して攻城する(cmdAttackCity。§13。これが無いとBotは都市の
+ *     HPを一切削れず、占領を進められなくなる)。
+ * (e) HPが低ければ(RETREAT_HP_RATIO未満)、最寄りの自都市へ撤退する。
+ * (f) 自都市を守っている最中で、近く(GARRISON_ALERT_RADIUS以内)に敵がいなければ、
  *     HPが減っていれば休息して回復し(cmdHealCombatUnit)、満タンならそのまま持ち場を守る。
- * (f) 自分は健在で、近く(ESCORT_RADIUS以内)に撤退中の負傷した味方がいれば、敵を追うより
+ * (g) 自分は健在で、近く(ESCORT_RADIUS以内)に撤退中の負傷した味方がいれば、敵を追うより
  *     先にその護衛(合流)へ向かう(単独で撤退する負傷ユニットが各個撃破されるのを防ぐ)。
- * (g) それ以外は最も近い敵(ユニットまたは都市)へ向けて移動する。ただし遠距離ユニットが
+ * (h) それ以外は最も近い敵(ユニットまたは都市)へ向けて移動する。ただし遠距離ユニットが
  *     自軍の近接ユニットより前に出てしまう場合は、近接ユニットが追いつくまで待機する。
  */
 function runBotCombatUnit(civId, tx, tz, unit, tiles, config, botIdentity) {
@@ -1126,6 +1137,17 @@ function runBotCombatUnit(civId, tx, tz, unit, tiles, config, botIdentity) {
     if (targets.length > 0) {
         const target = pickBestAttackTarget(unit, targets, civId, tx, tz, tiles);
         cmdAttackCombatUnit(botIdentity, tx, tz, target.tx, target.tz);
+        return;
+    }
+
+    // 💡 攻撃範囲内に敵ユニットがいなくても、敵の都市(都心)が範囲内にあれば攻城を行う
+    //    (§13。都心はHPを0にしない限り占領できないため、これが無いとBotは一切都市を
+    //    陥落させられなくなる)。HPが最も低い=最も陥落に近い都市を優先して攻撃を集中させる。
+    const cityTargets = getAttackableCityTargets(tx, tz, civId, unit, tiles, config, (a, b) => !isAtWar(a, b));
+    if (cityTargets.length > 0) {
+        const cityTarget = cityTargets.reduce((best, t) =>
+            (t.city.hp ?? CITY_MAX_HP) < (best.city.hp ?? CITY_MAX_HP) ? t : best);
+        cmdAttackCity(botIdentity, tx, tz, cityTarget.tx, cityTarget.tz);
         return;
     }
 

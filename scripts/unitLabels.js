@@ -29,6 +29,7 @@
 
 import { world, system, TextPrimitive } from "@minecraft/server";
 import { getMapConfig, getTiles, getStateVersion } from "./state.js";
+import { getUnitClassLabel } from "./combat.js";
 
 const TILE_SIZE = 5;
 const LABEL_HEIGHT_OFFSET = 2.2;
@@ -54,7 +55,7 @@ function buildCombatUnitText(unit) {
     const domainTag = unit.domain === "naval" ? "§b[Naval]" : "§a[Land]";
     const hp = Math.max(0, Math.round(unit.hp ?? 0));
     const maxHp = unit.maxHp ?? 100;
-    return `${domainTag} §f${unit.label ?? unit.id ?? "ユニット"}\n§7${unit.ownerName ?? "不明"} §cHP:${hp}/${maxHp}`;
+    return `${domainTag} §f${unit.label ?? unit.id ?? "ユニット"} §7(${getUnitClassLabel(unit.unitClass)})\n§7${unit.ownerName ?? "不明"} §cHP:${hp}/${maxHp}`;
 }
 
 function buildReligiousUnitText(unit) {
