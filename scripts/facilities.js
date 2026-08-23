@@ -26,6 +26,7 @@ import { RESOURCE_TYPES, isWaterTerrain } from "./mapGen.js";
  * @property {string} label 表示名
  * @property {string} icon 表示アイコン
  * @property {string} [requiresTechnology] 設置に必要な技術ID(technology progression)
+ * @property {string} [requiresCivic] 設置に必要な社会制度ID(civic progression)
  * @property {string} [requiresResource] 設置できるマスの資源を限定する(tile.resourceと一致が必要)
  * @property {boolean} [allowWater] trueの場合のみ水上マス(川・海・池・湖)に設置できる(省略時は不可)
  * @property {Record<string, number>} [flatYields] この施設があるだけで(隣接マスに関係なく)
@@ -51,6 +52,15 @@ export const FACILITY_DEFS = {
         requiresResource: "iron",
         flatYields: { iron: 2, production: 4 },
         installMessage: (tile, tx, tz) => `§e[Complete] (${tx}, ${tz}) に鍛冶場を設置しました！(毎ターン鉄+2、生産力+4)`,
+    },
+    harbor: {
+        label: "港",
+        icon: "[Harbor]",
+        requiresTechnology: "sailing",
+        // 💡 allowWater: 水上マス(海・川・池・湖)にのみ設置できる施設(allowWaterフラグの初使用例)。
+        allowWater: true,
+        flatYields: { food: 2, production: 1 },
+        installMessage: (tile, tx, tz) => `§e[Complete] (${tx}, ${tz}) に港を設置しました！(毎ターン食料+2、生産力+1)`,
     },
 };
 
@@ -89,6 +99,13 @@ export function canInstallFacility(tile, id, playerId, player = null) {
         if (!hasTech) {
             const techDef = getDefinition("technology", def.requiresTechnology);
             return { ok: false, message: `§c【${def.label}】の設置には技術【${techDef?.label ?? def.requiresTechnology}】の取得が必要です。` };
+        }
+    }
+    if (def.requiresCivic) {
+        const hasCivic = !!player && hasCompletedProgress(player, "civic", def.requiresCivic);
+        if (!hasCivic) {
+            const civicDef = getDefinition("civic", def.requiresCivic);
+            return { ok: false, message: `§c【${def.label}】の設置には社会制度【${civicDef?.label ?? def.requiresCivic}】の取得が必要です。` };
         }
     }
     return { ok: true };

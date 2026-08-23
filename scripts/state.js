@@ -7,10 +7,29 @@ const KEY_CONFIG = "civ:mapConfig";
 const KEY_TURN = "civ:turn";
 const KEY_TILE_ROW_PREFIX = "civ:tiles_row_";
 const KEY_MATCH_SETTINGS = "civ:matchSettings";
+const KEY_MAP_GEN_SETTINGS = "civ:mapGenSettings";
 
 // 💡 試合の設定(産出の倍率、不可侵条約・同盟の有無、Bot同士の手番間隔、など)。マップ/ターン状態
 //    とは異なり、OPがゲームリセットを跨いで使い回せるよう resetAll() では消去しない(意図的)。
-const DEFAULT_MATCH_SETTINGS = { yieldMultiplier: 2, diplomacyEnabled: true, botTurnDelayTicks: 5, peaceEnabled: true };
+const DEFAULT_MATCH_SETTINGS = { yieldMultiplier: 2, diplomacyEnabled: true, botTurnDelayTicks: 5, peaceEnabled: true, logsEnabled: true };
+
+// 💡 マップ生成の設定(各バイオームの生成有無・生成しやすさの重み、資源の出現率)。
+//    matchSettingsと同様、OPがマップの再生成(/civ:generate)を跨いで使い回せるよう
+//    resetAll() では消去しない(生成のたびに設定し直す手間を省くための意図的な設計)。
+//    重みの既定値は mapGen.js の TERRAIN_TYPES とそろえてあり、未設定時は従来と同じ生成結果になる。
+const DEFAULT_MAP_GEN_SETTINGS = {
+    biomes: {
+        grassland: { enabled: true, weight: 22 },
+        forest: { enabled: true, weight: 16 },
+        rainforest: { enabled: true, weight: 10 },
+        desert: { enabled: true, weight: 12 },
+        cold: { enabled: true, weight: 12 },
+        mountain: { enabled: true, weight: 10 },
+        river: { enabled: true, weight: 8 },
+        sea: { enabled: true, weight: 10 },
+    },
+    resourceChance: 25,
+};
 
 // Dynamic Property の読み書きを毎回繰り返さないためのメモリキャッシュ。
 // ワールド再読み込み後は最初の getTiles() で保存データから復元する。
@@ -24,6 +43,8 @@ let turnStateCache = null;
 let stateVersion = 0;
 let matchSettingsCache = null;
 let matchSettingsLoaded = false;
+let mapGenSettingsCache = null;
+let mapGenSettingsLoaded = false;
 
 function makeConfigKey(config) {
     return config ? JSON.stringify({
@@ -223,6 +244,74 @@ export function setMatchSettings(partial) {
     matchSettingsLoaded = true;
     stateVersion++; // 💡 産出倍率の変更を、都市産出量のキャッシュ(stateVersion駆動)に反映させる。
     return merged;
+}
+
+/**
+ * マップ生成の設定 { biomes: { [id]: { enabled, weight } }, resourceChance } を取得
+ * (未設定/未知のバイオームIDは既定値で補う)。
+ */
+export function getMapGenSettings() {
+    if (mapGenSettingsLoaded) return mapGenSettingsCache;
+
+    const biomes = {};
+    for (const id in DEFAULT_MAP_GEN_SETTINGS.biomes) biomes[id] = { ...DEFAULT_MAP_GEN_SETTINGS.biomes[id] };
+    mapGenSettingsCache = { biomes, resourceChance: DEFAULT_MAP_GEN_SETTINGS.resourceChance };
+
+    const raw = world.getDynamicProperty(KEY_MAP_GEN_SETTINGS);
+    if (typeof raw === "string") {
+        try {
+            const parsed = JSON.parse(raw);
+            if (parsed.biomes) {
+                for (const id in parsed.biomes) {
+                    if (mapGenSettingsCache.biomes[id]) Object.assign(mapGenSettingsCache.biomes[id], parsed.biomes[id]);
+                }
+            }
+            if (typeof parsed.resourceChance === "number") mapGenSettingsCache.resourceChance = parsed.resourceChance;
+        } catch {
+            // 壊れた保存値は既定値のまま扱う。
+        }
+    }
+    mapGenSettingsLoaded = true;
+    return mapGenSettingsCache;
+}
+
+/**
+ * マップ生成の設定を部分更新する。partial.biomes は渡したバイオームIDだけを
+ * (enabled/weightのどちらか片方だけでも)上書きし、他のバイオーム・他のキーは現在値を維持する。
+ */
+export function setMapGenSettings(partial) {
+    const current = getMapGenSettings();
+    const merged = { ...current, ...partial };
+    merged.biomes = { ...current.biomes };
+    if (partial.biomes) {
+        for (const id in partial.biomes) {
+            merged.biomes[id] = { ...current.biomes[id], ...partial.biomes[id] };
+        }
+    }
+    world.setDynamicProperty(KEY_MAP_GEN_SETTINGS, JSON.stringify(merged));
+    mapGenSettingsCache = merged;
+    mapGenSettingsLoaded = true;
+    return merged;
+}
+
+/** マップ生成の設定を既定値(DEFAULT_MAP_GEN_SETTINGS)に戻す。更新後の設定を返す。 */
+export function resetMapGenSettings() {
+    world.setDynamicProperty(KEY_MAP_GEN_SETTINGS, undefined);
+    mapGenSettingsCache = null;
+    mapGenSettingsLoaded = false;
+    return getMapGenSettings();
+}
+
+/**
+ * 試合の設定(getMatchSettings().logsEnabled)を見て、world.sendMessage() を条件付きで
+ * 呼び出す。全員Botの対戦を観戦・放置しているだけの時にチャット欄が行動ログ(領有・生産・
+ * 戦闘・外交など)で埋め尽くされるのを防ぐため、OPが試合の設定からログ表示を無効化できる
+ * ようにするためのヘルパー。無効化中でも見せたいメッセージ(勝利の告知など)は、
+ * このヘルパーを使わず world.sendMessage() を直接呼ぶこと。
+ */
+export function broadcast(message) {
+    if (!getMatchSettings().logsEnabled) return;
+    world.sendMessage(message);
 }
 
 export function resetAll() {

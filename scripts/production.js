@@ -101,6 +101,8 @@ export function getTotalWorkerActionsRemaining(city) {
  * @property {(city: any) => boolean} [hasBuilt] uniquePerCity 用: 既に保有済みか判定する関数
  * @property {number} [extraUpkeep] 生産中、都市の食料消費に追加される値
  * @property {string} [requiresTechnology] 生産に必要な技術ID(technology progression)
+ * @property {string} [requiresCivic] 生産に必要な社会制度ID(civic progression)。requiresTechnology と
+ *   併用した場合、両方を取得済みでなければ生産できない(例: 市場は貨幣経済+商業の両方が必要)。
  * @property {boolean} [disallowInCapital] true の場合、首都ではこの建造物を生産できない(遷都用)
  * @property {Record<string, number>} [flatYields] この建造物(category:"building")があるだけで
  *   (隣接マスに関係なく)都市に毎ターン加算される産出量(例: { faith: 4 })。
@@ -255,9 +257,90 @@ export const PRODUCTION_DEFS = {
         onComplete: (city, ctx) => placeProducedNavalUnit(ctx, (ownerId, ownerName) => ({
             // 💡 domain: 海軍ユニット。水上マスにしか進入できない。
             id: "battleship", label: "軍艦", hp: 100, maxHp: 100, combatStrength: 25,
-            movement: 2, movementRemaining: 2, attackRange: 2, domain: "naval", ownerId, ownerName,
+            movement: 2, movementRemaining: 2, attackRange: 3, domain: "naval", ownerId, ownerName,
         })),
         completeMessage: (city) => `§e[Battleship]【${city.name}】に軍艦を配置しました！ (HP: 100/100、戦闘力: 25)`,
+    },
+    spearman: {
+        label: "槍兵",
+        icon: "[Spearman]",
+        category: "unit",
+        cost: 45,
+        requiresEmptyCombatTile: true,
+        requiresTechnology: "bronzeWorking",
+        onComplete: (city, ctx) => placeProducedCombatUnit(ctx, (ownerId, ownerName) => ({
+            id: "spearman", label: "槍兵", hp: 100, maxHp: 100, combatStrength: 32,
+            movement: 1, movementRemaining: 1, attackRange: 1, domain: "land", ownerId, ownerName,
+        })),
+        completeMessage: (city) => `§e[Spearman]【${city.name}】に槍兵を配置しました！ (HP: 100/100、戦闘力: 32)`,
+    },
+    horseman: {
+        label: "騎兵",
+        icon: "[Horseman]",
+        category: "unit",
+        cost: 75,
+        requiresEmptyCombatTile: true,
+        requiresTechnology: "horsebackRiding",
+        onComplete: (city, ctx) => placeProducedCombatUnit(ctx, (ownerId, ownerName) => ({
+            id: "horseman", label: "騎兵", hp: 100, maxHp: 100, combatStrength: 30,
+            movement: 3, movementRemaining: 3, attackRange: 1, domain: "land", ownerId, ownerName,
+        })),
+        completeMessage: (city) => `§e[Horseman]【${city.name}】に騎兵を配置しました！ (HP: 100/100、戦闘力: 30、移動力: 3)`,
+    },
+    swordsman: {
+        label: "剣士",
+        icon: "[Swordsman]",
+        category: "unit",
+        cost: 90,
+        requiresEmptyCombatTile: true,
+        requiresTechnology: "ironWorking",
+        onComplete: (city, ctx) => placeProducedCombatUnit(ctx, (ownerId, ownerName) => ({
+            id: "swordsman", label: "剣士", hp: 100, maxHp: 100, combatStrength: 48,
+            movement: 1, movementRemaining: 1, attackRange: 1, domain: "land", ownerId, ownerName,
+        })),
+        completeMessage: (city) => `§e[Swordsman]【${city.name}】に剣士を配置しました！ (HP: 100/100、戦闘力: 48)`,
+    },
+    catapult: {
+        label: "カタパルト",
+        icon: "[Catapult]",
+        category: "unit",
+        cost: 100,
+        requiresEmptyCombatTile: true,
+        requiresTechnology: "engineering",
+        onComplete: (city, ctx) => placeProducedCombatUnit(ctx, (ownerId, ownerName) => ({
+            // 💡 攻城ユニット: 遠距離戦闘力40だが近距離戦闘力(反撃を受けた際の値)は12と低め。
+            id: "catapult", label: "カタパルト", hp: 100, maxHp: 100,
+            combatStrength: 12, rangedCombatStrength: 40, meleeCombatStrength: 12,
+            movement: 1, movementRemaining: 1, attackRange: 2, domain: "land", ownerId, ownerName,
+        })),
+        completeMessage: (city) => `§e[Catapult]【${city.name}】にカタパルトを配置しました！ (HP: 100/100、遠距離戦闘力: 40、近距離戦闘力: 12)`,
+    },
+    crossbowman: {
+        label: "重装弓兵",
+        icon: "[Crossbowman]",
+        category: "unit",
+        cost: 110,
+        requiresEmptyCombatTile: true,
+        requiresTechnology: "machinery",
+        onComplete: (city, ctx) => placeProducedCombatUnit(ctx, (ownerId, ownerName) => ({
+            id: "crossbowman", label: "重装弓兵", hp: 100, maxHp: 100,
+            combatStrength: 25, rangedCombatStrength: 38, meleeCombatStrength: 25,
+            movement: 1, movementRemaining: 1, attackRange: 2, domain: "land", ownerId, ownerName,
+        })),
+        completeMessage: (city) => `§e[Crossbowman]【${city.name}】に重装弓兵を配置しました！ (HP: 100/100、遠距離戦闘力: 38、近距離戦闘力: 25)`,
+    },
+    cruiser: {
+        label: "巡洋艦",
+        icon: "[Cruiser]",
+        category: "unit",
+        cost: 140,
+        requiresTechnology: "shipBuilding",
+        // 💡 軍艦と同じく、都市に隣接する水上マスへ配置される海軍ユニット。
+        onComplete: (city, ctx) => placeProducedNavalUnit(ctx, (ownerId, ownerName) => ({
+            id: "cruiser", label: "巡洋艦", hp: 100, maxHp: 100, combatStrength: 50,
+            movement: 3, movementRemaining: 3, attackRange: 4, domain: "naval", ownerId, ownerName,
+        })),
+        completeMessage: (city) => `§e[Cruiser]【${city.name}】に巡洋艦を配置しました！ (HP: 100/100、戦闘力: 50)`,
     },
     tradingPost: {
         label: "交易所",
@@ -321,6 +404,32 @@ export const PRODUCTION_DEFS = {
         //    falseにリセットされる。
         onComplete: (city) => { city.antiAir = true; },
         completeMessage: (city) => `§e[Complete]【${city.name}】に対空砲が完成しました！ (1ターンに1回、この都市と周囲8マスへ着弾するミサイルを迎撃)`,
+    },
+    market: {
+        label: "市場",
+        icon: "[Market]",
+        category: "building",
+        cost: 50,
+        uniquePerCity: true,
+        hasBuilt: (city) => !!city.market,
+        // 💡 技術「貨幣経済」と社会制度「商業」の両方が必要(requiresTechnology/requiresCivicの併用例)。
+        requiresTechnology: "currency",
+        requiresCivic: "commerce",
+        flatYields: { production: 2, food: 1 },
+        onComplete: (city) => { city.market = true; },
+        completeMessage: (city) => `§e[Complete]【${city.name}】市場が完成しました！ (生産力+2、食料生産量+1)`,
+    },
+    trainingGround: {
+        label: "訓練場",
+        icon: "[Training]",
+        category: "building",
+        cost: 70,
+        uniquePerCity: true,
+        hasBuilt: (city) => !!city.trainingGround,
+        requiresCivic: "militaryTradition",
+        flatYields: { production: 2 },
+        onComplete: (city) => { city.trainingGround = true; },
+        completeMessage: (city) => `§e[Complete]【${city.name}】訓練場が完成しました！ (生産力+2)`,
     },
     capital: {
         label: "遷都",
@@ -386,6 +495,13 @@ export function canStartProduction(city, id, tile = null, player = null) {
         if (!hasTech) {
             const techDef = getDefinition("technology", def.requiresTechnology);
             return { ok: false, message: `§c【${def.label}】の生産には技術【${techDef?.label ?? def.requiresTechnology}】の取得が必要です。` };
+        }
+    }
+    if (def.requiresCivic) {
+        const hasCivic = !!player && hasCompletedProgress(player, "civic", def.requiresCivic);
+        if (!hasCivic) {
+            const civicDef = getDefinition("civic", def.requiresCivic);
+            return { ok: false, message: `§c【${def.label}】の生産には社会制度【${civicDef?.label ?? def.requiresCivic}】の取得が必要です。` };
         }
     }
     return { ok: true };

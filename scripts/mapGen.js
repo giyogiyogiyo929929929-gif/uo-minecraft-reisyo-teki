@@ -41,7 +41,6 @@ export const RESOURCE_TYPES = {
     uranium: { label: "ウラン(238)", category: "戦略", allowedTerrains: ["grassland"], block: "minecraft:element_92" }
 };
 
-const TYPE_KEYS = Object.keys(TERRAIN_TYPES);
 const RESOURCE_KEYS = Object.keys(RESOURCE_TYPES);
 const SURFACE_BLOCK_BY_TYPE = {
     grassland: "minecraft:grass_block", forest: "minecraft:grass_block", desert: "minecraft:sand", mountain: "minecraft:stone",
@@ -49,14 +48,37 @@ const SURFACE_BLOCK_BY_TYPE = {
     mountainRange: "minecraft:stone",
 };
 
-function pickWeightedType(rng) {
-    const totalWeight = TYPE_KEYS.reduce((sum, k) => sum + TERRAIN_TYPES[k].weight, 0);
+// 💡 pickWeightedType() が実際に選ぶ対象となるバイオーム(平地に敷き詰める地形)。
+//    river/sea は別の専用アルゴリズム(海のクラスタ・川の乱歩)で配置され、
+//    pond/lake/mountainRange はriver/mountainの生成結果から自動的に派生する地形のため、
+//    ここには含めない(=OPが個別に有効/無効・重みを設定できるのはこの6種+river/sea)。
+const FILLABLE_TERRAIN_KEYS = ["grassland", "mountain", "desert", "forest", "rainforest", "cold"];
+
+/**
+ * biomeSettings(state.js の getMapGenSettings().biomes 相当)があればそちらの
+ * enabled/weightを優先し、無ければ TERRAIN_TYPES の既定の重みを使う。
+ * 全バイオームが無効化されている異常系では、生成が完全に止まらないよう grassland にフォールバックする。
+ */
+function pickWeightedType(rng, biomeSettings) {
+    const entries = FILLABLE_TERRAIN_KEYS
+        .map((key) => {
+            const override = biomeSettings?.[key];
+            const enabled = override?.enabled !== false;
+            const weight = enabled ? (override?.weight ?? TERRAIN_TYPES[key].weight) : 0;
+            return { key, weight: Math.max(0, weight) };
+        })
+        .filter((e) => e.weight > 0);
+    if (entries.length === 0) return "grassland";
+
+    const totalWeight = entries.reduce((sum, e) => sum + e.weight, 0);
     let roll = rng() * totalWeight;
-    for (const key of TYPE_KEYS) { roll -= TERRAIN_TYPES[key].weight; if (roll <= 0) return key; }
-    return TYPE_KEYS[0];
+    for (const e of entries) { roll -= e.weight; if (roll <= 0) return e.key; }
+    return entries[entries.length - 1].key;
 }
-function pickRandomResource(terrainType, rng) {
-    if (rng() > 0.25) return null;
+/** resourceChancePercent(0〜100)の確率で、その地形に配置可能な資源からランダムに1つ選ぶ。 */
+function pickRandomResource(terrainType, rng, resourceChancePercent = 25) {
+    const chance = Math.max(0, Math.min(100, resourceChancePercent)) / 100;
+    if (rng() > chance) return null;
     const matchingResources = RESOURCE_KEYS.filter(rKey => RESOURCE_TYPES[rKey].allowedTerrains.includes(terrainType));
     if (matchingResources.length === 0) return null;
     return matchingResources[Math.floor(rng() * matchingResources.length)];
@@ -171,15 +193,24 @@ async function placeBorderWallsAsync(dimension,originX,originZ,width,height,ySur
     for(const x of [minX,maxX]) for(let bz=minZ;bz<=maxZ;bz+=bandBlocks) { const bzEnd=Math.min(maxZ,bz+bandBlocks-1); if(useTickingArea){await setBandTickingArea(dimension,x-1,bz-1,x+1,bzEnd+1,ySurface);await waitForBandLoaded(dimension,x-1,bz-1,x+1,bzEnd+1,ySurface);} for(let z=bz;z<=bzEnd;z++) safeSetBlock(dimension,x,ySurface,z,obsidian); }
 }
 
-export async function generateMap(dimension,{originX,ySurface,originZ,width,height,seed,useTickingArea},onTileDone) {
+export async function generateMap(dimension,{originX,ySurface,originZ,width,height,seed,useTickingArea,genSettings},onTileDone) {
     tickingAreaCounter=0; previousTickingAreaName=null;
     const rng=makeRng(seed??Date.now());
+    const biomeSettings=genSettings?.biomes;
+    const resourceChance=genSettings?.resourceChance ?? 25;
     const grid=Array.from({length:height},()=>Array(width).fill(null));
-    const seaGroups=Math.max(1,Math.floor(width*height/40));
+    // 💡 海・川は重み付き抽選(pickWeightedType)ではなく専用アルゴリズムで配置するため、
+    //    biomeSettingsのenabled/weightを「既定密度に対する倍率」として反映する
+    //    (weightが既定値と同じなら従来と同じ密度、0または無効化されていれば一切生成しない)。
+    const seaSetting=biomeSettings?.sea;
+    const seaFactor=seaSetting?.enabled===false?0:Math.max(0,(seaSetting?.weight??TERRAIN_TYPES.sea.weight))/TERRAIN_TYPES.sea.weight;
+    const seaGroups=seaFactor>0?Math.max(1,Math.floor(width*height/40*seaFactor)):0;
     for(let i=0;i<seaGroups;i++){const sx=Math.floor(rng()*Math.max(1,width-1)),sz=Math.floor(rng()*Math.max(1,height-1));grid[sz][sx]="sea";if(width>1)grid[sz][sx+1]="sea";if(height>1){grid[sz+1][sx]="sea";if(width>1)grid[sz+1][sx+1]="sea";}}
-    const riverCount=Math.max(1,Math.floor(width*height/30));
+    const riverSetting=biomeSettings?.river;
+    const riverFactor=riverSetting?.enabled===false?0:Math.max(0,(riverSetting?.weight??TERRAIN_TYPES.river.weight))/TERRAIN_TYPES.river.weight;
+    const riverCount=riverFactor>0?Math.max(1,Math.floor(width*height/30*riverFactor)):0;
     for(let i=0;i<riverCount;i++){let rx=Math.floor(rng()*width),rz=Math.floor(rng()*height),length=5+Math.floor(rng()*10);for(let l=0;l<length;l++){if(rx>=0&&rx<width&&rz>=0&&rz<height){if(grid[rz][rx]==="sea")break;grid[rz][rx]="river";}const dir=Math.floor(rng()*4);if(dir===0)rx++;else if(dir===1)rx--;else if(dir===2)rz++;else rz--;}}
-    for(let tz=0;tz<height;tz++)for(let tx=0;tx<width;tx++)if(grid[tz][tx]===null){let type=pickWeightedType(rng);while(type==="river"||type==="sea")type=pickWeightedType(rng);grid[tz][tx]=type;}
+    for(let tz=0;tz<height;tz++)for(let tx=0;tx<width;tx++)if(grid[tz][tx]===null)grid[tz][tx]=pickWeightedType(rng,biomeSettings);
     const connectedRiver=Array.from({length:height},()=>Array(width).fill(false)),queue=[];let queueHead=0;
     for(let tz=0;tz<height;tz++)for(let tx=0;tx<width;tx++)if(grid[tz][tx]==="river"){let adjSea=false;for(const d of [{x:1,z:0},{x:-1,z:0},{x:0,z:1},{x:0,z:-1}])if(grid[tz+d.z]?.[tx+d.x]==="sea")adjSea=true;if(adjSea){connectedRiver[tz][tx]=true;queue.push({x:tx,z:tz});}}
     while(queueHead<queue.length){const {x,z}=queue[queueHead++];for(const d of [{x:1,z:0},{x:-1,z:0},{x:0,z:1},{x:0,z:-1}]){const nx=x+d.x,nz=z+d.z;if(grid[nz]?.[nx]==="river"&&!connectedRiver[nz][nx]){connectedRiver[nz][nx]=true;queue.push({x:nx,z:nz});}}}
@@ -190,7 +221,7 @@ export async function generateMap(dimension,{originX,ySurface,originZ,width,heig
     const visitedMountain=Array.from({length:height},()=>Array(width).fill(false));
     for(let tz=0;tz<height;tz++)for(let tx=0;tx<width;tx++)if(grid[tz][tx]==="mountain"&&!visitedMountain[tz][tx]){const component=[],mQueue=[{x:tx,z:tz}];let mQueueHead=0;visitedMountain[tz][tx]=true;while(mQueueHead<mQueue.length){const curr=mQueue[mQueueHead++];component.push(curr);for(const d of [{x:1,z:0},{x:-1,z:0},{x:0,z:1},{x:0,z:-1}]){const nx=curr.x+d.x,nz=curr.z+d.z;if(grid[nz]?.[nx]==="mountain"&&!visitedMountain[nz][nx]){visitedMountain[nz][nx]=true;mQueue.push({x:nx,z:nz});}}}if(component.length>=2)for(const p of component)grid[p.z][p.x]="mountainRange";}
     const failedTiles=[];
-    for(let bandTz=0;bandTz<height;bandTz+=TICKING_BAND_TILES){const bandTzEnd=Math.min(height,bandTz+TICKING_BAND_TILES);for(let bandTx=0;bandTx<width;bandTx+=TICKING_BAND_TILES){const bandTxEnd=Math.min(width,bandTx+TICKING_BAND_TILES);if(useTickingArea){const minBX=originX+bandTx*TILE_SIZE-2,maxBX=originX+bandTxEnd*TILE_SIZE+2,minBZ=originZ+bandTz*TILE_SIZE-2,maxBZ=originZ+bandTzEnd*TILE_SIZE+2;await setBandTickingArea(dimension,minBX,minBZ,maxBX,maxBZ,ySurface);await waitForBandLoaded(dimension,minBX,minBZ,maxBX,maxBZ,ySurface);}await runJobAsync(function*(){for(let tz=bandTz;tz<bandTzEnd;tz++)for(let tx=bandTx;tx<bandTxEnd;tx++){const type=grid[tz][tx],resource=pickRandomResource(type,rng),foodYield=calculateFoodYield(type,resource,rng);let productionYield=Math.floor(rng()*3)+1;if(resource&&RESOURCE_TYPES[resource]?.category==="戦略")productionYield+=2;const baseX=originX+tx*TILE_SIZE,baseZ=originZ+tz*TILE_SIZE;yield*shapeTile(dimension,baseX,ySurface,baseZ,type,resource);if(isTilePlaced(dimension,baseX,ySurface,baseZ,type))onTileDone(tx,tz,type,resource,foodYield,productionYield);else failedTiles.push({tx,tz,type,resource,foodYield,productionYield,baseX,baseZ});}});}}
+    for(let bandTz=0;bandTz<height;bandTz+=TICKING_BAND_TILES){const bandTzEnd=Math.min(height,bandTz+TICKING_BAND_TILES);for(let bandTx=0;bandTx<width;bandTx+=TICKING_BAND_TILES){const bandTxEnd=Math.min(width,bandTx+TICKING_BAND_TILES);if(useTickingArea){const minBX=originX+bandTx*TILE_SIZE-2,maxBX=originX+bandTxEnd*TILE_SIZE+2,minBZ=originZ+bandTz*TILE_SIZE-2,maxBZ=originZ+bandTzEnd*TILE_SIZE+2;await setBandTickingArea(dimension,minBX,minBZ,maxBX,maxBZ,ySurface);await waitForBandLoaded(dimension,minBX,minBZ,maxBX,maxBZ,ySurface);}await runJobAsync(function*(){for(let tz=bandTz;tz<bandTzEnd;tz++)for(let tx=bandTx;tx<bandTxEnd;tx++){const type=grid[tz][tx],resource=pickRandomResource(type,rng,resourceChance),foodYield=calculateFoodYield(type,resource,rng);let productionYield=Math.floor(rng()*3)+1;if(resource&&RESOURCE_TYPES[resource]?.category==="戦略")productionYield+=2;const baseX=originX+tx*TILE_SIZE,baseZ=originZ+tz*TILE_SIZE;yield*shapeTile(dimension,baseX,ySurface,baseZ,type,resource);if(isTilePlaced(dimension,baseX,ySurface,baseZ,type))onTileDone(tx,tz,type,resource,foodYield,productionYield);else failedTiles.push({tx,tz,type,resource,foodYield,productionYield,baseX,baseZ});}});}}
     const permanentlyFailedTiles=[];
     for(const failed of failedTiles){let succeeded=false;for(let retry=0;retry<5&&!succeeded;retry++){if(useTickingArea){const minBX=failed.baseX-2,maxBX=failed.baseX+TILE_SIZE+1,minBZ=failed.baseZ-2,maxBZ=failed.baseZ+TILE_SIZE+1;await setBandTickingArea(dimension,minBX,minBZ,maxBX,maxBZ,ySurface);await waitForBandLoaded(dimension,minBX,minBZ,maxBX,maxBZ,ySurface);}await runJobAsync(function*(){yield*shapeTile(dimension,failed.baseX,ySurface,failed.baseZ,failed.type,failed.resource);});succeeded=isTilePlaced(dimension,failed.baseX,ySurface,failed.baseZ,failed.type);}if(!succeeded){console.warn?.(`[civ mapGen] タイル(${failed.tx},${failed.tz})は再試行しても設置を確認できませんでした。`);permanentlyFailedTiles.push({tx:failed.tx,tz:failed.tz});}onTileDone(failed.tx,failed.tz,failed.type,failed.resource,failed.foodYield,failed.productionYield);}
     await placeBorderWallsAsync(dimension,originX,originZ,width,height,ySurface,useTickingArea);if(useTickingArea)clearBandTickingArea(dimension);return {failedTiles:permanentlyFailedTiles};

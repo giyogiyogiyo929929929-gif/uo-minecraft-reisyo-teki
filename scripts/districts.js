@@ -35,6 +35,7 @@ import { isWaterTerrain } from "./mapGen.js";
  * @property {number} cost 完成に必要な生産力の合計値
  * @property {boolean} [allowWater] trueの場合のみ水上マス(川・海・池・湖)に配置できる(省略時は不可)
  * @property {string} [requiresTechnology] 配置に必要な技術ID(technology progression)
+ * @property {string} [requiresCivic] 配置に必要な社会制度ID(civic progression)
  * @property {Record<string, number>} [perPopulationYields] この区域を持つ都市に、人口1につき
  *   追加で加算される産出量(例: { faith: 2 })
  * @property {Record<string, number>} [flatYields] この区域があるだけで(隣接マスに関係なく)
@@ -148,6 +149,13 @@ export function canStartDistrict(tile, id, playerId, city, player = null, tiles 
             return { ok: false, message: `§c【${def.label}】の配置には技術【${techDef?.label ?? def.requiresTechnology}】の取得が必要です。` };
         }
     }
+    if (def.requiresCivic) {
+        const hasCivic = !!player && hasCompletedProgress(player, "civic", def.requiresCivic);
+        if (!hasCivic) {
+            const civicDef = getDefinition("civic", def.requiresCivic);
+            return { ok: false, message: `§c【${def.label}】の配置には社会制度【${civicDef?.label ?? def.requiresCivic}】の取得が必要です。` };
+        }
+    }
     return { ok: true };
 }
 
@@ -167,6 +175,8 @@ export function startDistrictConstruction(city, tile, id, tileKey) {
  * @property {string} icon 表示アイコン
  * @property {number} cost 完成に必要な生産力の合計値
  * @property {string} forDistrict どの区域(DISTRICT_DEFSのID)の上に建てられるか
+ * @property {string} [requiresTechnology] 建設に必要な技術ID(technology progression)
+ * @property {string} [requiresCivic] 建設に必要な社会制度ID(civic progression)
  * @property {Record<string, number>} [flatYields] この建造物があるだけで(隣接マスに関係なく)
  *   都市に毎ターン加算される産出量(例: { faith: 2 })
  * @property {(city: any, tile: any) => void} onComplete 完成時の効果を適用する関数
@@ -185,6 +195,26 @@ export const DISTRICT_BUILDING_DEFS = {
         flatYields: { faith: 2 },
         onComplete: (city) => { city.shrine = true; },
         completeMessage: (tx, tz) => `§e[Complete] (${tx}, ${tz})の聖地に社が完成しました！ (信仰力の産出+2、伝道者を購入可能に)`,
+    },
+    library: {
+        label: "図書館",
+        icon: "[Library]",
+        cost: 60,
+        forDistrict: "campus",
+        requiresTechnology: "education",
+        flatYields: { science: 3 },
+        onComplete: (city) => { city.library = true; },
+        completeMessage: (tx, tz) => `§e[Complete] (${tx}, ${tz})のキャンパスに図書館が完成しました！ (科学力の産出+3)`,
+    },
+    cathedral: {
+        label: "大聖堂",
+        icon: "[Cathedral]",
+        cost: 90,
+        forDistrict: "sacredSite",
+        requiresCivic: "theocracy",
+        flatYields: { faith: 4 },
+        onComplete: (city) => { city.cathedral = true; },
+        completeMessage: (tx, tz) => `§e[Complete] (${tx}, ${tz})の聖地に大聖堂が完成しました！ (信仰力の産出+4)`,
     },
 };
 
@@ -211,9 +241,10 @@ export function getDistrictBuildingIds() {
  * @param {string} id 区域専用建造物のID
  * @param {string} playerId 建設しようとしているプレイヤー/国家のID
  * @param {any} city 帰属先となる都市のデータ
+ * @param {any} [player] 技術/社会制度の取得状況の判定に使うプレイヤー/国家ハンドル(省略時はチェックを行わない)
  * @returns {{ ok: boolean, message?: string }}
  */
-export function canStartDistrictBuilding(tile, id, playerId, city) {
+export function canStartDistrictBuilding(tile, id, playerId, city, player = null) {
     const def = DISTRICT_BUILDING_DEFS[id];
     if (!def) return { ok: false, message: "§c不明な建造物です。" };
     if (!tile) return { ok: false, message: "§c無効なマスです。" };
@@ -225,6 +256,20 @@ export function canStartDistrictBuilding(tile, id, playerId, city) {
     }
     if (city?.[id]) return { ok: false, message: `§cこの都市には既に【${def.label}】が存在します。` };
     if (city?.districtConstruction) return { ok: false, message: "§c既にこの都市は区域(または区域専用の建造物)を建設中です(同時に1つまで)。" };
+    if (def.requiresTechnology) {
+        const hasTech = !!player && hasCompletedProgress(player, "technology", def.requiresTechnology);
+        if (!hasTech) {
+            const techDef = getDefinition("technology", def.requiresTechnology);
+            return { ok: false, message: `§c【${def.label}】の建設には技術【${techDef?.label ?? def.requiresTechnology}】の取得が必要です。` };
+        }
+    }
+    if (def.requiresCivic) {
+        const hasCivic = !!player && hasCompletedProgress(player, "civic", def.requiresCivic);
+        if (!hasCivic) {
+            const civicDef = getDefinition("civic", def.requiresCivic);
+            return { ok: false, message: `§c【${def.label}】の建設には社会制度【${civicDef?.label ?? def.requiresCivic}】の取得が必要です。` };
+        }
+    }
     return { ok: true };
 }
 

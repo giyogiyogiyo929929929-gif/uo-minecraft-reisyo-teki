@@ -1,25 +1,249 @@
 import { world, Player, PlayerPermissionLevel } from "@minecraft/server";
-import { ActionFormData, ModalFormData } from "@minecraft/server-ui";
-import { getMapConfig, getTile, getTiles, setTiles, getMatchSettings, setMatchSettings } from "./state.js";
+import { ActionFormData, ModalFormData, MessageFormData } from "@minecraft/server-ui";
+import { ChestFormData } from "./chestForms.js";
+import { getMapConfig, getTile, getTiles, setTiles, getMatchSettings, setMatchSettings, getMapGenSettings, setMapGenSettings, resetMapGenSettings, broadcast } from "./state.js";
 import { worldToTile, TERRAIN_TYPES, RESOURCE_TYPES } from "./mapGen.js"
-import { turnInfoText, isPlayersTurn, joinGame, endGame, getTurnState, calculateCityFoodIncomes, getCityCurrentYields, debugForceVictory, connectTradeRoutes } from "./turns.js";
+import { turnInfoText, isPlayersTurn, joinGame, endGame, getTurnState, setTurnState, calculateCityFoodIncomes, getCityCurrentYields, debugForceVictory, connectTradeRoutes, getPlayerColor } from "./turns.js";
 import { PRODUCTION_DEFS, canStartProduction, getTotalWorkerActionsRemaining, WORKER_ACTIONS_PER_UNIT, getWorkerCount } from "./production.js";
 import { getFacilityIds, getFacilityDef, canInstallFacility } from "./facilities.js";
 import { getDistrictIds, getDistrictDef, canStartDistrict, getDistrictBuildingIds, getDistrictBuildingDef, canStartDistrictBuilding, isSacredSiteTile, hasCityDistrict } from "./districts.js";
 import {
     getReligiousUnitIds, getReligiousUnitDef, hasFoundedReligion, getReligionName,
     canFoundReligion, getTotalCivFaith, getNationalDominantReligion,
-    getCityFollowers, getCityDominantReligion,
+    getCityFollowers, getCityDominantReligion, getReligiousUnitCost, hasStartedInquisition,
 } from "./religion.js";
 import { getDefinitions, getKindLabel, getPointsLabel, getProgressState, hasCompletedProgress, getDefinition } from "./progression.js";
 import { getRelation, sendRequest, getRequestsFor, acceptRequest, rejectRequest, breakRelation, declareWar, isAtWar, hasDiplomaticAgreement } from "./diplomacy.js";
-import { getAttackRange, getAttackableTargets, getEffectiveCombatStrength, isRangedUnit, getEffectiveRangedStrength, canUnitEnterTile } from "./combat.js";
+import { getAttackRange, getAttackableTargets, getEffectiveCombatStrength, isRangedUnit, getEffectiveRangedStrength, canUnitEnterTile, canTravelPath } from "./combat.js";
 import { resolveOwningCityKey, getAdjacentTileEntries } from "./adjacency.js";
-import { getRealPlayer, getControllableCivs, getActiveCivId, setActiveCivId, addVirtualCiv, getCivStorageHandle, resolveCivName, getVirtualCivById } from "./civs.js";
-import { removeUnitLabelAt } from "./unitLabels.js";
+import { getRealPlayer, getControllableCivs, getActiveCivId, setActiveCivId, addVirtualCiv, removeVirtualCiv, getCivStorageHandle, resolveCivName, getVirtualCivById } from "./civs.js";
+import { refreshUnitLabelAt } from "./unitLabels.js";
 
 function isOperator(player) {
     return player.playerPermissionLevel === PlayerPermissionLevel.Operator;
+}
+
+// 💡 メニューの見た目(通常のフォーム / チェストUI)は試合の設定ではなく、プレイヤー個人の
+//    表示上の好みなので、player自身のDynamic Propertyに保存する(試合をまたいでも保持される)。
+//    必ず実プレイヤー(getRealPlayer)に対して読み書きすること。テスト国家/Botの擬似プレイヤーは
+//    実体が無い(Dynamic Propertyを持たない)ため。
+const MENU_STYLE_KEY = "civ:menuStyle";
+
+function getMenuStyle(realPlayer) {
+    return realPlayer.getDynamicProperty(MENU_STYLE_KEY) === "chest" ? "chest" : "form";
+}
+
+function setMenuStyle(realPlayer, style) {
+    realPlayer.setDynamicProperty(MENU_STYLE_KEY, style);
+}
+
+// 💡 チェストUIでメインメニューの各ボタンに付けるアイコン(バニラのアイテム/ブロックの
+//    typeId。chestForms.js の ChestFormData.button 参照)。ここに無いactionは
+//    MAIN_MENU_DEFAULT_ICON にフォールバックする。見た目の分かりやすさのための対応付けであり、
+//    ゲームロジックには影響しない。
+const MAIN_MENU_DEFAULT_ICON = "minecraft:paper";
+const MAIN_MENU_ACTION_ICONS = {
+    help: "minecraft:book",
+    start: "minecraft:bell",
+    join: "minecraft:name_tag",
+    joinall: "minecraft:name_tag",
+    claim: "minecraft:grass_block",
+    buyrights: "minecraft:emerald",
+    settle: "minecraft:brick",
+    chop: "minecraft:iron_axe",
+    installfacility: "minecraft:crafting_table",
+    startdistrict: "minecraft:brick",
+    startdistrictbuilding: "minecraft:brick",
+    buyreligious: "minecraft:nether_star",
+    movereligious: "minecraft:nether_star",
+    proselytize: "minecraft:nether_star",
+    technology: "minecraft:iron_ingot",
+    civic: "minecraft:writable_book",
+    diplomacy: "minecraft:white_banner",
+    myunits: "minecraft:iron_sword",
+    religion: "minecraft:nether_star",
+    moveunit: "minecraft:arrow",
+    attackunit: "minecraft:iron_sword",
+    capturecity: "minecraft:white_banner",
+    purgeheretic: "minecraft:barrier",
+    healunit: "minecraft:golden_apple",
+    production: "minecraft:furnace",
+    launchmissile: "minecraft:tnt",
+    renamecity: "minecraft:name_tag",
+    endturn: "minecraft:clock",
+    forceendturn: "minecraft:clock",
+    endgame: "minecraft:barrier",
+    matchsettings: "minecraft:redstone",
+    mapgensettings: "minecraft:oak_sapling",
+    debugvictory: "minecraft:totem_of_undying",
+    debugtile: "minecraft:command_block",
+    debugallcivs: "minecraft:spyglass",
+    civmanage: "minecraft:player_head",
+    togglemenustyle: "minecraft:compass",
+    mapview: "minecraft:filled_map",
+    close: "minecraft:barrier",
+};
+
+/**
+ * メインメニューをチェストUI(development_resource_packs/testapia_ui、§18参照)風に表示する。
+ * buttons配列のインデックスとチェストのスロット番号を1:1に対応させるため、選ばれたスロット
+ * 番号がそのまま buttons のインデックスとして使える。ChestFormDataにはActionFormDataの
+ * ようなbody欄が無いため、スロットに余裕があれば最後の1マスに「現在の状況」枠を置いて
+ * body[](ターン情報・都市情報など)をそこへ載せる(選んでも buttons の範囲外なので何も
+ * 起きず、メニューが閉じるだけ)。このリソースパックがワールド側で有効になっていない場合、
+ * マーカー文字列が付いた普通のフォームとして表示されてしまう(見た目が崩れるだけで、
+ * 動作自体は壊れない)。
+ * @returns {Promise<number|undefined>} 選ばれたスロット番号(=buttonsのインデックス)。
+ *   キャンセルされた場合は undefined。
+ */
+async function showMainMenuChest(realPlayer, body, buttons) {
+    const chest = new ChestFormData("large").title("Civ Tactics");
+    const capacity = chest.slotCount;
+    for (let i = 0; i < buttons.length && i < capacity; i++) {
+        const icon = MAIN_MENU_ACTION_ICONS[buttons[i].action] ?? MAIN_MENU_DEFAULT_ICON;
+        chest.button(i, buttons[i].text, null, icon);
+    }
+    if (buttons.length < capacity) {
+        chest.button(capacity - 1, "§e現在の状況", body, "minecraft:writable_book");
+    }
+    const res = await chest.show(realPlayer);
+    return res.canceled ? undefined : res.selection;
+}
+
+// 💡 マップビューア(§18参照)。チェストUI(9×6マス)のうち、下段1行(9マス)は
+//    上下左右移動・閉じるなどの操作専用に固定し、残り5行(9×5=45マス)を実際のマップ表示に使う。
+const MAP_VIEW_WIDTH = 9;
+const MAP_VIEW_HEIGHT = 5;
+
+// 💡 未所有・都市無しのマスに表示する、地形ごとのアイコン(バニラのアイテム/ブロックのtypeId)。
+//    実際に地形生成(mapGen.js)で使っているブロックとできるだけ揃え、見た目から地形が
+//    推測しやすいようにしている。
+const MAP_VIEW_TERRAIN_ICONS = {
+    grassland: "minecraft:grass_block",
+    forest: "minecraft:oak_leaves",
+    rainforest: "minecraft:jungle_leaves",
+    desert: "minecraft:sand",
+    mountain: "minecraft:stone",
+    mountainRange: "minecraft:obsidian",
+    cold: "minecraft:packed_ice",
+    sea: "minecraft:prismarine",
+    river: "minecraft:water_bucket",
+    pond: "minecraft:ice",
+    lake: "minecraft:blue_ice",
+};
+const MAP_VIEW_DEFAULT_TERRAIN_ICON = "minecraft:grass_block";
+
+/**
+ * 1マス分のタイルを、マップビューアのチェストスロット1つの見た目(アイコン・名前・説明文)に
+ * 変換する。見やすさのため、意味のある情報ほど優先してアイコンに反映する:
+ * 都市があれば所有者の色の旗(一目で「誰の都市か」がわかる) > 所有マスなら所有者の色の羊毛
+ * (国境線・領土がひと目で色分けされる、Risk風の見た目を狙っている) > それ以外は地形そのものの
+ * アイコン(資源の有無ではアイコンを変えない。資源はどのバイオームにも乗り得るため、
+ * バイオームのアイコンを優先して地形の見分けやすさを保つ)。座標・地形・基礎産出量
+ * (foodYield/productionYield)・資源・所有者・**戦闘ユニット/宗教ユニットの有無**は、
+ * アイテムの説明欄(lore)に文字情報として必ず残すため、カーソルを合わせれば正確な情報を
+ * 確認できる(ユニットの有無ではアイコンは変えない。地形/所有者の色分けの見分けやすさを
+ * 優先するため)。
+ */
+function describeMapViewTile(tx, tz, tile) {
+    const terrainLabel = TERRAIN_TYPES[tile.type]?.label ?? tile.type;
+    const lore = [
+        `§7座標: (${tx}, ${tz})`,
+        `§7地形: ${terrainLabel}`,
+        `§6[Food]x${tile.foodYield ?? 0} §e[Prod]x${tile.productionYield ?? 0}`,
+    ];
+    if (tile.resource) lore.push(`§6資源: ${RESOURCE_TYPES[tile.resource]?.label ?? tile.resource}`);
+    if (tile.ownerId) lore.push(`§b所有: ${resolveCivName(tile.ownerId) ?? "?"}`);
+    if (tile.combatUnit) {
+        const u = tile.combatUnit;
+        lore.push(`§c[Unit] ${resolveCivName(u.ownerId) ?? "?"}の${u.label ?? u.id ?? "戦闘ユニット"} (HP ${u.hp ?? u.maxHp ?? 0}/${u.maxHp ?? 0})`);
+    }
+    if (tile.religiousUnit) {
+        const u = tile.religiousUnit;
+        lore.push(`§d[Missionary] ${resolveCivName(u.ownerId) ?? "?"}の${u.label ?? "宗教ユニット"} (HP ${u.hp ?? u.maxHp ?? 0}/${u.maxHp ?? 0})`);
+    }
+
+    if (tile.city) {
+        const color = tile.ownerId ? getPlayerColor(tile.ownerId) : "white";
+        return {
+            icon: `minecraft:${color}_banner`,
+            name: `§e[City] ${tile.city.name ?? "都市"}${tile.city.isCapital ? " §6(首都)" : ""}`,
+            lore,
+        };
+    }
+    if (tile.ownerId) {
+        const color = getPlayerColor(tile.ownerId);
+        return { icon: `minecraft:${color}_wool`, name: `§f${terrainLabel}`, lore };
+    }
+    return { icon: MAP_VIEW_TERRAIN_ICONS[tile.type] ?? MAP_VIEW_DEFAULT_TERRAIN_ICON, name: `§8${terrainLabel}`, lore };
+}
+
+/**
+ * OP専用(テスト機能): マップ全体をチェストUIで一覧できるビューア。マップ全体は54マスの
+ * チェストに収まりきらないことが多いため、一度に9×5マス分だけを表示し、下段1行(9マス)の
+ * 上下左右ボタンで表示範囲を1画面分ずつ(横9マス/縦5マス)動かしながら見ていく。
+ * チェストUI専用の画面(§18参照。グリッド状の情報は通常のフォームでは表現しづらいため、
+ * 通常フォーム版は用意していない)であり、補助リソースパックが無効な状態で開くと
+ * 崩れた見た目になる(壊れはしない)。
+ * @param {number} [viewX] 表示範囲の左上のタイルX座標(省略時はマップ中央)
+ * @param {number} [viewZ] 表示範囲の左上のタイルZ座標(省略時はマップ中央)
+ */
+async function openMapViewMenu(realPlayer, viewX, viewZ) {
+    const config = getMapConfig();
+    if (!config) {
+        realPlayer.sendMessage("§cマップがまだ生成されていません。");
+        await openMainMenu(realPlayer);
+        return;
+    }
+
+    const maxX = Math.max(0, config.width - MAP_VIEW_WIDTH);
+    const maxZ = Math.max(0, config.height - MAP_VIEW_HEIGHT);
+    const x = Math.max(0, Math.min(viewX ?? Math.floor((config.width - MAP_VIEW_WIDTH) / 2), maxX));
+    const z = Math.max(0, Math.min(viewZ ?? Math.floor((config.height - MAP_VIEW_HEIGHT) / 2), maxZ));
+
+    const tiles = getTiles();
+    const chest = new ChestFormData("large").title("Civ Tactics マップ");
+    for (let row = 0; row < MAP_VIEW_HEIGHT; row++) {
+        const tz = z + row;
+        if (tz >= config.height) continue;
+        for (let col = 0; col < MAP_VIEW_WIDTH; col++) {
+            const tx = x + col;
+            if (tx >= config.width) continue;
+            const tile = tiles[`${tx},${tz}`];
+            if (!tile) continue;
+            const { icon, name, lore } = describeMapViewTile(tx, tz, tile);
+            chest.button(row * MAP_VIEW_WIDTH + col, name, lore, icon);
+        }
+    }
+
+    // 💡 下段(スロット45〜53)は操作専用。十字型に配置する(西=46, 北=48, 現在地=49,
+    //    南=50, 東=52)。47・51は意図的に空白のままにして、方向ボタンの押し間違いを防ぐ。
+    const controlRow = MAP_VIEW_HEIGHT * MAP_VIEW_WIDTH;
+    chest.button(controlRow + 0, "§e使い方", [
+        "§7下段のボタンで表示範囲を移動できます。",
+        "§7マスの色は所有者(領土)、旗は都市を表します。",
+    ], "minecraft:book");
+    chest.button(controlRow + 1, "§b◀ 西へ移動", null, "minecraft:arrow");
+    chest.button(controlRow + 3, "§b▲ 北へ移動", null, "minecraft:arrow");
+    chest.button(controlRow + 4, "§a現在地", [
+        `§7X: ${x} 〜 ${Math.min(config.width, x + MAP_VIEW_WIDTH) - 1}`,
+        `§7Z: ${z} 〜 ${Math.min(config.height, z + MAP_VIEW_HEIGHT) - 1}`,
+    ], "minecraft:compass");
+    chest.button(controlRow + 5, "§b▼ 南へ移動", null, "minecraft:arrow");
+    chest.button(controlRow + 7, "§b▶ 東へ移動", null, "minecraft:arrow");
+    chest.button(controlRow + 8, "§c閉じる", null, "minecraft:barrier");
+
+    const res = await chest.show(realPlayer);
+    if (res.canceled || res.selection === undefined) return;
+
+    switch (res.selection) {
+        case controlRow + 1: await openMapViewMenu(realPlayer, x - MAP_VIEW_WIDTH, z); return;
+        case controlRow + 3: await openMapViewMenu(realPlayer, x, z - MAP_VIEW_HEIGHT); return;
+        case controlRow + 5: await openMapViewMenu(realPlayer, x, z + MAP_VIEW_HEIGHT); return;
+        case controlRow + 7: await openMapViewMenu(realPlayer, x + MAP_VIEW_WIDTH, z); return;
+        case controlRow + 8: return; // 閉じる
+        default: await openMapViewMenu(realPlayer, x, z); return; // マスや情報欄をタップした場合は同じ範囲を再表示
+    }
 }
 
 /**
@@ -133,7 +357,12 @@ export async function openMainMenu(player) {
                 // 💡 自国・同盟国以外の都市は、偵察による有利化を防ぐため詳細情報(人口・生産・
                 //    備蓄・区域建設・交易路・宗教的圧力の内訳・ミサイル在庫等)を表示しない
                 //    (存在・所有者・都市名までは他の箇所の表示で分かるが、それ以上は隠す)。
-                const isFriendlyCity = currentTile.ownerId === player.id || hasDiplomaticAgreement(player.id, currentTile.ownerId);
+                //    ただし、このゲームに参加していない(turn.playerOrderに含まれない)純粋な
+                //    観戦者には、偵察による有利不利が生じ得ないためこの制限を適用しない。
+                const viewerIsParticipant = Array.isArray(turn.playerOrder) && turn.playerOrder.includes(player.id);
+                const isFriendlyCity = !viewerIsParticipant
+                    || currentTile.ownerId === player.id
+                    || hasDiplomaticAgreement(player.id, currentTile.ownerId);
 
                 if (!isFriendlyCity) {
                     body.push(`\n§6【${city.isCapital ? "首都" : "地方都市"}: ${city.name}】 §7(他国の都市のため詳細情報は非表示)`);
@@ -224,6 +453,7 @@ export async function openMainMenu(player) {
     }
 
     const buttons = [];
+    buttons.push({ text: "§b[Help] ルール説明を見る", action: "help" });
     if (!turn.started) {
         if (isOp) { buttons.push({ text: "ゲームを開始する", action: "start" });  }
         buttons.push({ text: "ゲームに参加する", action: "join" });
@@ -301,29 +531,60 @@ export async function openMainMenu(player) {
         }
     }
     if (currentTile?.religiousUnit?.ownerId === player.id) {
+        const ownUnit = currentTile.religiousUnit;
+        const ownDef = getReligiousUnitDef(ownUnit.id);
         buttons.push({ text: "§d[Missionary] 宗教ユニットの移動", action: "movereligious" });
-        buttons.push({ text: "§d[Faith] 隣接する都市に布教する", action: "proselytize" });
+        if (ownDef?.canProselytize !== false) {
+            buttons.push({ text: "§d[Faith] 隣接する都市に布教する", action: "proselytize" });
+        }
+        if (ownDef?.canAttack && !ownUnit.hasAttackedThisTurn) {
+            buttons.push({ text: "§4[Faith][Combat] 敵の宗教ユニットを攻撃する", action: "attackreligious" });
+        }
+        // 💡 審問の開始は「布教力が満タン(=一度も布教していない)使徒のみ」行える一度きりの能力。
+        if (ownDef?.canStartInquisition && !hasStartedInquisition(player)
+            && (ownUnit.evangelismPower ?? 0) >= (ownDef.evangelismPower ?? 0)) {
+            buttons.push({ text: "§4[Inquisition] 審問を開始する", action: "startinquisition" });
+        }
+        if (ownDef?.canSuppress && (ownUnit.evangelismPower ?? 0) > 0) {
+            buttons.push({ text: "§4[Inquisition] この都市で弾圧を行う", action: "inquisitorsuppress" });
+        }
     }
     if (turn.started) { buttons.push({ text: "ターンを終了する", action: "endturn" }); }
     if (isOp && turn.started) buttons.push({ text: "§6【管理者】手番を強制スキップ", action: "forceendturn" });
     if (isOp) buttons.push({ text: "§c【管理者】ゲームをリセット", action: "endgame" });
     if (isOp) buttons.push({ text: "§e[Settings] 試合の設定(産出倍率・外交の有無)", action: "matchsettings" });
+    if (isOp) buttons.push({ text: "§e[Settings] マップ生成の設定(バイオーム・資源)", action: "mapgensettings" });
     if (isOp && turn.started) buttons.push({ text: "§c[Debug]【デバッグ】指定した国家を即座に勝利させる", action: "debugvictory" });
     if (isOp && currentTile) buttons.push({ text: "§c[Debug]【デバッグ】このマスを編集する", action: "debugtile" });
     if (isOp && turn.started) buttons.push({ text: "§b[Intel]【デバッグ】全国家の情報を閲覧する", action: "debugallcivs" });
     if (isOp) buttons.push({ text: "§d[Civs] 国家管理(ソロテスト用)", action: "civmanage" });
+    if (isOp && config) buttons.push({ text: "§b[Test] マップを見る(チェストUI)", action: "mapview" });
+    const realPlayer = getRealPlayer(player);
+    const menuStyle = getMenuStyle(realPlayer);
+    buttons.push({
+        text: menuStyle === "chest" ? "§b[UI] 通常のメニューに切り替える" : "§b[UI] チェストUIに切り替える",
+        action: "togglemenustyle",
+    });
     buttons.push({ text: "閉じる", action: "close" });
 
-    const form = new ActionFormData().title("Civ Tactics メニュー").body(body.join("\n"));
-    for (const btn of buttons) form.button(btn.text);
-
-    const response = await form.show(getRealPlayer(player));
-    if (response.canceled) return;
-    const selection = response.selection;
+    let selection;
+    if (menuStyle === "chest") {
+        selection = await showMainMenuChest(realPlayer, body, buttons);
+    } else {
+        const form = new ActionFormData().title("Civ Tactics メニュー").body(body.join("\n"));
+        for (const btn of buttons) form.button(btn.text);
+        const response = await form.show(realPlayer);
+        selection = response.canceled ? undefined : response.selection;
+    }
     if (selection === undefined || selection < 0 || selection >= buttons.length) return;
     const selectedAction = buttons[selection].action;
 
     switch (selectedAction) {
+        case "togglemenustyle":
+            setMenuStyle(realPlayer, menuStyle === "chest" ? "form" : "chest");
+            await openMainMenu(player);
+            break;
+        case "help": await openHelpMenu(player); break;
         case "start": (await import("./bots.js")).startGameAuto(); break;
         case "join": player.sendMessage(joinGame(player).message); break;
         case "joinall": if (isOp) (await import("./commands.js")).cmdJoinAll(player); break;
@@ -353,6 +614,15 @@ export async function openMainMenu(player) {
             break;
         case "purgeheretic":
             if (currentTile?.combatUnit?.ownerId === player.id) (await import("./commands.js")).cmdPurgeHeretic(player, tx, tz);
+            break;
+        case "attackreligious":
+            if (currentTile?.religiousUnit?.ownerId === player.id) await openReligiousUnitAttackMenu(player, tx, tz);
+            break;
+        case "startinquisition":
+            if (currentTile?.religiousUnit?.ownerId === player.id) (await import("./commands.js")).cmdStartInquisition(player, tx, tz);
+            break;
+        case "inquisitorsuppress":
+            if (currentTile?.religiousUnit?.ownerId === player.id) (await import("./commands.js")).cmdInquisitorSuppress(player, tx, tz);
             break;
         case "healunit":
             if (currentTile?.combatUnit?.ownerId === player.id) (await import("./commands.js")).cmdHealCombatUnit(player, tx, tz);
@@ -393,15 +663,108 @@ export async function openMainMenu(player) {
             if (!result.ok) player.sendMessage(result.message);
             break;
         }
-        case "endgame": if (isOp) world.sendMessage(endGame().message); break;
+        // 💡 ゲームリセットは勝利メッセージ同様、行動ログの表示設定(logsEnabled)に関わらず
+        //    常に表示する(broadcast()を使わずworld.sendMessage()を直接呼ぶ)。
+        case "endgame": if (isOp) world.sendMessage(endGame(getRealPlayer(player).name).message); break;
         case "forceendturn": if (isOp) { const r = (await import("./bots.js")).forceEndTurnAuto(); if (!r.ok) player.sendMessage(r.message); } break;
         case "debugvictory": if (isOp) await openDebugVictoryMenu(getRealPlayer(player)); break;
         case "debugtile": if (isOp && currentTile) await openDebugTileMenu(getRealPlayer(player), tx, tz); break;
         case "debugallcivs": if (isOp) await openDebugAllCivsMenu(getRealPlayer(player)); break;
         case "matchsettings": if (isOp) await openMatchSettingsMenu(getRealPlayer(player)); break;
+        case "mapgensettings": if (isOp) await openMapGenSettingsMenu(getRealPlayer(player)); break;
         case "civmanage": if (isOp) await openCivManagementMenu(getRealPlayer(player)); break;
+        case "mapview": if (isOp) await openMapViewMenu(getRealPlayer(player)); break;
         default: break;
     }
+}
+
+/**
+ * ゲーム内メニューから読める簡単なルール説明。README.md の要約(全項目ではなく、
+ * 初めて触る人がまず知りたい要点のみ)。新しいシステムを追加した場合、ここも
+ * 必要に応じて更新することが望ましい(ただし完全な同期は必須ではない、あくまで簡易説明)。
+ */
+const HELP_TOPICS = [
+    {
+        title: "基本の流れ",
+        body: [
+            "・ゲームは参加者が順番に手番を行うターン制です。",
+            "・自分の手番中に、領有・都市建設・生産・研究・戦闘・外交などの行動を行えます。",
+            "・最初は「最初の都市(首都)を建てる」ボタンで首都を建設してください。",
+            "・自分の都市/領地に隣接する未所有マスは「領有」できます(コスト: 最寄り都市の人口-1)。",
+            "・新しい都市を建てるには「開拓権」が必要です(首都の人口を消費して取得できます)。",
+            "・行動が終わったら「ターンを終了する」ボタンを押して次の国家に手番を渡してください。",
+        ],
+    },
+    {
+        title: "生産と経済",
+        body: [
+            "・都市は労働者・戦士・弓兵などのユニットや、穀物庫・交易所などの建造物を1つずつ生産できます。",
+            "・人口の多い都市ほど、食料・生産力などの産出量が増えます。",
+            "・食料が不足すると飢餓が進み、3ターン連続で不足が続くと人口が1減ります。",
+            "・食料が十分に貯まると、一定量ごとに人口が1増えます(住宅上限まで)。",
+            "・「施設」はマスを消費して即座に設置できる建造物、「区域」は別のマスを使って複数ターンかけて建てる大型施設です。",
+        ],
+    },
+    {
+        title: "戦闘",
+        body: [
+            "・ユニットの攻撃や都市の占領は、相手に「宣戦布告」して戦争状態にしてからでないと行えません。",
+            "・「関係なし」の相手が所有するマスには、ユニットが進入すらできません。",
+            "・複数のユニットで敵ユニットを取り囲んでから攻撃すると、包囲ボーナスで有利にダメージを与えられます。",
+            "・今ターンまだ行動していないユニットは、その場で休息してHPを回復できます。",
+            "・戦争は外交メニューの「講和する」でいつでも終了できます(試合の設定で無効化されていない場合)。",
+        ],
+    },
+    {
+        title: "外交",
+        body: [
+            "・国家同士の関係は「関係なし」「不可侵条約」「同盟」「戦争」の4種類です。",
+            "・不可侵条約・同盟は、外交メニューから提案し、相手が承認すると成立します(それぞれ専用の社会制度が必要)。",
+            "・宣戦布告は相手の承諾なしに、選んだ瞬間に一方的に成立します。",
+            "・不可侵条約・同盟を結んでいる相手には攻撃できません。",
+        ],
+    },
+    {
+        title: "勝利条件",
+        body: [
+            "・都市を持つ国家が1つだけになれば、その国家の勝利です。",
+            "・生存している全ての国家が同じ宗教を信仰していれば、その宗教を創始した国家の勝利になります。",
+            "・参加人数が4人以上のとき、生存者全員が互いに同盟していれば、その同盟グループ全体の勝利になります。",
+            "・ミサイルで破壊されたり、飢餓で人口が0になった都市は消滅します。",
+        ],
+    },
+];
+
+/** ルール説明メニュー(項目一覧)。 */
+async function openHelpMenu(player) {
+    const realPlayer = getRealPlayer(player);
+    const body = [
+        "§7Civ Tactics の簡単なルール説明です。気になる項目を選んでください。",
+        "§7チャットで /civ:help と入力すると、コマンド一覧も確認できます。",
+    ];
+    const buttons = HELP_TOPICS.map((topic, i) => ({ text: `§b${topic.title}`, action: i }));
+    buttons.push({ text: "戻る", action: null });
+
+    const form = new ActionFormData().title("[Help] ルール説明").body(body.join("\n"));
+    for (const btn of buttons) form.button(btn.text);
+    const result = await form.show(realPlayer);
+    if (result.canceled || result.selection === undefined) return;
+    const action = buttons[result.selection]?.action;
+
+    if (typeof action === "number") await openHelpTopicMenu(player, action);
+    else await openMainMenu(player);
+}
+
+/** ルール説明メニュー(個別項目の詳細)。「戻る」で項目一覧へ戻る。 */
+async function openHelpTopicMenu(player, topicIndex) {
+    const realPlayer = getRealPlayer(player);
+    const topic = HELP_TOPICS[topicIndex];
+    if (!topic) { await openHelpMenu(player); return; }
+
+    const form = new ActionFormData().title(`[Help] ${topic.title}`).body(topic.body.join("\n"));
+    form.button("戻る");
+    await form.show(realPlayer);
+    await openHelpMenu(player);
 }
 
 /**
@@ -417,6 +780,16 @@ export async function openMainMenu(player) {
  *   この設定の影響を受けない)。無効にすると、Bot側の劣勢時の自動講和(bots.js)も行われない。
  * - Botの手番間隔: 全員Botの対戦で、Botの手番から次のBotの手番へ移るまでの間隔(tick)。
  *   bots.js の advanceUntilHuman がここを見て system.runTimeout の遅延に使う。
+ * - 行動ログの表示: 無効にすると、領有・生産・戦闘・外交などの行動ログ(world.sendMessage
+ *   による全員への通知)が一切表示されなくなる(state.js の broadcast() がここを見て
+ *   world.sendMessage() の呼び出し自体を省略する)。同じ設定で、領有・都市建設・伐採・
+ *   ミサイル発射に伴う title/playsound(commands.js の broadcastEffect())も無効化される
+ *   ため、OP自身やスペクテイターが操作した場合の画面演出・効果音も含めて誰にも見えなく/
+ *   聞こえなくできる(Botの行動自体はもともとこれらの演出を出さない)。**勝利メッセージ
+ *   (ソロ/宗教/同盟勝利、デバッグ即時勝利)、および「ゲームがリセットされました」
+ *   メッセージ(実行者名入り)はこの設定に関わらず常に表示される**
+ *   (broadcast()を使わずworld.sendMessage()を直接呼んでいるため)。全員Botの対戦を
+ *   放置観戦・高速進行させたいときに、チャット欄・画面演出が埋め尽くされるのを防ぐための設定。
  */
 // 💡 slider(label, minimumValue, maximumValue, sliderOptions?) 自体の呼び出し方は正しかったが、
 //    minimumValue/valueStepに小数(0.5)を渡すと、環境によって触った瞬間に0扱いになる不具合が
@@ -448,16 +821,101 @@ async function openMatchSettingsMenu(realPlayer) {
             BOT_TURN_DELAY_TICKS_MIN,
             BOT_TURN_DELAY_TICKS_MAX,
             { valueStep: 1, defaultValue: defaultBotDelay },
-        );
+        )
+        .toggle("行動ログを表示する(領有・生産・戦闘・外交などの通知。勝利/リセットは常に表示)", { defaultValue: settings.logsEnabled });
 
     const res = await form.show(realPlayer);
     if (res.canceled) { await openMainMenu(realPlayer); return; }
 
-    const [sliderValue, diplomacyEnabled, peaceEnabled, botTurnDelayTicks] = res.formValues;
+    const [sliderValue, diplomacyEnabled, peaceEnabled, botTurnDelayTicks, logsEnabled] = res.formValues;
     const yieldMultiplier = sliderValue * YIELD_MULTIPLIER_STEP;
-    setMatchSettings({ yieldMultiplier, diplomacyEnabled, peaceEnabled, botTurnDelayTicks });
-    realPlayer.sendMessage(`§a試合の設定を更新しました。 §7(産出の倍率: x${yieldMultiplier} / 不可侵条約・同盟: ${diplomacyEnabled ? "有効" : "無効"} / 講和: ${peaceEnabled ? "有効" : "無効"} / Bot手番間隔: ${botTurnDelayTicks}tick)`);
+    setMatchSettings({ yieldMultiplier, diplomacyEnabled, peaceEnabled, botTurnDelayTicks, logsEnabled });
+    realPlayer.sendMessage(`§a試合の設定を更新しました。 §7(産出の倍率: x${yieldMultiplier} / 不可侵条約・同盟: ${diplomacyEnabled ? "有効" : "無効"} / 講和: ${peaceEnabled ? "有効" : "無効"} / Bot手番間隔: ${botTurnDelayTicks}tick / 行動ログ: ${logsEnabled ? "表示" : "非表示"})`);
     await openMainMenu(realPlayer);
+}
+
+// 💡 マップ生成の設定メニューに表示するバイオームの並び順(陸地系→水域系)。
+//    river/sea は mapGen.js の専用アルゴリズムで配置されるため、ここでの重みは
+//    「既定密度に対する倍率」として扱われる。pond/lake/mountainRangeはriver/mountainから
+//    自動的に派生する地形のため個別設定項目には含めない。
+const MAP_GEN_BIOME_ORDER = ["grassland", "forest", "rainforest", "desert", "cold", "mountain", "river", "sea"];
+const MAP_GEN_WEIGHT_MAX = 50;
+
+/**
+ * OP専用: マップ生成の設定メニューの入口。「編集する」「初期値に戻す」を選ぶハブ画面
+ * (ModalFormDataにはボタンを置けないため、編集本体は別画面 openMapGenSettingsEditMenu に分ける)。
+ */
+async function openMapGenSettingsMenu(realPlayer) {
+    const form = new ActionFormData()
+        .title("[Settings] マップ生成の設定")
+        .body("§7各バイオームの生成有無・生成しやすさ(重み)、資源の出現率を設定します。\n§7設定してもマップは自動で再生成されません。反映するには改めて /civ:generate を実行してください。");
+    form.button("§a設定を編集する");
+    form.button("§c初期値に戻す");
+    form.button("戻る");
+
+    const res = await form.show(realPlayer);
+    if (res.canceled || res.selection === undefined || res.selection === 2) { await openMainMenu(realPlayer); return; }
+
+    if (res.selection === 0) { await openMapGenSettingsEditMenu(realPlayer); return; }
+
+    // res.selection === 1: 初期値に戻す(確認ダイアログを挟む)。
+    new MessageFormData()
+        .title("確認: マップ生成の設定を初期値に戻す")
+        .body("本当にマップ生成の設定(各バイオームの生成有無・重み、資源の出現率)を初期値に戻しますか？\nこの操作は即座に反映されます。")
+        .button1("キャンセル")
+        .button2("初期値に戻す")
+        .show(realPlayer)
+        .then(async (confirmRes) => {
+            if (confirmRes.selection === 1) {
+                resetMapGenSettings();
+                realPlayer.sendMessage("§aマップ生成の設定を初期値に戻しました。");
+            }
+            await openMapGenSettingsMenu(realPlayer);
+        });
+}
+
+/**
+ * OP専用: マップ生成(/civ:generate)で使う各バイオームの生成有無・生成しやすさ(重み)、
+ * および資源の出現率を設定する。試合の設定と同様、ゲームリセット/マップの再生成を跨いでも
+ * 保持される(state.js の getMapGenSettings/setMapGenSettings)。設定してもマップは
+ * 自動で再生成されないため、反映させるには改めて /civ:generate を実行する必要がある。
+ */
+async function openMapGenSettingsEditMenu(realPlayer) {
+    const settings = getMapGenSettings();
+    const form = new ModalFormData().title("[Settings] マップ生成の設定");
+    for (const id of MAP_GEN_BIOME_ORDER) {
+        const label = TERRAIN_TYPES[id]?.label ?? id;
+        const biome = settings.biomes[id] ?? { enabled: true, weight: TERRAIN_TYPES[id]?.weight ?? 10 };
+        form.toggle(`${label}を生成する`, { defaultValue: biome.enabled });
+        form.slider(
+            `${label}の生成しやすさ(重みが大きいほど出現しやすい)`,
+            0, MAP_GEN_WEIGHT_MAX,
+            { valueStep: 1, defaultValue: Math.max(0, Math.min(MAP_GEN_WEIGHT_MAX, biome.weight)) },
+        );
+    }
+    form.slider(
+        "資源の出現率(%。各マスに戦略・高級・ボーナス資源のいずれかが生成される確率)",
+        0, 100,
+        { valueStep: 5, defaultValue: Math.max(0, Math.min(100, settings.resourceChance)) },
+    );
+
+    const res = await form.show(realPlayer);
+    if (res.canceled) { await openMapGenSettingsMenu(realPlayer); return; }
+
+    const values = res.formValues;
+    const biomesPartial = {};
+    const summaryParts = [];
+    for (let i = 0; i < MAP_GEN_BIOME_ORDER.length; i++) {
+        const id = MAP_GEN_BIOME_ORDER[i];
+        const enabled = values[i * 2];
+        const weight = values[i * 2 + 1];
+        biomesPartial[id] = { enabled, weight };
+        summaryParts.push(`${TERRAIN_TYPES[id]?.label ?? id}: ${enabled ? `有効(重み${weight})` : "無効"}`);
+    }
+    const resourceChance = values[MAP_GEN_BIOME_ORDER.length * 2];
+    setMapGenSettings({ biomes: biomesPartial, resourceChance });
+    realPlayer.sendMessage(`§aマップ生成の設定を更新しました。次回の /civ:generate から反映されます。 §7(${summaryParts.join(" / ")} / 資源出現率: ${resourceChance}%)`);
+    await openMapGenSettingsMenu(realPlayer);
 }
 
 /**
@@ -479,6 +937,9 @@ async function openCivManagementMenu(realPlayer) {
     }));
     buttons.push({ text: "§b[Add] テスト国家を追加する", action: { type: "add" } });
     buttons.push({ text: "§b[Add] Botを追加する(自動でゲームに参加)", action: { type: "addbot" } });
+    if (civs.some(c => c.isVirtual)) {
+        buttons.push({ text: "§c[Remove] 国家を削除する", action: { type: "remove" } });
+    }
     buttons.push({ text: "戻る", action: { type: "back" } });
 
     const form = new ActionFormData().title("[Civs] 国家管理(ソロテスト用)").body(body.join("\n"));
@@ -533,7 +994,78 @@ async function openCivManagementMenu(realPlayer) {
         const result = (await import("./bots.js")).addBot(realPlayer, nameResult.formValues?.[0]);
         realPlayer.sendMessage(result.message);
         await openCivManagementMenu(realPlayer);
+        return;
     }
+
+    if (action.type === "remove") {
+        await openCivRemoveMenu(realPlayer);
+    }
+}
+
+/**
+ * OP専用: 自分が追加したテスト国家/Botを削除する。トグルで複数選んで一括削除できる
+ * (「全て選択」相当は全トグルをONにすればよい)。ゲーム開始後は削除できない
+ * (所有マス・都市などゲーム内状態に取り残しが発生するのを防ぐため、追加時と同じ制約)。
+ * 削除前に確認ダイアログを挟む(取り消せない操作のため)。
+ */
+async function openCivRemoveMenu(realPlayer) {
+    const removable = getControllableCivs(realPlayer).filter(c => c.isVirtual);
+    if (removable.length === 0) {
+        realPlayer.sendMessage("§c削除できる国家がありません。");
+        await openCivManagementMenu(realPlayer);
+        return;
+    }
+
+    const form = new ModalFormData().title("[Civs] 国家を削除(複数選択可)");
+    for (const c of removable) {
+        form.toggle(`${c.name}${c.isBot ? " §7(Bot)" : " §7(テスト国家)"}`, { defaultValue: false });
+    }
+
+    const result = await form.show(realPlayer);
+    if (result.canceled) { await openCivManagementMenu(realPlayer); return; }
+
+    const targets = removable.filter((_, i) => result.formValues[i] === true);
+    if (targets.length === 0) {
+        realPlayer.sendMessage("§c削除する国家が選択されていません。");
+        await openCivManagementMenu(realPlayer);
+        return;
+    }
+
+    const turn = getTurnState();
+    if (turn.started) {
+        realPlayer.sendMessage("§cゲーム開始後は国家を削除できません。次のゲームリセット後に削除してください。");
+        await openCivManagementMenu(realPlayer);
+        return;
+    }
+
+    new MessageFormData()
+        .title("確認: 国家の削除")
+        .body(`本当に次の${targets.length}件を削除しますか？\n${targets.map(t => `・${t.name}`).join("\n")}\nこの操作は取り消せません。`)
+        .button1("キャンセル")
+        .button2(`削除する(${targets.length}件)`)
+        .show(realPlayer)
+        .then(async (confirmRes) => {
+            if (confirmRes.selection === 1) {
+                // 💡 ゲーム開始前に /civ:join 済みだった場合、待機列(playerOrder)にも
+                //    idが残ってしまうため、ここで一緒に取り除く(ゲーム未開始が確定している
+                //    ため、開始後の手番進行中に触るケースを心配する必要は無い)。
+                const latestTurn = getTurnState();
+                let playerOrderChanged = false;
+                const removedNames = [];
+                for (const target of targets) {
+                    const removeResult = removeVirtualCiv(target.id);
+                    if (!removeResult.ok) continue;
+                    removedNames.push(removeResult.name);
+                    if (Array.isArray(latestTurn.playerOrder) && latestTurn.playerOrder.includes(target.id)) {
+                        latestTurn.playerOrder = latestTurn.playerOrder.filter(id => id !== target.id);
+                        playerOrderChanged = true;
+                    }
+                }
+                if (playerOrderChanged) setTurnState(latestTurn);
+                realPlayer.sendMessage(`§a${removedNames.length}件の国家を削除しました。§7(${removedNames.join("、")})`);
+            }
+            await openCivManagementMenu(realPlayer);
+        });
 }
 
 /**
@@ -601,8 +1133,9 @@ async function openDebugAllCivsMenu(realPlayer) {
 /**
  * OP専用デバッグ機能: 指定した1国家の詳細情報を表示する。
  * 資源(石油・鉄・勝利ポイント・開拓権)、研究/社会制度の進行状況、保有する都市(人口・住宅・
- * 産出量・生産中の物・区域建設状況)、保有する戦闘ユニット(位置・HP・戦闘力・移動力)、
- * 宗教の創始状況、他の全国家との外交関係(不可侵条約/同盟/関係なし)をまとめて表示する。
+ * 産出量・生産中の物・区域建設状況・**都市ごとの宗教的圧力の内訳**)、保有する戦闘ユニット
+ * (位置・HP・戦闘力・移動力)、宗教の創始状況、他の全国家との外交関係(不可侵条約/同盟/
+ * 関係なし)をまとめて表示する。
  */
 async function openDebugCivDetailMenu(realPlayer, civId) {
     const handle = getCivStorageHandle(civId);
@@ -667,6 +1200,26 @@ async function openDebugCivDetailMenu(realPlayer, civId) {
                 : "なし";
             lines.push(`§f  ${city.isCapital ? "[首都]" : "[都市]"} ${city.name} (${key}) §7- 人口:${city.population}/住宅:${city.housing}`);
             lines.push(`§7    産出: [Food]${yields.food} [Prod]${yields.production} [Faith]${yields.faith ?? 0} [Iron]${yields.iron ?? 0} [Science]${yields.science ?? 0} §7| 生産中: ${prodText} §7| 区域建設中: ${districtText}`);
+
+            // 💡 この都市の宗教的圧力の内訳(通常のメニューの都市詳細と同じ表示。§18参照)。
+            const pressures = city.religiousPressure ?? {};
+            const totalPressure = Object.values(pressures).reduce((sum, v) => sum + v, 0);
+            if (totalPressure > 0) {
+                const dominantCivId = getCityDominantReligion(city);
+                const followers = getCityFollowers(city);
+                const sortedCivIds = Object.keys(pressures).sort((a, b) => (pressures[b] ?? 0) - (pressures[a] ?? 0));
+                for (const pressureCivId of sortedCivIds) {
+                    const pressure = pressures[pressureCivId] ?? 0;
+                    if (pressure <= 0) continue;
+                    const religionName = getReligionName(getCivStorageHandle(pressureCivId)) ?? "無名の宗教";
+                    const percent = (pressure / totalPressure) * 100;
+                    const followerCount = Math.floor(followers[pressureCivId] ?? 0);
+                    const dominantMark = pressureCivId === dominantCivId ? "§a[Dominant]§7 " : "";
+                    lines.push(`§7    宗教的圧力: ${dominantMark}【${religionName}】(${resolveCivName(pressureCivId) ?? pressureCivId}) 圧力:${Math.floor(pressure)} (${percent.toFixed(1)}%) 信仰者:${followerCount}人`);
+                }
+            } else {
+                lines.push(`§7    宗教的圧力: なし`);
+            }
         }
     }
 
@@ -976,7 +1529,7 @@ async function openDebugCombatUnitMenu(realPlayer, tx, tz) {
     if (act === "remove") {
         tile.combatUnit = null;
         setTiles(tiles);
-        removeUnitLabelAt(tx, tz);
+        refreshUnitLabelAt(tx, tz);
         realPlayer.sendMessage(`§a(${tx}, ${tz}) の戦闘ユニットを削除しました。`);
         await openDebugTileMenu(realPlayer, tx, tz);
         return;
@@ -1048,6 +1601,7 @@ async function openDebugReligiousUnitMenu(realPlayer, tx, tz) {
     if (act === "remove") {
         tile.religiousUnit = null;
         setTiles(tiles);
+        refreshUnitLabelAt(tx, tz);
         realPlayer.sendMessage(`§a(${tx}, ${tz}) の宗教ユニットを削除しました。`);
         await openDebugTileMenu(realPlayer, tx, tz);
         return;
@@ -1196,6 +1750,9 @@ async function openProductionCategoryMenu(player, tx, tz, category) {
                 } else if (def.requiresTechnology && !hasCompletedProgress(player, "technology", def.requiresTechnology)) {
                     const techDef = getDefinition("technology", def.requiresTechnology);
                     body.push(`§7[Locked] ${def.icon} ${def.label}: 技術【${techDef?.label ?? def.requiresTechnology}】が必要`);
+                } else if (def.requiresCivic && !hasCompletedProgress(player, "civic", def.requiresCivic)) {
+                    const civicDef = getDefinition("civic", def.requiresCivic);
+                    body.push(`§7[Locked] ${def.icon} ${def.label}: 社会制度【${civicDef?.label ?? def.requiresCivic}】が必要`);
                 } else if (def.disallowInCapital && city.isCapital) {
                     body.push(`§7${def.icon} ${def.label}: この都市は既に首都です`);
                 }
@@ -1246,6 +1803,9 @@ async function openFacilityInstallMenu(player, tx, tz) {
             if (def.requiresTechnology && !hasCompletedProgress(player, "technology", def.requiresTechnology)) {
                 const techDef = getDefinition("technology", def.requiresTechnology);
                 body.push(`§7[Locked] ${def.icon} ${def.label}: 技術【${techDef?.label ?? def.requiresTechnology}】が必要`);
+            } else if (def.requiresCivic && !hasCompletedProgress(player, "civic", def.requiresCivic)) {
+                const civicDef = getDefinition("civic", def.requiresCivic);
+                body.push(`§7[Locked] ${def.icon} ${def.label}: 社会制度【${civicDef?.label ?? def.requiresCivic}】が必要`);
             } else if (def.requiresResource) {
                 body.push(`§7${def.icon} ${def.label}: ${check.message}`);
             }
@@ -1295,6 +1855,9 @@ async function openDistrictStartMenu(player, tx, tz) {
             if (def.requiresTechnology && !hasCompletedProgress(player, "technology", def.requiresTechnology)) {
                 const techDef = getDefinition("technology", def.requiresTechnology);
                 body.push(`§7[Locked] ${def.icon} ${def.label}: 技術【${techDef?.label ?? def.requiresTechnology}】が必要`);
+            } else if (def.requiresCivic && !hasCompletedProgress(player, "civic", def.requiresCivic)) {
+                const civicDef = getDefinition("civic", def.requiresCivic);
+                body.push(`§7[Locked] ${def.icon} ${def.label}: 社会制度【${civicDef?.label ?? def.requiresCivic}】が必要`);
             } else if (cityKey && hasCityDistrict(cityKey, id, allTiles)) {
                 body.push(`§7[Built] ${def.icon} ${def.label}: 帰属都市に既に存在します(1都市につき1つまで)`);
             }
@@ -1366,14 +1929,25 @@ async function openProgressMenu(player, kind) {
     const buttons = [];
     for (const id of Object.keys(defs)) {
         const def = defs[id];
+        const effectText = def.effect ? ` - ${def.effect}` : "";
+        // 💡 前提条件・ロック中に不足している項目名を、IDのままではなく表示名で出す
+        //    (前提条件・効果がメニューから見えないという問題への対応)。
+        const prereqLabels = (def.prerequisites ?? []).map(pid => defs[pid]?.label ?? pid);
+
         if (state.completed.includes(id)) {
-            buttons.push({ text: `§a[Done] ${def.label} (取得済み)${def.effect ? ` - ${def.effect}` : ""}`, action: null });
+            buttons.push({ text: `§a[Done] ${def.label} (取得済み)${effectText}`, action: null });
         } else if (state.activeId === id) {
-            buttons.push({ text: `§e[Pending] ${def.label} (${state.progress}/${def.cost})`, action: null });
+            buttons.push({ text: `§e[Pending] ${def.label} (${state.progress}/${def.cost})${effectText}`, action: null });
         } else {
-            const locked = !(def.prerequisites ?? []).every(prerequisite => state.completed.includes(prerequisite));
+            const missingLabels = (def.prerequisites ?? [])
+                .filter(prerequisite => !state.completed.includes(prerequisite))
+                .map(pid => defs[pid]?.label ?? pid);
+            const locked = missingLabels.length > 0;
+            const prereqText = prereqLabels.length > 0 ? ` (前提: ${prereqLabels.join("・")})` : "";
             buttons.push({
-                text: locked ? `§8[Locked] ${def.label}` : `§f${def.label} (必要${getPointsLabel(kind)}: ${def.cost})${def.effect ? ` - ${def.effect}` : ""}`,
+                text: locked
+                    ? `§8[Locked] ${def.label} (要: ${missingLabels.join("・")})${effectText}`
+                    : `§f${def.label} (必要${getPointsLabel(kind)}: ${def.cost})${prereqText}${effectText}`,
                 action: locked ? null : id,
             });
         }
@@ -1492,8 +2066,8 @@ function openIncomingRequestsMenu(player, allCivs) {
         new MessageFormData()
             .title(`提案の確認: ${selectedReq.fromName}`)
             .body(`【${selectedReq.fromName}】から【${typeLabel}】の提案が届いています。\n承認しますか？`)
-            .button1("承認する")
-            .button2("拒否する")
+            .button1("拒否する")
+            .button2("承認する")
             .show(realPlayer)
             .then(actionRes => {
                 if (actionRes.canceled) return;
@@ -1600,8 +2174,8 @@ function confirmBreakRelation(player, targetCiv) {
     new MessageFormData()
         .title(`確認: ${isWar ? "講和" : `${typeLabel}の解消`}`)
         .body(`本当に【${targetCiv.name}】と${isWar ? "講和し、戦争を終了" : `の【${typeLabel}】を解消・破棄`}しますか？\nこの操作は即座に反映されます。`)
-        .button1(`${actionLabel}する`)
-        .button2("キャンセル")
+        .button1("キャンセル")
+        .button2(`${actionLabel}する`)
         .show(realPlayer)
         .then(res => {
             if (res.selection === 1) {
@@ -1618,13 +2192,13 @@ function confirmDeclareWar(player, targetCiv) {
     new MessageFormData()
         .title(`確認: 宣戦布告`)
         .body(`本当に【${targetCiv.name}】に宣戦布告しますか？\n結んでいる不可侵条約・同盟があれば同時に破棄されます。\nこの操作は相手の承諾を必要とせず、即座に成立します。`)
-        .button1("宣戦布告する")
-        .button2("キャンセル")
+        .button1("キャンセル")
+        .button2("宣戦布告する")
         .show(realPlayer)
         .then(res => {
             if (res.selection === 1) {
                 const result = declareWar(player, targetCiv);
-                if (result.ok) world.sendMessage(result.message);
+                if (result.ok) broadcast(result.message);
                 else player.sendMessage(result.message);
             }
         });
@@ -1697,7 +2271,8 @@ async function openCombatUnitMoveMenu(player, fromTx, fromTz) {
             const standTile = tiles[`${standTx},${standTz}`];
             const canStandMove = standDistance >= 1 && standDistance <= remaining
                 && standTx >= 0 && standTz >= 0 && standTx < config.width && standTz < config.height
-                && standTile && !standTile.combatUnit && canUnitEnterTile(unit, standTile);
+                && standTile && !standTile.combatUnit && canUnitEnterTile(unit, standTile)
+                && canTravelPath(unit, fromTx, fromTz, standTx, standTz, tiles);
             if (canStandMove) {
                 const cityText = standTile.city ? ` | 都市: ${standTile.city.name}` : "";
                 items.push({ text: `§a[Here] 今いる場所へ移動 (${standTx}, ${standTz})${cityText}`, action: { tx: standTx, tz: standTz } });
@@ -1717,6 +2292,7 @@ async function openCombatUnitMoveMenu(player, fromTx, fromTz) {
                 const tile = tiles[`${tx},${tz}`];
                 if (!tile || tile.combatUnit) continue;
                 if (!canUnitEnterTile(unit, tile)) continue;
+                if (!canTravelPath(unit, fromTx, fromTz, tx, tz, tiles)) continue;
                 const cityText = tile.city
                     ? ` | 都市: ${tile.city.name} (人口:${tile.city.population}/${tile.city.housing})`
                     : "";
@@ -1960,8 +2536,19 @@ async function openDistrictBuildingMenu(player, tx, tz) {
 
     for (const id of getDistrictBuildingIds()) {
         const def = getDistrictBuildingDef(id);
-        const check = canStartDistrictBuilding(tile, id, player.id, city);
-        if (!check.ok) { body.push(`§7${def.icon} ${def.label}: ${check.message}`); continue; }
+        const check = canStartDistrictBuilding(tile, id, player.id, city, player);
+        if (!check.ok) {
+            if (def.requiresTechnology && !hasCompletedProgress(player, "technology", def.requiresTechnology)) {
+                const techDef = getDefinition("technology", def.requiresTechnology);
+                body.push(`§7[Locked] ${def.icon} ${def.label}: 技術【${techDef?.label ?? def.requiresTechnology}】が必要`);
+            } else if (def.requiresCivic && !hasCompletedProgress(player, "civic", def.requiresCivic)) {
+                const civicDef = getDefinition("civic", def.requiresCivic);
+                body.push(`§7[Locked] ${def.icon} ${def.label}: 社会制度【${civicDef?.label ?? def.requiresCivic}】が必要`);
+            } else {
+                body.push(`§7${def.icon} ${def.label}: ${check.message}`);
+            }
+            continue;
+        }
         items.push({ text: `${def.icon} ${def.label} (コスト:${def.cost})`, action: id });
     }
     if (items.length === 0) body.push("§7現在建設できる建造物がありません。");
@@ -1987,9 +2574,14 @@ async function openBuyReligiousUnitMenu(player, tx, tz) {
             body.push(`§7[Locked] ${def.icon} ${def.label}: 建造物が必要`);
             continue;
         }
+        if (def.requiresInquisitionStarted && !hasStartedInquisition(player)) {
+            body.push(`§7[Locked] ${def.icon} ${def.label}: 審問の開始が必要`);
+            continue;
+        }
         if (tile.religiousUnit) { body.push(`§7${def.icon} ${def.label}: このマスには既に宗教ユニットがいます`); continue; }
-        if ((tile.city.faithStorage ?? 0) < def.cost) { body.push(`§7${def.icon} ${def.label}: 信仰力が足りません(必要:${def.cost})`); continue; }
-        items.push({ text: `${def.icon} ${def.label} (信仰力:${def.cost})`, action: id });
+        const cost = getReligiousUnitCost(player, def);
+        if ((tile.city.faithStorage ?? 0) < cost) { body.push(`§7${def.icon} ${def.label}: 信仰力が足りません(必要:${cost})`); continue; }
+        items.push({ text: `${def.icon} ${def.label} (信仰力:${cost})`, action: id });
     }
     if (items.length === 0) body.push("§7現在購入できる宗教ユニットがありません。");
 
@@ -2059,6 +2651,42 @@ async function openProselytizeMenu(player, fromTx, fromTz) {
     await showPaginatedMenu(
         getRealPlayer(player), "[Faith] 布教する", body.join("\n"), items,
         async (action) => { (await import("./commands.js")).cmdProselytize(player, fromTx, fromTz, action.tx, action.tz); },
+        async () => { await openMainMenu(player); },
+    );
+}
+
+/** 隣接する敵の宗教ユニットへの攻撃先を一覧表示する(使徒・審問官など canAttack:true のユニットのみ)。 */
+async function openReligiousUnitAttackMenu(player, fromTx, fromTz) {
+    const source = getTile(fromTx, fromTz);
+    const unit = source?.religiousUnit;
+    if (!unit || unit.ownerId !== player.id) { await openMainMenu(player); return; }
+
+    const def = getReligiousUnitDef(unit.id);
+    const body = [`${unit.label ?? "宗教ユニット"}  宗教戦闘力: ${unit.religiousCombatStrength ?? 0}`];
+    const items = [];
+
+    if (!def?.canAttack) {
+        body.push("§7このユニットは敵の宗教ユニットを攻撃できません。");
+    } else if (unit.hasAttackedThisTurn) {
+        body.push("§7この宗教ユニットは今ターン既に攻撃しました。(1ターン1回まで)");
+    } else {
+        const tiles = getTiles();
+        for (const { tx, tz, tile } of getAdjacentTileEntries(fromTx, fromTz, tiles)) {
+            if (tile.religiousUnit && tile.religiousUnit.ownerId !== player.id) {
+                const enemy = tile.religiousUnit;
+                items.push({
+                    text: `[Combat] (${tx}, ${tz}) | ${enemy.ownerName ?? "?"}の${enemy.label ?? "宗教ユニット"} (HP:${Math.max(0, enemy.hp ?? 0)}/${enemy.maxHp ?? 100})`,
+                    action: { tx, tz },
+                });
+            }
+        }
+        body.push("§7攻撃対象を選んでください(反撃はありません)。");
+        if (items.length === 0) body.push("§7隣接するマスに敵の宗教ユニットがいません。");
+    }
+
+    await showPaginatedMenu(
+        getRealPlayer(player), "[Combat] 宗教ユニットで攻撃", body.join("\n"), items,
+        async (action) => { (await import("./commands.js")).cmdAttackReligiousUnit(player, fromTx, fromTz, action.tx, action.tz); },
         async () => { await openMainMenu(player); },
     );
 }

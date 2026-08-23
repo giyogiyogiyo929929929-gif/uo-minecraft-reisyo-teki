@@ -1,23 +1,25 @@
 // commands.js
 import { world, system, BlockPermutation, PlayerPermissionLevel, CustomCommandStatus, CustomCommandParamType, CommandPermissionLevel } from "@minecraft/server";
 import { generateMap, TERRAIN_TYPES, worldToTile, TILE_SIZE, RESOURCE_TYPES, ASSUMED_SIMULATION_RANGE_BLOCKS, isImpassableTerrain, isWaterTerrain } from "./mapGen.js";
-import { getMapConfig, setMapConfig, getTile, setTile, resetAll, setTiles, getTiles } from "./state.js";
+import { getMapConfig, setMapConfig, getTile, setTile, resetAll, setTiles, getTiles, broadcast, getMatchSettings, getMapGenSettings } from "./state.js";
 import { joinGame, turnInfoText, isPlayersTurn, endGame, getTurnState, setTurnState, getCityCurrentYields, resolveMissileImpact, getPlayerColor, checkAndAnnounceVictory } from "./turns.js";
 import { PRODUCTION_DEFS, canStartProduction, startProduction, cancelProduction, addWorkers, consumeWorkerAction, hasAvailableWorkerAction, getProductionIds } from "./production.js";
 import { getDefinition, getKindLabel, startProgress, getDefinitions } from "./progression.js";
 import { hasDiplomaticAgreement, signAgreement, isAtWar } from "./diplomacy.js";
-import { getAttackRange, resolveCombat, tileDistance, canUnitEnterTerrain, canUnitEnterOwnership, countFlankingAllies, getFlankingBonus } from "./combat.js";
-import { addVirtualCiv, getControllableCivs, getActiveCivId, setActiveCivId, getActingPlayer, getOnlinePlayerById } from "./civs.js";
+import { getAttackRange, resolveCombat, tileDistance, canUnitEnterTerrain, canUnitEnterOwnership, countFlankingAllies, getFlankingBonus, canTravelPath } from "./combat.js";
+import { addVirtualCiv, getControllableCivs, getActiveCivId, setActiveCivId, getActingPlayer, getOnlinePlayerById, getRealPlayer } from "./civs.js";
 import { getFacilityDef, canInstallFacility, installFacility, getFacilityIds } from "./facilities.js";
 import { resolveOwningCityKey } from "./adjacency.js";
 import { getDistrictDef, canStartDistrict, startDistrictConstruction, getDistrictBuildingDef, canStartDistrictBuilding, startDistrictBuildingConstruction, getDistrictIds, getDistrictBuildingIds } from "./districts.js";
 import {
     getReligiousUnitDef, hasFoundedReligion, getReligionName, setReligionName,
     canFoundReligion, foundReligion, calculateProselytizePressure, addReligiousPressure,
-    getReligiousUnitIds,
+    getReligiousUnitIds, getReligiousUnitCost, incrementReligiousUnitPurchaseCount,
+    hasStartedInquisition, startInquisition, suppressOtherReligions, resolveReligiousAttack,
+    applyReligiousKillPressureShift,
 } from "./religion.js";
 import { openMainMenu } from "./ui.js";
-import { removeUnitLabelAt, clearAllUnitLabels } from "./unitLabels.js";
+import { refreshUnitLabelAt, clearAllUnitLabels } from "./unitLabels.js";
 // 💡 bots.js は cmdClaim/cmdSettle/cmdBuyRights/cmdStartProduction をBotの行動再現に使うため
 //    このファイルを import する(相互import)。実際の呼び出しは関数本体の中でのみ行われるため
 //    (モジュール評価順に依存しない)ESモジュールとして安全に解決される。詳細は bots.js を参照。
@@ -36,6 +38,16 @@ function isOperator(player) {
 }
 
 function reply(player, text) { player.sendMessage(text); }
+
+/**
+ * title/playsound(`@a`宛て、=全員に届く演出)は、world.sendMessage() と同じく
+ * 行動ログの一種として扱う。試合の設定(getMatchSettings().logsEnabled)がオフの間は、
+ * これらの演出も一切実行しない(broadcast()と同じ基準。全員Botの対戦を放置観戦している
+ * 時に、OP自身やスペクテイターの操作分までタイトル演出・効果音が鳴り続けるのを防ぐ)。
+ */
+function broadcastEffect(fn) {
+    if (getMatchSettings().logsEnabled) fn();
+}
 
 world.beforeEvents.chatSend.subscribe(async (ev) => {
     const { sender: realPlayer, message } = ev;
@@ -66,7 +78,7 @@ world.beforeEvents.chatSend.subscribe(async (ev) => {
             }
             
         }
-        world.sendMessage(`§cミサイルの嵐！`);
+        broadcast(`§cミサイルの嵐！`);
     }
 })
 
@@ -84,15 +96,15 @@ function cmdHelp(player) {
         "§e/civ:claim §f: 周囲の土地を領有 (コスト: 人口1)",
         "§e/civ:buyrights §f: 開拓権を獲得 (コスト: 首都人口2)",
         "§e/civ:settle §f: 都市を建設 (コスト: 開拓権x1)",
-        "§e/civ:build <worker|warrior|archer|battleship|missile|tradingPost|granary|obelisk|antiAir|capital> §f: 生産を開始",
+        "§e/civ:build <worker|warrior|spearman|archer|battleship|horseman|swordsman|catapult|crossbowman|cruiser|missile|tradingPost|granary|obelisk|market|trainingGround|antiAir|capital> §f: 生産を開始",
         "§c/civ:cancelbuild §f: 進行中の生産を中止(蓄積分は次に引き継ぎ)",
         "§e/civ:chop §f: 森林を伐採して住宅上限+1",
-        "§e/civ:install <quarry|blacksmith> §f: 足元の空き領有マスに施設を設置(労働者の行動回数を1消費)",
-        "§e/civ:district <sacredSite|industrialZone> §f: 足元の空き領有マスに区域の建設を開始(帰属都市の生産力を使用)",
-        "§e/civ:districtbuilding <shrine> §f: 足元の区域に専用の建造物を建設開始(帰属都市の生産力を使用)",
+        "§e/civ:install <quarry|blacksmith|harbor> §f: 足元の空き領有マスに施設を設置(労働者の行動回数を1消費)",
+        "§e/civ:district <sacredSite|industrialZone|campus> §f: 足元の空き領有マスに区域の建設を開始(帰属都市の生産力を使用)",
+        "§e/civ:districtbuilding <shrine|library|cathedral> §f: 足元の区域に専用の建造物を建設開始(帰属都市の生産力を使用)",
         "§e/civ:foundreligion §f: 宗教を創始する(国家全体の信仰力100以上、かつ聖地が必要)",
         "§e/civ:renamereligion <名前> §f: 創始した宗教の名前を変更する",
-        "§e/civ:buyreligious <missionary> §f: 都市の信仰力を使って宗教ユニットを購入(社が必要)",
+        "§e/civ:buyreligious <missionary|apostle|inquisitor> §f: 都市の信仰力を使って宗教ユニットを購入(社/大聖堂/審問の開始が必要。購入するたびにコスト+30)",
         "§c/civ:launch <x> <z> §f: 指定マスへミサイルを発射",
         "§e/civ:info §f: 現在の情報を表示",
         "§e/civ:menu §f: メニューを開く",
@@ -105,7 +117,9 @@ function cmdHelp(player) {
 
 function cmdEndGame(player) {
     if (!isOperator(player)) { reply(player, "§cこのコマンドはOPのみ実行できます。"); return; }
-    world.sendMessage(endGame().message);
+    // 💡 ゲームリセットは勝利メッセージ同様、行動ログの表示設定(logsEnabled)に関わらず
+    //    常に表示する(broadcast()を使わずworld.sendMessage()を直接呼ぶ)。
+    world.sendMessage(endGame(getRealPlayer(player).name).message);
 }
 
 /** ソロテスト用に、OPが自分で操作できる国家をもう一つ追加する。 */
@@ -175,7 +189,7 @@ export function cmdRenameCity(player, tx, tz, newName) {
     tile.city.name = newName;
     setTile(tx, tz, tile);
 
-    world.sendMessage(`§e[Rename] 【都市改名】${player.name} が【${oldName}】の名前を【${newName}】に変更しました！`);
+    broadcast(`§e[Rename] 【都市改名】${player.name} が【${oldName}】の名前を【${newName}】に変更しました！`);
 }
 
 /**
@@ -260,7 +274,7 @@ function cmdGenerate(player, args) {
     reply(player, `§aマップ生成を開始します... (${width} x ${height} マス)${useTickingArea ? " §7(シミュレーション範囲外のため、生成中のみ一時的にtickingareaを使用します。安定性重視のため通常より時間がかかります)" : ""}`);
 
     const tiles = {};
-    generateMap(dimension, { ...config, seed: Date.now(), useTickingArea }, (tx, tz, type, resource, foodYield, productionYield) => {
+    generateMap(dimension, { ...config, seed: Date.now(), useTickingArea, genSettings: getMapGenSettings() }, (tx, tz, type, resource, foodYield, productionYield) => {
         tiles[`${tx},${tz}`] = { type, ownerId: null, ownerName: null, resource: resource ?? null, foodYield, productionYield, city: null, isChopped: false };
     }).then((result) => {
         setTiles(tiles);
@@ -268,9 +282,9 @@ function cmdGenerate(player, args) {
         if (failedTiles.length > 0) {
             const coordText = failedTiles.slice(0, 10).map(f => `(${f.tx},${f.tz})`).join(", ");
             const moreText = failedTiles.length > 10 ? ` 他${failedTiles.length - 10}箇所` : "";
-            world.sendMessage(`§eマップ生成が完了しました(ただし${failedTiles.length}箇所で地形ブロックの反映を確認できませんでした: ${coordText}${moreText})。データ上は登録済みなので、見た目が気になる場合は該当マスを手動で修正してください。`);
+            broadcast(`§eマップ生成が完了しました(ただし${failedTiles.length}箇所で地形ブロックの反映を確認できませんでした: ${coordText}${moreText})。データ上は登録済みなので、見た目が気になる場合は該当マスを手動で修正してください。`);
         } else {
-            world.sendMessage("§a=== マップ生成が完了しました! ===");
+            broadcast("§a=== マップ生成が完了しました! ===");
         }
     }).catch((e) => {
         // 💡 生成中に想定外のエラーが起きても、それまでに出来ているタイルは保存しておく
@@ -292,7 +306,7 @@ export function cmdJoinAll(player) {
         const result = joinGame(p);
         if (result.ok) joined++; else alreadyJoined++;
     }
-    world.sendMessage(`§a[Civ Tactics] ワールドにいる${joined}人のプレイヤーを参加待機状態にしました。§7(既に参加済み: ${alreadyJoined}人)`);
+    broadcast(`§a[Civ Tactics] ワールドにいる${joined}人のプレイヤーを参加待機状態にしました。§7(既に参加済み: ${alreadyJoined}人)`);
 }
 
 // 💡 ゲーム開始・ターン終了・強制ターン終了は、いずれもbots.jsのAuto版(startGameAuto等)を
@@ -405,8 +419,10 @@ export function cmdClaim(player) {
 
     setTile(tx, tz, { type: tile.type, ownerId: player.id, ownerName: player.name, resource: tile.resource ?? null, foodYield: tile.foodYield ?? 2, productionYield: tile.productionYield ?? 1, city: null, isChopped: tile.isChopped ?? false, belongsToCityKey: targetCityKey });
 
-    player.runCommand(`title @a title §a${player.name}`);
-    player.runCommand(`title @a subtitle §fマス (${tx}, ${tz}) を領有！`);
+    broadcastEffect(() => {
+        player.runCommand(`title @a title §a${player.name}`);
+        player.runCommand(`title @a subtitle §fマス (${tx}, ${tz}) を領有！`);
+    });
 
     const dimension = player.dimension;
     const baseX = config.originX + tx * TILE_SIZE;
@@ -419,8 +435,8 @@ export function cmdClaim(player) {
     });
     placePlayerBannerAtCenter(dimension, tx, tz, config, player.id);
 
-    player.runCommand(`playsound random.levelup @a ${player.location.x} ${player.location.y} ${player.location.z}`);
-    world.sendMessage(`§a${player.name} が (${tx}, ${tz}) を領有！ [最寄り都市(${sourceCityTile.city.name})の人口を1消費]`);
+    broadcastEffect(() => player.runCommand(`playsound random.levelup @a ${player.location.x} ${player.location.y} ${player.location.z}`));
+    broadcast(`§a${player.name} が (${tx}, ${tz}) を領有！ [最寄り都市(${sourceCityTile.city.name})の人口を1消費]`);
 }
 
 /**
@@ -454,7 +470,7 @@ export function cmdStartProduction(player, productionId) {
     const remaining = Math.max(0, tile.city.production.cost - tile.city.production.progress);
     const estTurns = production > 0 ? Math.ceil(remaining / production) : "--";
 
-    world.sendMessage(
+    broadcast(
         `§e${def.icon} ${player.name} が都市【${tile.city.name}】で【${def.label}】の生産を開始しました！` +
         ` (必要生産力: ${tile.city.production.cost}、現在の生産力: [Prod]x${production}、予測: 約${estTurns}ターン)`
     );
@@ -481,7 +497,7 @@ export function cmdCancelProduction(player) {
 
     const def = PRODUCTION_DEFS[cancelled.id];
     const label = def?.label ?? cancelled.id;
-    world.sendMessage(`§7[Stop] ${player.name} が都市【${tile.city.name}】の【${label}】の生産を中止しました。(蓄積生産力 ${cancelled.progress} は次の生産へ引き継がれます)`);
+    broadcast(`§7[Stop] ${player.name} が都市【${tile.city.name}】の【${label}】の生産を中止しました。(蓄積生産力 ${cancelled.progress} は次の生産へ引き継がれます)`);
     return { ok: true };
 }
 
@@ -517,13 +533,13 @@ export function cmdLaunchMissile(player, targetTx, targetTz) {
     tile.city.missileLaunchedThisTurn = true;
     setTile(tx, tz, tile);
 
-    world.sendMessage(`§c[Missile] ${player.name} の都市【${tile.city.name}】から (${ttx}, ${ttz}) へミサイルが発射されました！`);
-    player.runCommand(`playsound random.bow @a ${player.location.x} ${player.location.y} ${player.location.z}`);
+    broadcast(`§c[Missile] ${player.name} の都市【${tile.city.name}】から (${ttx}, ${ttz}) へミサイルが発射されました！`);
+    broadcastEffect(() => player.runCommand(`playsound random.bow @a ${player.location.x} ${player.location.y} ${player.location.z}`));
 
     // 💡 演出用に少し間を置いてから着弾させる（2秒後）
     system.runTimeout(() => {
         const impactMessage = resolveMissileImpact(config, ttx, ttz);
-        if (impactMessage) world.sendMessage(impactMessage);
+        if (impactMessage) broadcast(impactMessage);
     }, 40);
 
     return { ok: true };
@@ -660,8 +676,8 @@ export function cmdSettle(player) {
 
     const labelName = isCapital ? "首都" : "都市";
     placePlayerBannerAtCenter(dimension, tx, tz, config, player.id, isCapital);
-    player.runCommand(`title @a title §6${labelName}【${cityUniqueName}】建設！`);
-    world.sendMessage(`§6[New City] ${player.name} が (${tx}, ${tz}) に${labelName}【${cityUniqueName}】を創設！ (${waterText}, 住宅上限: ${housing})`);
+    broadcastEffect(() => player.runCommand(`title @a title §6${labelName}【${cityUniqueName}】建設！`));
+    broadcast(`§6[New City] ${player.name} が (${tx}, ${tz}) に${labelName}【${cityUniqueName}】を創設！ (${waterText}, 住宅上限: ${housing})`);
 }
 
 // 💡 交易所の建設も、労働者・ミサイルと同じ汎用生産コマンド cmdStartProduction("tradingPost") で行う。
@@ -736,8 +752,8 @@ export function cmdChop(player) {
         }
     }
 
-    player.runCommand(`playsound dig.wood @a ${player.location.x} ${player.location.y} ${player.location.z}`);
-    world.sendMessage(`§d[Chop] ${player.name} が (${tx}, ${tz}) の森を伐採！【${cityTile.city.name}】の労働者の行動回数を1消費し、同都市の住宅上限が +1！`);
+    broadcastEffect(() => player.runCommand(`playsound dig.wood @a ${player.location.x} ${player.location.y} ${player.location.z}`));
+    broadcast(`§d[Chop] ${player.name} が (${tx}, ${tz}) の森を伐採！【${cityTile.city.name}】の労働者の行動回数を1消費し、同都市の住宅上限が +1！`);
     return { ok: true };
 }
 
@@ -783,7 +799,7 @@ export function cmdInstallFacility(player, facilityId) {
 
     const def = getFacilityDef(facilityId);
     const message = def?.installMessage?.(tile, tx, tz) ?? `§e[Complete] ${player.name} が (${tx}, ${tz}) に${def?.label ?? facilityId}を設置しました！`;
-    world.sendMessage(message);
+    broadcast(message);
     return { ok: true };
 }
 
@@ -822,7 +838,7 @@ export function cmdStartDistrict(player, districtId) {
     setTile(parseInt(cxStr, 10), parseInt(czStr, 10), cityTile);
 
     const def = getDistrictDef(districtId);
-    world.sendMessage(`§e[District] ${player.name} が (${tx}, ${tz}) に、【${cityTile.city.name}】の生産力を使って${def?.label ?? districtId}の建設を開始しました！ (コスト: ${def?.cost ?? "?"})`);
+    broadcast(`§e[District] ${player.name} が (${tx}, ${tz}) に、【${cityTile.city.name}】の生産力を使って${def?.label ?? districtId}の建設を開始しました！ (コスト: ${def?.cost ?? "?"})`);
     return { ok: true };
 }
 
@@ -848,7 +864,7 @@ export function cmdStartDistrictBuilding(player, buildingId) {
     const cityTile = allTiles[cityKey];
     if (!cityTile || !cityTile.city) { reply(player, "§c帰属先の都市が見つかりません。"); return { ok: false }; }
 
-    const check = canStartDistrictBuilding(tile, buildingId, player.id, cityTile.city);
+    const check = canStartDistrictBuilding(tile, buildingId, player.id, cityTile.city, player);
     if (!check.ok) { reply(player, check.message); return { ok: false }; }
 
     if (!tile.belongsToCityKey) tile.belongsToCityKey = cityKey;
@@ -857,7 +873,7 @@ export function cmdStartDistrictBuilding(player, buildingId) {
     setTile(parseInt(cxStr, 10), parseInt(czStr, 10), cityTile);
 
     const def = getDistrictBuildingDef(buildingId);
-    world.sendMessage(`§e[District] ${player.name} が (${tx}, ${tz}) に、【${cityTile.city.name}】の生産力を使って${def?.label ?? buildingId}の建設を開始しました！ (コスト: ${def?.cost ?? "?"})`);
+    broadcast(`§e[District] ${player.name} が (${tx}, ${tz}) に、【${cityTile.city.name}】の生産力を使って${def?.label ?? buildingId}の建設を開始しました！ (コスト: ${def?.cost ?? "?"})`);
     return { ok: true };
 }
 
@@ -877,7 +893,7 @@ export function cmdFoundReligion(player) {
     if (!check.ok) { reply(player, check.message); return { ok: false }; }
 
     const { name } = foundReligion(player);
-    world.sendMessage(`§d[Religion] ${player.name} の国家が宗教【${name}】を創始しました！`);
+    broadcast(`§d[Religion] ${player.name} の国家が宗教【${name}】を創始しました！`);
     return { ok: true };
 }
 
@@ -908,22 +924,30 @@ export function cmdBuyReligiousUnit(player, unitId) {
         reply(player, `§cこの都市には【${def.label}】の購入に必要な建造物がありません。`);
         return { ok: false };
     }
+    if (def.requiresInquisitionStarted && !hasStartedInquisition(player)) {
+        reply(player, `§c【${def.label}】の購入には審問の開始が必要です。`);
+        return { ok: false };
+    }
     if (tile.religiousUnit) { reply(player, "§cこのマスには既に宗教ユニットが存在します。"); return { ok: false }; }
-    if ((tile.city.faithStorage ?? 0) < def.cost) {
-        reply(player, `§c信仰力が足りません。(必要: ${def.cost}、現在: ${Math.floor(tile.city.faithStorage ?? 0)})`);
+
+    const cost = getReligiousUnitCost(player, def);
+    if ((tile.city.faithStorage ?? 0) < cost) {
+        reply(player, `§c信仰力が足りません。(必要: ${cost}、現在: ${Math.floor(tile.city.faithStorage ?? 0)})`);
         return { ok: false };
     }
 
-    tile.city.faithStorage -= def.cost;
+    tile.city.faithStorage -= cost;
     tile.religiousUnit = {
         id: unitId, label: def.label, ownerId: player.id, ownerName: player.name,
         hp: def.hp, maxHp: def.maxHp, movement: def.movement, movementRemaining: def.movement,
         religiousCombatStrength: def.religiousCombatStrength, evangelismPower: def.evangelismPower,
-        hasProselytizedThisTurn: false,
+        hasProselytizedThisTurn: false, hasAttackedThisTurn: false,
     };
     setTile(tx, tz, tile);
+    // 💡 種別を問わず、宗教ユニットを購入するたびに次回以降の購入コストが上昇する(§11参照)。
+    incrementReligiousUnitPurchaseCount(player);
 
-    world.sendMessage(`§d[Faith] ${player.name} が【${tile.city.name}】の信仰力${def.cost}を使って${def.label}を購入しました！`);
+    broadcast(`§d[Faith] ${player.name} が【${tile.city.name}】の信仰力${cost}を使って${def.label}を購入しました！ (次回以降の購入コストは+30されます)`);
     return { ok: true };
 }
 
@@ -949,7 +973,7 @@ export function cmdMoveReligiousUnit(player, fromTx, fromTz, toTx, toTz) {
     target.religiousUnit = unit;
     setTile(fromTx, fromTz, source);
     setTile(toTx, toTz, target);
-    world.sendMessage(`§d[Missionary] ${player.name} の${unit.label ?? "宗教ユニット"}が (${fromTx}, ${fromTz}) から (${toTx}, ${toTz}) へ移動しました。 (残り移動力: ${unit.movementRemaining})`);
+    broadcast(`§d[Missionary] ${player.name} の${unit.label ?? "宗教ユニット"}が (${fromTx}, ${fromTz}) から (${toTx}, ${toTz}) へ移動しました。 (残り移動力: ${unit.movementRemaining})`);
     return { ok: true };
 }
 
@@ -962,6 +986,10 @@ export function cmdProselytize(player, fromTx, fromTz, targetTx, targetTz) {
     const source = getTile(fromTx, fromTz);
     const unit = source?.religiousUnit;
     if (!unit || unit.ownerId !== player.id) { reply(player, "§cこのマスにあなたの宗教ユニットはいません。"); return { ok: false }; }
+    if (getReligiousUnitDef(unit.id)?.canProselytize === false) {
+        reply(player, `§c【${unit.label ?? "この宗教ユニット"}】は布教できません。`);
+        return { ok: false };
+    }
     if (unit.hasProselytizedThisTurn) { reply(player, "§cこの宗教ユニットは今ターン既に布教しました。(1ターン1回まで)"); return { ok: false }; }
 
     const distance = Math.max(Math.abs(targetTx - fromTx), Math.abs(targetTz - fromTz));
@@ -982,10 +1010,13 @@ export function cmdProselytize(player, fromTx, fromTz, targetTx, targetTz) {
     if (unit.evangelismPower <= 0) {
         source.religiousUnit = null;
         message += ` §7(布教力を使い果たし、${unit.label ?? "宗教ユニット"}は解散しました)`;
+        setTile(fromTx, fromTz, source);
+        refreshUnitLabelAt(fromTx, fromTz);
+    } else {
+        setTile(fromTx, fromTz, source);
     }
-    setTile(fromTx, fromTz, source);
     setTile(targetTx, targetTz, targetTile);
-    world.sendMessage(message);
+    broadcast(message);
     return { ok: true };
 }
 
@@ -1017,11 +1048,163 @@ export function cmdPurgeHeretic(player, tx, tz) {
 
     const removedLabel = religiousUnit.label ?? "宗教ユニット";
     const removedOwnerName = religiousUnit.ownerName ?? "不明な国家";
+    const defeatedOwnerId = religiousUnit.ownerId;
     tile.religiousUnit = null;
     combatUnit.movementRemaining = 0;
     setTile(tx, tz, tile);
+    refreshUnitLabelAt(tx, tz);
 
-    world.sendMessage(`§c[Combat] ${player.name} の${combatUnit.label ?? "戦闘ユニット"}が、(${tx}, ${tz}) にいた${removedOwnerName}の${removedLabel}を排除しました！(異教徒の排除)`);
+    // 💡 異教徒の排除も「宗教ユニットが倒された」扱いとして、最寄りの都市(所有者問わず)の
+    //    宗教的圧力を±1000変動させる(§11、宗教ユニット同士の攻撃と共通のルール)。
+    let pressureNote = "";
+    const shiftedKey = applyReligiousKillPressureShift(getTiles(), tx, tz, player.id, defeatedOwnerId);
+    if (shiftedKey) {
+        const [skx, skz] = shiftedKey.split(",").map(Number);
+        setTile(skx, skz, getTiles()[shiftedKey]);
+        pressureNote = ` §7(最寄りの都市の宗教的圧力: 自国+1000/${removedOwnerName}-1000)`;
+    }
+
+    broadcast(`§c[Combat] ${player.name} の${combatUnit.label ?? "戦闘ユニット"}が、(${tx}, ${tz}) にいた${removedOwnerName}の${removedLabel}を排除しました！(異教徒の排除)${pressureNote}`);
+    return { ok: true };
+}
+
+/**
+ * 使徒・審問官(canAttack:trueの宗教ユニット)で、隣接する敵の宗教ユニットを攻撃する。
+ * ・戦闘ユニットの攻撃と違い反撃は発生しない、一方的な攻撃。
+ * ・1ターンに1回まで(移動力ではなく hasAttackedThisTurn で管理する。布教とは独立した行動)。
+ * ・自国の領有マスに立っている側は宗教戦闘力に homeTerritoryCombatBonus が加算される。
+ * ・撃破に成功した場合、最寄りの都市(所有者問わず)の宗教的圧力が±1000変動する(§11)。
+ */
+export function cmdAttackReligiousUnit(player, fromTx, fromTz, targetTx, targetTz) {
+    const config = getMapConfig();
+    if (!config) { reply(player, "§cマップ未生成です。"); return { ok: false }; }
+    if (!isPlayersTurn(player)) { reply(player, "§cあなたのターンではありません。"); return { ok: false }; }
+
+    const allTiles = getTiles();
+    const source = allTiles[`${fromTx},${fromTz}`];
+    const unit = source?.religiousUnit;
+    if (!unit || unit.ownerId !== player.id) { reply(player, "§cこのマスにあなたの宗教ユニットはいません。"); return { ok: false }; }
+    const def = getReligiousUnitDef(unit.id);
+    if (!def?.canAttack) { reply(player, `§c【${unit.label ?? "この宗教ユニット"}】は敵の宗教ユニットを攻撃できません。`); return { ok: false }; }
+    if (unit.hasAttackedThisTurn) { reply(player, "§cこの宗教ユニットは今ターン既に攻撃しました。(1ターン1回まで)"); return { ok: false }; }
+
+    const distance = Math.max(Math.abs(targetTx - fromTx), Math.abs(targetTz - fromTz));
+    if (distance !== 1) { reply(player, "§c宗教ユニットへの攻撃は隣接するマスに対してのみ行えます。"); return { ok: false }; }
+
+    const targetTile = allTiles[`${targetTx},${targetTz}`];
+    const targetUnit = targetTile?.religiousUnit;
+    if (!targetUnit) { reply(player, "§cそのマスに宗教ユニットはいません。"); return { ok: false }; }
+    if (targetUnit.ownerId === player.id) { reply(player, "§c自分の宗教ユニットは攻撃できません。"); return { ok: false }; }
+    if (hasDiplomaticAgreement(player.id, targetUnit.ownerId)) {
+        reply(player, "§c不可侵条約・同盟を結んでいる国家の宗教ユニットは攻撃できません。");
+        return { ok: false };
+    }
+
+    const targetDef = getReligiousUnitDef(targetUnit.id);
+    const attackerBonus = source.ownerId === player.id ? (def.homeTerritoryCombatBonus ?? 0) : 0;
+    const defenderBonus = targetTile.ownerId === targetUnit.ownerId ? (targetDef?.homeTerritoryCombatBonus ?? 0) : 0;
+    const damage = resolveReligiousAttack(
+        (unit.religiousCombatStrength ?? 0) + attackerBonus,
+        (targetUnit.religiousCombatStrength ?? 0) + defenderBonus,
+    );
+    targetUnit.hp = (targetUnit.hp ?? 0) - damage;
+    unit.hasAttackedThisTurn = true;
+
+    let message = `§4[Faith][Combat] ${player.name} の${unit.label ?? "宗教ユニット"}が (${targetTx}, ${targetTz}) の${targetUnit.ownerName ?? "不明な国家"}の${targetUnit.label ?? "宗教ユニット"}に${damage}ダメージ！`;
+
+    if (targetUnit.hp <= 0) {
+        const defeatedOwnerId = targetUnit.ownerId;
+        const defeatedLabel = targetUnit.label ?? "宗教ユニット";
+        targetTile.religiousUnit = null;
+        message += ` §c撃破した！`;
+        const shiftedKey = applyReligiousKillPressureShift(allTiles, targetTx, targetTz, player.id, defeatedOwnerId);
+        if (shiftedKey) {
+            const [skx, skz] = shiftedKey.split(",").map(Number);
+            setTile(skx, skz, allTiles[shiftedKey]);
+            message += ` §7(最寄りの都市の宗教的圧力: 自国+1000/${defeatedLabel}の宗教-1000)`;
+        }
+    } else {
+        message += ` §7(残りHP: ${Math.max(0, targetUnit.hp)}/${targetUnit.maxHp ?? 100})`;
+    }
+
+    setTile(fromTx, fromTz, source);
+    setTile(targetTx, targetTz, targetTile);
+    if (targetUnit.hp <= 0) refreshUnitLabelAt(targetTx, targetTz);
+    broadcast(message);
+    return { ok: true };
+}
+
+/**
+ * 使徒(canStartInquisition:true)が審問を開始する。布教力が満タン(=一度も布教していない)場合
+ * のみ行える一度きりの特殊能力。開始すると国家全体が以後ずっと審問済み扱いになり(再開始不要)、
+ * 審問官(requiresInquisitionStarted:trueの宗教ユニット)を購入できるようになる。
+ * 実行した使徒自身は使命を終えて消滅する。
+ */
+export function cmdStartInquisition(player, tx, tz) {
+    const config = getMapConfig();
+    if (!config) { reply(player, "§cマップ未生成です。"); return { ok: false }; }
+    if (!isPlayersTurn(player)) { reply(player, "§cあなたのターンではありません。"); return { ok: false }; }
+
+    const tile = getTile(tx, tz);
+    const unit = tile?.religiousUnit;
+    if (!unit || unit.ownerId !== player.id) { reply(player, "§cこのマスにあなたの宗教ユニットはいません。"); return { ok: false }; }
+    const def = getReligiousUnitDef(unit.id);
+    if (!def?.canStartInquisition) { reply(player, `§c【${unit.label ?? "この宗教ユニット"}】は審問を開始できません。`); return { ok: false }; }
+    if (hasStartedInquisition(player)) { reply(player, "§c審問は既に開始されています。"); return { ok: false }; }
+    if ((unit.evangelismPower ?? 0) < (def.evangelismPower ?? 0)) {
+        reply(player, "§c布教力が満タンの使徒のみ審問を開始できます。(一度でも布教した使徒は開始できません)");
+        return { ok: false };
+    }
+
+    startInquisition(player);
+    const label = unit.label ?? "使徒";
+    tile.religiousUnit = null;
+    setTile(tx, tz, tile);
+    refreshUnitLabelAt(tx, tz);
+
+    broadcast(`§4[Inquisition] ${player.name} の${label}が (${tx}, ${tz}) で審問の開始を宣言し、使命を終えて姿を消しました！ 以後、審問官を購入できます。`);
+    return { ok: true };
+}
+
+/**
+ * 審問官(canSuppress:trueの宗教ユニット)が、自分のいるマスが属する都市(所有者問わず。
+ * 領地に属していなければ失敗)で弾圧を行う。布教力を1消費し、その都市の自国以外の宗教の
+ * 圧力を一律80%削減する(suppressOtherReligions)。布教力を使い果たすと解散する(布教と同じ)。
+ */
+export function cmdInquisitorSuppress(player, tx, tz) {
+    const config = getMapConfig();
+    if (!config) { reply(player, "§cマップ未生成です。"); return { ok: false }; }
+    if (!isPlayersTurn(player)) { reply(player, "§cあなたのターンではありません。"); return { ok: false }; }
+
+    const allTiles = getTiles();
+    const tile = allTiles[`${tx},${tz}`];
+    const unit = tile?.religiousUnit;
+    if (!unit || unit.ownerId !== player.id) { reply(player, "§cこのマスにあなたの宗教ユニットはいません。"); return { ok: false }; }
+    const def = getReligiousUnitDef(unit.id);
+    if (!def?.canSuppress) { reply(player, `§c【${unit.label ?? "この宗教ユニット"}】は弾圧を行えません。`); return { ok: false }; }
+    if ((unit.evangelismPower ?? 0) <= 0) { reply(player, "§c布教力が残っていません。"); return { ok: false }; }
+
+    const cityKey = resolveOwningCityKey(tx, tz, tile, tile.ownerId, allTiles);
+    const cityTile = cityKey ? allTiles[cityKey] : null;
+    if (!cityTile?.city) { reply(player, "§cこのマスは、どの都市の領地にも属していません。"); return { ok: false }; }
+
+    suppressOtherReligions(cityTile.city, player.id);
+    unit.evangelismPower -= 1;
+
+    let message = `§4[Inquisition] ${player.name} の${unit.label ?? "審問官"}が【${cityTile.city.name}】で弾圧を行い、自国以外の宗教的圧力を80%削減しました！ (残り布教力: ${unit.evangelismPower})`;
+    const dissolved = unit.evangelismPower <= 0;
+    if (dissolved) {
+        tile.religiousUnit = null;
+        message += ` §7(布教力を使い果たし、${unit.label ?? "宗教ユニット"}は解散しました)`;
+    }
+
+    setTile(tx, tz, tile);
+    if (cityKey !== `${tx},${tz}`) {
+        const [ckx, ckz] = cityKey.split(",").map(Number);
+        setTile(ckx, ckz, cityTile);
+    }
+    if (dissolved) refreshUnitLabelAt(tx, tz);
+    broadcast(message);
     return { ok: true };
 }
 
@@ -1283,7 +1466,7 @@ export function cmdSignAgreement(player, type, targetId) {
         return { ok: false };
     }
     const result = signAgreement(player, type, targetId);
-    if (result.ok) world.sendMessage(result.message);
+    if (result.ok) broadcast(result.message);
     else reply(player, result.message);
     return result;
 }
@@ -1312,13 +1495,17 @@ export function cmdMoveCombatUnit(player, fromTx, fromTz, toTx, toTz) {
     const distance = Math.max(Math.abs(toTx - fromTx), Math.abs(toTz - fromTz));
     const remaining = unit.movementRemaining ?? unit.movement ?? 0;
     if (distance < 1 || distance > remaining) { reply(player, "§cそのマスへ移動するには移動力が足りません。"); return { ok: false }; }
+    if (!canTravelPath(unit, fromTx, fromTz, toTx, toTz, getTiles())) {
+        reply(player, "§c移動経路が塞がっているため、そのマスへは直接移動できません。(陸地や他ユニットなどを飛び越えることはできません)");
+        return { ok: false };
+    }
 
     source.combatUnit = null;
     unit.movementRemaining = remaining - distance;
     target.combatUnit = unit;
     setTile(fromTx, fromTz, source);
     setTile(toTx, toTz, target);
-    world.sendMessage(`§e[Warrior] ${player.name} の${unit.label ?? "戦闘ユニット"}が (${fromTx}, ${fromTz}) から (${toTx}, ${toTz}) へ移動しました。 (残り移動力: ${unit.movementRemaining})`);
+    broadcast(`§e[Warrior] ${player.name} の${unit.label ?? "戦闘ユニット"}が (${fromTx}, ${fromTz}) から (${toTx}, ${toTz}) へ移動しました。 (残り移動力: ${unit.movementRemaining})`);
     return { ok: true };
 }
 
@@ -1372,7 +1559,7 @@ export function cmdAttackCombatUnit(player, fromTx, fromTz, toTx, toTz) {
     if (result.defenderDestroyed) {
         lines.push(`§c[Defeated] ${defenderLabel}は撃破されました！`);
         target.combatUnit = null;
-        removeUnitLabelAt(toTx, toTz);
+        refreshUnitLabelAt(toTx, toTz);
     } else {
         lines.push(`§7  -> ${defenderLabel} 残りHP: ${Math.max(0, Math.round(defender.hp))}/${defender.maxHp ?? 100}`);
         if (result.counterSkippedReason === "outOfDefenderRange") {
@@ -1382,7 +1569,7 @@ export function cmdAttackCombatUnit(player, fromTx, fromTz, toTx, toTz) {
             if (result.attackerDestroyed) {
                 lines.push(`§c[Defeated] ${attackerLabel}は反撃により撃破されました！`);
                 source.combatUnit = null;
-                removeUnitLabelAt(fromTx, fromTz);
+                refreshUnitLabelAt(fromTx, fromTz);
             } else {
                 lines.push(`§7  -> ${attackerLabel} 残りHP: ${Math.max(0, Math.round(attacker.hp))}/${attacker.maxHp ?? 100}`);
             }
@@ -1391,7 +1578,7 @@ export function cmdAttackCombatUnit(player, fromTx, fromTz, toTx, toTz) {
 
     setTile(fromTx, fromTz, source);
     setTile(toTx, toTz, target);
-    world.sendMessage(lines.join("\n"));
+    broadcast(lines.join("\n"));
     return { ok: true, result };
 }
 
@@ -1491,7 +1678,7 @@ export function cmdCaptureCity(player, tx, tz) {
         ? ` (帰属していた領有マス${capturedTileCount}マスも同時に占領${captureDetails.length > 0 ? `、うち${captureDetails.join("・")}を接収` : ""})`
         : "";
     const capitalText = capturedCapital ? " §c(相手の首都を陥落させました！)" : "";
-    world.sendMessage(`§6[Capture] ${player.name} が ${previousOwnerName} の【${cityName}】を占領しました！${extraText}${capitalText}`);
+    broadcast(`§6[Capture] ${player.name} が ${previousOwnerName} の【${cityName}】を占領しました！${extraText}${capitalText}`);
     checkAndAnnounceVictory(tiles);
     return { ok: true };
 }
@@ -1524,6 +1711,6 @@ export function cmdHealCombatUnit(player, tx, tz) {
     tile.combatUnit = unit;
     setTile(tx, tz, tile);
 
-    world.sendMessage(`§a[Heal] ${player.name} の${unit.label ?? "戦闘ユニット"} (${tx}, ${tz}) が休息し、HPが${Math.round(healAmount)}回復しました。 (HP: ${Math.max(0, Math.round(unit.hp))}/${maxHp})`);
+    broadcast(`§a[Heal] ${player.name} の${unit.label ?? "戦闘ユニット"} (${tx}, ${tz}) が休息し、HPが${Math.round(healAmount)}回復しました。 (HP: ${Math.max(0, Math.round(unit.hp))}/${maxHp})`);
     return { ok: true };
 }

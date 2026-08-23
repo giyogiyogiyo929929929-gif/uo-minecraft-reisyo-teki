@@ -4,7 +4,7 @@
 import { world, system, ItemStack } from "@minecraft/server";
 import { registerScriptCommands, registerCustomCommands } from "./commands.js";
 import { openMainMenu } from "./ui.js";
-import { getTurnState, getTiles, getMapConfig, getStateVersion } from "./state.js";
+import { getTurnState, getTiles, getMapConfig, getStateVersion, broadcast } from "./state.js";
 import { worldToTile, TERRAIN_TYPES, RESOURCE_TYPES } from "./mapGen.js";
 import { getCityCurrentYields } from "./turns.js";
 import { forceEndTurnAuto } from "./bots.js";
@@ -123,7 +123,7 @@ world.afterEvents.playerLeave.subscribe((eventData) => {
         const result = forceEndTurnAuto();
         if (result.ok) {
             clearCityYieldCache();
-            world.sendMessage(`§7(${playerName} が退出したため、自動的にターンをスキップしました)`);
+            broadcast(`§7(${playerName} が退出したため、自動的にターンをスキップしました)`);
         }
     });
 });
@@ -170,8 +170,12 @@ system.runInterval(() => {
             // 💡 このプレイヤーが今操作している国家(ソロテストで仮想国家を操作中の場合はそちらのID)。
             //    自国・同盟国以外の都市については、内部管理情報(人口・生産・備蓄など)を
             //    見えないようにする(相手を偵察して有利になる情報を与えないため)。
+            //    ただし、このゲームに参加していない(turn.playerOrderに含まれない)純粋な
+            //    観戦者には、偵察による有利不利が生じ得ないため、この制限自体を適用しない
+            //    (誰の都市でも詳細情報を見られる)。
             const viewerCivId = getActiveCivId(player);
-            const isFriendlyOwner = (ownerId) => !ownerId || ownerId === viewerCivId || hasDiplomaticAgreement(viewerCivId, ownerId);
+            const viewerIsParticipant = Array.isArray(turn.playerOrder) && turn.playerOrder.includes(viewerCivId);
+            const isFriendlyOwner = (ownerId) => !viewerIsParticipant || !ownerId || ownerId === viewerCivId || hasDiplomaticAgreement(viewerCivId, ownerId);
 
             // 地形ラベルの取得
             const terrainLabel = TERRAIN_TYPES[tile.type]?.label ?? "未知の地形";
@@ -199,7 +203,7 @@ system.runInterval(() => {
                 : "§7戦闘ユニット: なし";
             const religiousUnit = tile.religiousUnit;
             const religiousUnitText = religiousUnit
-                ? `\n§d[Missionary] ${religiousUnit.label ?? religiousUnit.id} | HP: ${religiousUnit.hp ?? 0}/${religiousUnit.maxHp ?? 100} | 布教力: ${religiousUnit.evangelismPower ?? 0} | 移動力: ${religiousUnit.movementRemaining ?? religiousUnit.movement ?? 0}/${religiousUnit.movement ?? 0}${religiousUnit.hasProselytizedThisTurn ? " | §7(今ターン布教済み)" : ""}`
+                ? `\n§d[Faith] ${religiousUnit.label ?? religiousUnit.id} | HP: ${religiousUnit.hp ?? 0}/${religiousUnit.maxHp ?? 100} | 宗教戦闘力: ${religiousUnit.religiousCombatStrength ?? 0} | 布教力: ${religiousUnit.evangelismPower ?? 0} | 移動力: ${religiousUnit.movementRemaining ?? religiousUnit.movement ?? 0}/${religiousUnit.movement ?? 0}${religiousUnit.hasProselytizedThisTurn ? " | §7(今ターン布教済み)" : ""}${religiousUnit.hasAttackedThisTurn ? " | §7(今ターン攻撃済み)" : ""}`
                 : "";
             
             // 算出量の可視化 ([Food]食料 / [Prod]生産) ※マス自体が持つベース値

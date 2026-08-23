@@ -14,6 +14,14 @@
 //   両方をまとめて判定する。個別の理由でエラーメッセージを出し分けたい呼び出し元
 //   (commands.js の cmdMoveCombatUnit)は、2つのサブ関数を直接使う。
 //
+// 【移動経路の検証(飛び越え禁止)】
+// ・移動力2以上のユニット(軍艦など)が、最終着地マスだけを見て「入れるかどうか」を
+//   判定すると、間に挟まる陸地(海軍ユニットの場合)や他国の「関係なし」領土、他ユニットを
+//   飛び越えて移動できてしまう(bots.js の Bot だけでなく commands.js の cmdMoveCombatUnit
+//   経由でプレイヤーの手動移動も同様)。canTravelPath が、8方向の直進(縦・横・斜め)上の
+//   通過点をすべて検証し、途中に障害物があれば経路自体を不可とする(直進で説明できない
+//   移動(dx・dzの絶対値が一致しない斜め以外の移動)もそもそも経路が定義できないため不可)。
+//
 // 【ルール】
 // ・攻撃距離は、そのユニットの移動力(movement)と同じ範囲を使う(attackRange を明示的に
 //   持たせている場合はそちらを優先。将来、移動力と攻撃距離が異なるユニットを追加したくなった
@@ -114,6 +122,33 @@ export function canUnitEnterTile(unit, tile) {
 }
 
 /**
+ * fromTx,fromTz から toTx,toTz までの移動経路が、このユニットにとって進入可能かどうかを
+ * 判定する(最終着地マス自体の判定は呼び出し元が別途行う想定。ここでは主に「間に挟まる
+ * 通過点」を検証する)。
+ * ・移動は8方向の直進(縦・横・斜め)のみを想定しており、直進で説明できない移動
+ *   (dx・dzの絶対値が一致せず、どちらも0でもない)は経路が定義できないため不可とする。
+ * ・通過点(距離1〜distance-1のマス。最終マスは含まない)は、地形・外交関係・他ユニットの
+ *   占有の観点ですべて進入可能である必要がある。
+ * 移動力2以上のユニット(軍艦など)が、間に挟まる陸地(海軍ユニットの場合)や他国の
+ * 「関係なし」領土、他ユニットを飛び越えて移動してしまうのを防ぐための経路検証。
+ */
+export function canTravelPath(unit, fromTx, fromTz, toTx, toTz, tiles) {
+    const dx = toTx - fromTx;
+    const dz = toTz - fromTz;
+    const distance = Math.max(Math.abs(dx), Math.abs(dz));
+    if (distance <= 1) return true;
+    if (dx !== 0 && dz !== 0 && Math.abs(dx) !== Math.abs(dz)) return false;
+
+    const stepX = Math.sign(dx);
+    const stepZ = Math.sign(dz);
+    for (let step = 1; step < distance; step++) {
+        const t = tiles[`${fromTx + stepX * step},${fromTz + stepZ * step}`];
+        if (!t || t.combatUnit || !canUnitEnterTile(unit, t)) return false;
+    }
+    return true;
+}
+
+/**
  * このユニットが「遠距離戦闘ユニット」かどうかを判定する。
  * ・rangedCombatStrength を明示的に持つユニットは常に遠距離戦闘ユニット。
  * ・持たない場合でも、攻撃距離(attackRange)が2より大きいなら遠距離戦闘ユニットとみなしてよい。
@@ -184,6 +219,22 @@ export function countFlankingAllies(defTx, defTz, attackerOwnerId, attackerTx, a
 /** countFlankingAllies() が返した数を、実際の先制攻撃力ボーナスに変換する(上限あり)。 */
 export function getFlankingBonus(flankingAllyCount) {
     return Math.min(flankingAllyCount, FLANKING_MAX_ALLIES) * FLANKING_BONUS_PER_ALLY;
+}
+
+/**
+ * attacker が defender を今すぐ攻撃した場合、先制攻撃だけで確実に(=ダメージロールが
+ * 最低値(DAMAGE_MIN)であっても)撃破できるかどうかを見積もる。実際のダメージは
+ * 24〜36のランダム値を使うため、最低値で判定することで「確実に倒せる」場合のみ
+ * true を返す安全側の見積もりになる(実際には最低値以上のダメージが出ることが多いため、
+ * この判定が false でも運良く倒せることはあるが、逆にtrueなのに倒せないことは無い)。
+ * 複数の攻撃対象から確実に仕留められる相手を優先する(pickBestAttackTarget)ために使う。
+ */
+export function canGuaranteeKill(attacker, defender, flankingBonus = 0) {
+    const attackerStrength = getFirstStrikeStrength(attacker) + flankingBonus;
+    const diff = attackerStrength - getEffectiveCombatStrength(defender);
+    const minDamage = Math.floor(DAMAGE_MIN * Math.exp(diff * DAMAGE_EXPONENT_SCALE));
+    const hp = defender?.hp ?? defender?.maxHp ?? 0;
+    return hp <= minDamage;
 }
 
 /**

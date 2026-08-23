@@ -110,6 +110,53 @@ export function addVirtualCiv(controllerPlayer, name, options = {}) {
     return { id, name: civName };
 }
 
+/**
+ * 仮想国家(テスト国家/Bot)を削除する。呼び出し元(ui.js)が、ゲーム開始後は削除できない
+ * (所有マス・都市などゲーム内状態に取り残しが発生するのを防ぐため、追加時と同じ制約)ことを
+ * 事前に確認している前提。削除すると、その国家を操作中(getActiveCivId)だった全プレイヤーの
+ * 操作対象は、次回参照時に自動的に自分自身(実プレイヤー)へ戻る(getActiveCivIdが
+ * activeCivMap未登録時のフォールバックとしてrealPlayer.idを返すため)。
+ */
+export function removeVirtualCiv(civId) {
+    const civ = getVirtualCivById(civId);
+    if (!civ) return { ok: false, message: "§cその国家が見つかりません。" };
+
+    saveVirtualCivs(getVirtualCivs().filter((c) => c.id !== civId));
+
+    const activeMap = getActiveCivMap();
+    let changed = false;
+    for (const controllerId in activeMap) {
+        if (activeMap[controllerId] === civId) { delete activeMap[controllerId]; changed = true; }
+    }
+    if (changed) saveActiveCivMap(activeMap);
+
+    return { ok: true, message: `§a【${civ.name}】を削除しました。`, name: civ.name };
+}
+
+/**
+ * 全てのBot(isBot:trueの仮想国家)を削除する。手動追加したテスト国家(isBot:false)は
+ * 対象外(OPが意図的に残したテスト用の国家までは勝手に消さない)。ゲーム終了時
+ * (リセット・勝利。turns.js から呼ばれる)に、次の対戦のたびにOPがBotを手動で片付ける
+ * 手間を省くためのもの。呼び出し元は既にターン状態そのものをリセットしている前提のため、
+ * turn.playerOrderからの除去はここでは行わない(resetAll()がターン状態ごと消去する)。
+ */
+export function removeAllBots() {
+    const bots = getVirtualCivs().filter((c) => c.isBot);
+    if (bots.length === 0) return [];
+
+    saveVirtualCivs(getVirtualCivs().filter((c) => !c.isBot));
+
+    const botIds = new Set(bots.map((c) => c.id));
+    const activeMap = getActiveCivMap();
+    let changed = false;
+    for (const controllerId in activeMap) {
+        if (botIds.has(activeMap[controllerId])) { delete activeMap[controllerId]; changed = true; }
+    }
+    if (changed) saveActiveCivMap(activeMap);
+
+    return bots.map((c) => c.id);
+}
+
 export function getControllableCivs(realPlayer) {
     const list = [{ id: realPlayer.id, name: realPlayer.name, isVirtual: false, isBot: false }];
     for (const civ of getVirtualCivs()) {

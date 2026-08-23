@@ -12,66 +12,123 @@
 // ロジックを二重実装して後から挙動が乖離する事故を避けるための設計判断。
 //
 // 【戦略性: 「脅威」の判定について】
-// 自国の都市の近くに、外交協定の無い敵ユニットが1体でもいる場合、そのターンは
-// 「脅威あり」と判定する(computeThreatLevel)。この判定1つを、拡張(新都市の建設可否)・
-// 生産の優先順位・研究の優先順位という3つの判断に横断的に使うことで、「危険な時は防衛、
-// 安全な時は経済成長」というシンプルだが一貫した戦略を表現している。警戒距離は関係により
-// 変える: 戦争状態(war)の相手はTHREAT_RADIUS_WAR(実際に領土へ侵入・攻撃してくる
-// 可能性がある)、「関係なし」(none)の相手はより短いTHREAT_RADIUS_NONE(宣戦布告
-// されない限り領土に入って来られず実害が無いため)。
+// 自国の都市の近くにいる、外交協定の無い敵ユニットの戦闘力の合計がTHREAT_POWER_THRESHOLDを
+// 超える場合、そのターンは「脅威あり」と判定する(computeThreatLevel)。この判定1つを、
+// 拡張(新都市の建設可否)・生産の優先順位・研究の優先順位という3つの判断に横断的に使うことで、
+// 「危険な時は防衛、安全な時は経済成長」というシンプルだが一貫した戦略を表現している。
+// 単独ユニット1体が素通りする程度では過剰反応しないよう、戦闘力の合計で段階的に判定する
+// (敵ユニットが1体でもいれば即座に脅威ありとしていた旧仕様は過敏すぎたための調整)。
+// 警戒距離は関係により変える: 戦争状態(war)の相手はTHREAT_RADIUS_WAR(実際に領土へ侵入・
+// 攻撃してくる可能性がある)、「関係なし」(none)の相手はより短いTHREAT_RADIUS_NONE
+// (宣戦布告されない限り領土に入って来られず実害が無いため)。
 //
 // 【戦略性: 宣戦布告(declareWar)・講和(breakRelation)について】
 // diplomacy.js の追加により、攻撃・都市の占領・他国領土への進入は戦争状態(war)の相手にしか
 // 行えなくなった。そのためBotは、自国より明らかに弱い「関係なし」の相手には自分から
 // 宣戦布告して征服を狙い(AGGRESSION_POWER_RATIO)、逆に明らかに強い相手には不可侵条約→
 // 同盟を提案する(DIPLOMATIC_THREAT_POWER_RATIO)。強すぎず弱すぎない相手には何もしない
-// (runBotDiplomacy)。宣戦布告はcivic・試合の設定を問わず常に行える。また、戦争中の相手が
-// 自国よりPEACE_SUE_POWER_RATIO倍以上強くなった(圧倒的に負けている)場合は、自分から
-// 講和(breakRelation)して撤退する(試合の設定でpeaceEnabledが無効な場合は試みない。
-// §15参照)。この倍率はAGGRESSION_POWER_RATIO(宣戦布告の閾値)より意図的に大きくしてあり、
-// 宣戦布告した瞬間に相手がすぐ講和して戦争が実質発生しなくなる(閾値が対称なせいで
-// 往復するだけになる)のを防いでいる。
+// (runBotDiplomacy)。自分発の宣戦布告は、国力比の条件に加えて「ゲーム開始からある程度の
+// ターン数(AGGRESSION_MIN_TURN)が経過している」「相手の領土が自国から一定距離
+// (AGGRESSION_BORDER_RADIUS)以内にある」の2つも満たす必要がある(hasNearbyTerritory)。
+// これは、序盤の未成熟な国力差(都市数の差がそのまま国力比に直結しやすい)だけで
+// 即座に開戦してしまう挙動や、地理的に全く接点の無い遠方の国家へ意味もなく宣戦布告して
+// しまう挙動を防ぐための安全弁で、「好戦的すぎる」という調整要望を受けて追加した
+// (宣戦布告自体はcivic・試合の設定を問わず常に行える。応戦や既存の戦争の継続にはこれらの
+// 制限はかからない)。また、戦争中の相手が自国よりPEACE_SUE_POWER_RATIO倍以上強くなった
+// (圧倒的に負けている)場合は、自分から講和(breakRelation)して撤退する(試合の設定で
+// peaceEnabledが無効な場合は試みない。§15参照)。この倍率はAGGRESSION_POWER_RATIO
+// (宣戦布告の閾値)より意図的に大きくしてあり、宣戦布告した瞬間に相手がすぐ講和して
+// 戦争が実質発生しなくなる(閾値が対称なせいで往復するだけになる)のを防いでいる。
 //
 // 【毎ターンの自動行動】
-// 1. 都市が1つも無ければ、空きマス(資源があれば優先)に最初の都市(首都)を建てる。
-// 2. 脅威が無く、開拓権があれば、自国の空き領地マス(資源があれば優先)に新都市を建てる
-//    (脅威がある間は拡張より防衛を優先し、新都市の建設を見送る)。
-// 3. 自国の領地に隣接する未所有マス(資源があれば優先)を、最大3マス/ターンまで領有する。
+// 1. 都市が1つも無ければ、空きマス(資源があれば最優先、次に狭くない水域に隣接する
+//    沿岸のマスを優先)に最初の都市(首都)を建てる。
+// 2. 脅威が無く、開拓権があれば、自国の空き領地マス(既存の自国都市からMIN_CITY_SPACING未満の
+//    近すぎる場所は除外した上で、資源、次に沿岸を優先)に新都市を建てる(脅威がある間は
+//    拡張より防衛を優先し、新都市の建設を見送る)。沿岸に都市を建てることで、その都市が
+//    軍艦(7.参照)を生産できるようになる。
+// 3. 自国の領地に隣接する未所有マス(資源があれば最優先、次に狭くない水上マスを優先)を、
+//    最大3マス/ターンまで領有する。1〜2マスしかない狭い水域(MIN_WATER_BODY_SIZE未満)は
+//    候補にすら含めない。
 // 4. 首都の人口に余裕があれば開拓権を取得する。
 // 5. 空き領有マスがあり、その帰属都市が区域(専用建造物含む)を建設中でなければ、
-//    着手できる区域または区域専用建造物(社など)の建設を開始する。
-// 6. 空き領有マスがあれば、労働者の行動回数が続く限り施設を設置する。
+//    着手できる区域(新規着工分のみ。同じ都市に複数の候補マスがある場合は、隣接ボーナスが
+//    最も大きいマスを選ぶ)または区域専用建造物(社など。着工先は完成済み区域のマス自体に
+//    固定されるため選択の余地は無い)の建設を開始する。
+// 6. 空き領有マスがあれば、労働者の行動回数が続く限り施設を設置する。複数の候補マスがある
+//    場合、隣接ボーナス(adjacency.js)が大きいマスから優先して設置する
+//    (行動回数を使い切っても質の良いマスから埋まるようにするため)。
 // 7. 生産中でない都市があれば、脅威があり、かつ都市数に見合った戦力にまだ達していなければ
-//    防衛ユニット(戦士・弓兵のうち数が少ない方を優先)を生産する。それ以外は労働者数に
-//    応じた経済優先順位で、何かを生産キューに入れる(脅威時でも戦力が足りていれば経済を
-//    優先することで、戦士だけを際限なく生産し続けることを防ぐ)。沿岸都市(隣接マスに
-//    水上マスがある)なら、都市数に見合った隻数の軍艦をまだ持っていない限り、経済優先順位の
-//    末尾に軍艦も選択肢として加える(内陸都市では配置できないため対象外)。経済・軍艦とも
-//    生産すべきものが無く、戦争中で備蓄がMAX_MISSILE_STOCKPILE未満なら、最後の選択肢として
-//    ミサイルを生産する。
-// 8. 研究・社会制度が未選択なら、脅威がある間は弓術(弓兵解禁)を優先し、無ければ
-//    経済・成長寄りの技術を優先して、条件を満たす最初の項目を自動選択する。
+//    防衛ユニット(近接・遠距離のうち数が少ない方のカテゴリを優先し、そのカテゴリの中では
+//    前提技術を満たす最も戦闘力の高いユニットを選ぶ。例: 鉄器が無ければ剣士の代わりに
+//    槍兵・戦士へ自動的にフォールバックする)を生産する。それ以外は労働者数に応じた
+//    経済優先順位で、何かを生産キューに入れる(脅威時でも戦力が足りていれば経済を優先
+//    することで、同じユニットだけを際限なく生産し続けることを防ぐ)。沿岸都市(隣接マスに
+//    水上マスがある)なら、沿岸都市数に見合った隻数(MAX_BATTLESHIPS_PER_COASTAL_CITY隻/
+//    沿岸都市)の海軍ユニットをまだ持っていない限り、交易所の直後(市場・オベリスク・
+//    訓練場・陸軍ユニットより前)に海軍ユニット(造船術を取得済みなら巡洋艦、なければ軍艦)を
+//    割り込ませる(末尾に追加すると他の生産に押し出されて事実上作られなくなるため、
+//    あえて中盤の優先度にしてある。内陸都市では配置できないため対象外)。戦争中は、
+//    都市1つにつき1基までの対空砲(ミサイル迎撃、§17参照)を穀物庫の直後に割り込ませる
+//    (既に保有済みの都市は自動的に対象外になる)。経済・海軍・対空砲のいずれも生産すべき
+//    ものが無く、戦争中で備蓄がMAX_MISSILE_STOCKPILE未満なら、最後の選択肢としてミサイルを
+//    生産する。
+// 8. 研究・社会制度が未選択なら、脅威がある間は軍事技術(弓術・青銅器・騎乗等)を優先し、
+//    無ければ経済・成長寄りの技術を優先して、条件を満たす最初の項目を自動選択する
+//    (TECH_PRIORITY_SAFE/THREATENED/CIVIC_PRIORITYに載っていない項目も、autoStartProgressが
+//    自動的に末尾へ回して拾うため取りこぼさない)。
 // 9. 届いている外交提案は全て承認する(自国にとってノーリスクなため)。その後、他の全国家
 //    (同盟の相手を除く)について判定する。戦争中の相手は、自国が圧倒的に劣勢なら講和する。
-//    それ以外の相手は、自国より明らかに弱ければ宣戦布告、明らかに強ければ(civic・試合の
-//    設定が許せば)不可侵条約→同盟を提案する。
-// 10. 戦争中で、ミサイルの在庫がある都市が1つでもあれば、敵都市(相手の首都を優先)へ
+//    それ以外の相手は、自国より明らかに弱く(AGGRESSION_POWER_RATIO)、既に他の誰とも
+//    戦争中でなく(二正面作戦の回避)、ゲーム開始から一定ターン数(AGGRESSION_MIN_TURN)が
+//    経過しており、かつ相手の領土が自国と近い(AGGRESSION_BORDER_RADIUS以内)場合に限り
+//    宣戦布告する。明らかに強ければ(civic・試合の設定が許せば)不可侵条約→同盟を提案する。
+// 10. 宗教: 宗教を未創始で条件(聖地・国家全体の信仰力100)を満たしていれば創始する。
+//     創始済みなら、購入条件(建造物/審問開始状況)を満たし、実際の購入コスト(購入するたびに
+//     +30、§11参照)を賄える都市があれば宗教ユニットを購入する。自国の宗教ユニットごとに、
+//     次の優先順で行動する: (a) 攻撃可能(使徒・審問官)なら、隣接する敵の宗教ユニットを
+//     今ターンまだ攻撃していない限り最優先で攻撃する(反撃なし。以降の行動を妨げない)。
+//     (b) 使徒は、審問が未開始かつ布教力が満タンなら審問を開始する(一度きりの特殊能力。
+//     国家全体が以後審問済みになり審問官を購入可能に。この使徒自身は消滅する)。
+//     (c) 布教可能(伝道者・使徒)なら、隣接(マス距離1)する都市があり今ターン未布教で
+//     布教力が残っていれば布教する(複数隣接していれば自国の宗教がまだ主流でない都市を優先)。
+//     (d) 弾圧可能(審問官)なら、今立っているマスが何らかの都市の領地に属していれば、
+//     布教力を1消費してその都市の自国以外の宗教の圧力を80%削減する。(e) それ以外は、
+//     自国の宗教がまだ主流でない都市を最優先目標として、そこへ向けて移動する(無ければ
+//     最も近い都市)。宗教ユニットは地形・所有者を問わず移動できる仕様(§13参照)のため、
+//     戦闘ユニットのような8方向の経路探索は行わず、移動力の範囲内で目標に最も近いマスを
+//     単純に総当たりで選ぶ。宗教ユニットが撃破されると、最寄りの都市の宗教的圧力が
+//     ±1000変動する(§11)。
+// 11. 戦争中で、ミサイルの在庫がある都市が1つでもあれば、敵都市(対空砲の無い都市を最優先、
+//     その中でも相手の首都を優先。対空砲のある都市は迎撃され無駄撃ちになりやすいため後回し)へ
 //     1発だけミサイルを発射する(都市を一撃で消滅させる切り札のため、1ターンにつき最大1発)。
-// 11. 自国の戦闘ユニットごとに、次の優先順で1つだけ行動する(いずれも戦争状態の相手のみが
-//     対象。「関係なし」・不可侵条約・同盟の相手は対象にしない)。近接ユニット(戦士等)を
-//     遠距離ユニット(弓兵等)より先に処理することで、(e)の移動判断が同ターン内の
+// 12. 自国の戦闘ユニットごとに、次の優先順で1つだけ行動する(攻撃・追跡・占領は戦争状態の
+//     相手のみが対象。「関係なし」・不可侵条約・同盟の相手は対象にしない)。近接ユニット
+//     (戦士等)を遠距離ユニット(弓兵等)より先に処理することで、(f)の移動判断が同ターン内の
 //     戦士の前進結果を踏まえられるようにしている:
 //     (a) 無防備な敵都市の上で今ターン未行動なら占領する。
-//     (b) 攻撃範囲内に敵がいれば、その中から包囲ボーナス(combat.js の countFlankingAllies。
-//         既にその敵に隣接している味方ユニットの数)が最大の相手を選び、同数ならHPが
-//         最も低い相手を選んで攻撃する(囲んでから仕留める・確実な撃破を優先)。
-//     (c) HPが低ければ(RETREAT_HP_RATIO未満)、最寄りの自都市へ撤退する。
-//     (d) 自都市を守備中で、近く(GARRISON_ALERT_RADIUS以内)に敵がいなければ持ち場を守る。
-//     (e) 自分は健在で、近く(ESCORT_RADIUS以内)に撤退中の負傷した味方がいれば
+//     (b) 同じマスに敵(同盟関係の無い)の宗教ユニットがいて移動力が満タンなら、異教徒として
+//         排除する(cmdPurgeHeretic)。一方的かつ確実に成功するため、成否がランダムな
+//         攻撃(c)より先に判定する。
+//     (c) 攻撃範囲内に敵がいれば、まず「今の攻撃力(包囲ボーナス込み)で最低ダメージロールでも
+//         確実に撃破できる相手」(combat.js の canGuaranteeKill)を最優先で狙う(中途半端に
+//         複数体を削るより確実に数を減らす)。確実に倒せる相手が複数/皆無の場合は、その中で
+//         包囲ボーナス(countFlankingAllies。既にその敵に隣接している味方ユニットの数)が
+//         最大の相手を選び、同数ならHPが最も低い相手を選んで攻撃する。
+//     (d) HPが低ければ(RETREAT_HP_RATIO未満)、最寄りの自都市へ撤退する。
+//     (e) 自都市を守備中で、近く(GARRISON_ALERT_RADIUS以内)に敵がいなければ持ち場を守る。
+//     (f) 自分は健在で、近く(ESCORT_RADIUS以内)に撤退中の負傷した味方がいれば
 //         (かつ最寄りの敵と同じかそれ以上に近ければ)、敵を追うより先にその護衛(合流)へ
 //         向かう(単独で撤退する負傷ユニットが道中で各個撃破されるのを防ぐ)。
-//     (f) それ以外は最も近い敵(ユニットまたは都市)へ向けて移動する(簡易な直進移動。
-//         障害物を避ける経路探索は行わない)。ただし遠距離ユニットは、自軍に近接ユニットが
+//     (g) それ以外は最も近い敵(ユニットまたは都市)へ向けて移動する(8方向のうち目標に
+//         最も近づけるマスを選ぶ簡易な経路探索。1手先読みの貪欲法であり、行き止まりを
+//         事前に見抜いて迂回するような本格的なパス探索ではないが、直進ルートが地形・
+//         他国領土・占有マスで塞がっていても、他の方向から迂回できればそちらを選べる)。
+//         この探索(撤退・護衛・追跡いずれの移動判断でも共通)がSTUCK_TURNS_FOR_SIDESTEP
+//         ターン連続で失敗した(=目標に近づける移動先が1つも無かった)ユニットは、次回
+//         以降は目標に近づかない移動(横移動・後退)も許可して再挑戦する(attemptMove)。
+//         迂回しても回り込めない完全な袋小路でない限り、これで数ターン以内に動き出せる。
+//         ただし遠距離ユニットは、自軍に近接ユニットが
 //         いるにもかかわらず、その近接ユニットの誰よりも自分の方が敵に近い(=最前線に
 //         単独で突出してしまう)場合は前進を控えて待機する(弓兵が戦士より先に敵地へ
 //         突っ込んで各個撃破されるのを防ぐ、簡易な「戦士を前に出す」隊列判断)。
@@ -85,22 +142,25 @@
 // (モジュールの評価順序に依存する参照は無い)。
 
 import { world, system } from "@minecraft/server";
-import { getMapConfig, getTiles, getMatchSettings } from "./state.js";
+import { getMapConfig, getTiles, getMatchSettings, broadcast, setTile } from "./state.js";
 import { getTurnState, joinGame, startGame, endTurn, forceEndTurn } from "./turns.js";
 import { getVirtualCivById, addVirtualCiv, getCivStorageHandle } from "./civs.js";
-import { getAdjacentTiles, resolveOwningCityKey } from "./adjacency.js";
+import { getAdjacentTiles, getAdjacentTileEntries, resolveOwningCityKey, getAdjacencyBonus } from "./adjacency.js";
 import { isImpassableTerrain, isWaterTerrain } from "./mapGen.js";
 import { canStartProduction, getWorkerCount } from "./production.js";
 import { getDefinitions, getProgressState, startProgress, hasCompletedProgress } from "./progression.js";
-import { getFacilityIds, canInstallFacility } from "./facilities.js";
-import { getDistrictIds, canStartDistrict, getDistrictBuildingIds, canStartDistrictBuilding } from "./districts.js";
-import { canUnitEnterTile, tileDistance, getAttackableTargets, isRangedUnit, countFlankingAllies } from "./combat.js";
+import { getFacilityIds, getFacilityDef, canInstallFacility } from "./facilities.js";
+import { getDistrictIds, getDistrictDef, canStartDistrict, getDistrictBuildingIds, canStartDistrictBuilding } from "./districts.js";
+import { canUnitEnterTile, tileDistance, getAttackableTargets, isRangedUnit, countFlankingAllies, getFlankingBonus, canGuaranteeKill } from "./combat.js";
 import { getRelation, getRequestsFor, sendRequest, acceptRequest, hasDiplomaticAgreement, isAtWar, declareWar, breakRelation } from "./diplomacy.js";
+import { hasFoundedReligion, getReligiousUnitDef, getReligiousUnitIds, getCityDominantReligion, getReligiousUnitCost, hasStartedInquisition } from "./religion.js";
 import {
     cmdClaim, cmdSettle, cmdBuyRights, cmdStartProduction,
     cmdInstallFacility, cmdStartDistrict, cmdStartDistrictBuilding,
-    cmdMoveCombatUnit, cmdAttackCombatUnit, cmdCaptureCity, cmdHealCombatUnit,
+    cmdMoveCombatUnit, cmdAttackCombatUnit, cmdCaptureCity, cmdHealCombatUnit, cmdPurgeHeretic,
     cmdLaunchMissile,
+    cmdFoundReligion, cmdBuyReligiousUnit, cmdMoveReligiousUnit, cmdProselytize,
+    cmdAttackReligiousUnit, cmdStartInquisition, cmdInquisitorSuppress,
 } from "./commands.js";
 
 const TILE_SIZE = 5;
@@ -111,15 +171,28 @@ const MAX_CLAIMS_PER_TURN = 3;
 //    (advanceUntilHumanの実装を参照)。既定値だが、実際の間隔は試合の設定
 //    (state.js の getMatchSettings().botTurnDelayTicks)からOPが変更できる。
 const DEFAULT_BOT_TURN_DELAY_TICKS = 5;
+// 💡 陸軍ユニットを近接/遠距離の2カテゴリに分類し、各カテゴリ内は「今生産可能な中で最も
+//    戦闘力の高いユニット」が優先されるようにする(前提技術が無ければ自動的に下位ユニットへ
+//    フォールバックする。canStartProductionが前提技術を満たさない選択肢を弾くのを利用するだけで、
+//    ここには判定ロジックを重複させない)。カタパルトは遠距離戦闘力こそ最大だが近接戦闘力が
+//    低い攻城ユニットのため、フォールバック順ではクロスボウ兵の下(=より打たれ強い方を先に
+//    使い切ってから頼る)にしてある。
+const MELEE_UNIT_PRIORITY = ["swordsman", "spearman", "horseman", "warrior"];
+const RANGED_UNIT_PRIORITY = ["crossbowman", "catapult", "archer"];
+const MELEE_UNIT_IDS = [...MELEE_UNIT_PRIORITY];
+const RANGED_UNIT_IDS = [...RANGED_UNIT_PRIORITY];
 // 💡 生産の優先順位。労働者が少ないうちは労働者を優先し、増えたら建造物/防衛ユニットへ回す。
 // 脅威(THREAT_RADIUS以内の敵ユニット)が無い間の優先順位。
-const PRODUCTION_PRIORITY_SAFE_EARLY = ["worker", "granary", "tradingPost", "obelisk", "warrior", "archer"];
-const PRODUCTION_PRIORITY_SAFE_LATE = ["granary", "tradingPost", "obelisk", "warrior", "archer", "worker"];
+const PRODUCTION_PRIORITY_SAFE_EARLY = ["worker", "granary", "tradingPost", "market", "obelisk", "trainingGround", ...MELEE_UNIT_PRIORITY, ...RANGED_UNIT_PRIORITY];
+const PRODUCTION_PRIORITY_SAFE_LATE = ["granary", "tradingPost", "market", "obelisk", "trainingGround", ...MELEE_UNIT_PRIORITY, ...RANGED_UNIT_PRIORITY, "worker"];
 const WORKER_COUNT_THRESHOLD = 3;
 // 💡 脅威時でも際限なく戦士/弓兵を生産し続けると、経済(労働者・建造物)が完全に止まり、
 //    かつ同じユニットばかりになってしまうため、都市数に対してこの倍率までの戦闘ユニット
 //    (戦士+弓兵の合計)を持てば、脅威時でも経済優先度に戻す上限とする。
 const MAX_COMBAT_UNITS_PER_CITY = 3;
+// 💡 沿岸都市1つにつき保有してよい軍艦の隻数の目安。内陸都市は軍艦を配置できないため、
+//    上限は「沿岸都市の数×この値」で計算する(unitCounts.coastalCityCount参照)。
+const MAX_BATTLESHIPS_PER_COASTAL_CITY = 2;
 
 // 💡 自国の都市からこの距離(マス目)以内に敵ユニットがいる場合、「脅威あり」と判定し、
 //    生産・拡張・研究の優先順位を防衛寄りに切り替える。戦争状態の相手は実際に領土へ侵入・
@@ -134,17 +207,41 @@ const RETREAT_HP_RATIO = 0.35;
 //    (THREAT_RADIUS_WARと同じ値にして、生産を防衛寄りに切り替える距離と、実際にユニットが
 //    迎撃に動き出す距離がズレない=「警戒しているのに誰も動かない」状態を防ぐ)。
 const GARRISON_ALERT_RADIUS = THREAT_RADIUS_WAR;
+// 💡 THREAT_RADIUS以内にいる、外交協定の無い敵ユニットの戦闘力(combatStrength等)の合計が
+//    この値を超えて初めて「脅威あり」と判定する(computeThreatLevel)。以前は範囲内に敵が
+//    1体でもいれば即座に脅威ありとしていたが、それだと素通りするだけの単独ユニット1体
+//    (戦士20・弓兵15など)でも経済(生産・拡張・研究)を丸ごと防衛優先へ切り替えてしまい
+//    過敏だったため、まとまった戦力(戦士2体分、または軍艦1隻分を超える戦闘力)が
+//    近づいて初めて反応するよう段階化した。
+const THREAT_POWER_THRESHOLD = 20;
+// 💡 移動判断(撤退・護衛・追跡のいずれか)で、目標に近づく移動先が見つからない状態が
+//    この連続ターン数続いたら、目標に近づかない移動(横移動・後退)も許可して迂回を試みる
+//    (pickMoveDestinationのallowSidestep引数。unit.stuckTurnsで連続失敗数を数える)。
+const STUCK_TURNS_FOR_SIDESTEP = 3;
 // 💡 相手の国力(都市数×10+戦闘力合計)が自国のこの倍率を超えたら「脅威国」とみなし、
 //    自分から不可侵条約/同盟を提案する(弱い相手には自分から関係を提案しない=将来の
 //    征服対象として残す)。
 const DIPLOMATIC_THREAT_POWER_RATIO = 1.2;
 // 💡 自国がこの倍率以上強ければ、「関係なし」の弱い相手に自分から宣戦布告して征服を狙う
 //    (DIPLOMATIC_THREAT_POWER_RATIOと逆方向: 強い相手には和平、弱い相手には宣戦布告)。
-const AGGRESSION_POWER_RATIO = 1.3;
+//    国力は都市数の影響が大きい(都市数×10)ため、以前の1.3倍という閾値だと、都市を1つ
+//    多く持っているだけ(ほぼ軍事力の差が無い状態)でも条件を満たして即座に宣戦布告して
+//    しまい、「好戦的すぎる」「開始直後から戦争になる」という体感につながっていた。
+//    明確な優位が無い限り攻めない、慎重な閾値に引き上げてある。
+const AGGRESSION_POWER_RATIO = 1.8;
+// 💡 開拓・拡張が落ち着くまでの猶予として、このターン数に達するまではBotから自分発の
+//    宣戦布告(宣戦布告されての応戦や、既存の戦争の継続は含まない)を行わない。
+//    ゲーム開始直後の未成熟な国力差(都市を1つ多く持っているだけ、等)で早期に開戦してしまう
+//    「即戦争」感を和らげるための猶予期間。
+const AGGRESSION_MIN_TURN = 10;
+// 💡 自分発の宣戦布告は、相手の領有マスが自国の領有マスからこの距離(マス目)以内にある
+//    場合のみ検討する(hasNearbyTerritory)。国力比だけで、地理的に全く接点の無い遠方の
+//    国家へ意味もなく宣戦布告してしまう(艦隊も送れず実際には何もできない)不自然さを防ぐ。
+const AGGRESSION_BORDER_RADIUS = 20;
 // 💡 戦争中の相手の国力が自国のこの倍率を超えたら、自分から講和(breakRelation)して撤退する。
-//    AGGRESSION_POWER_RATIO(1.3倍)より意図的に大きい値にしてあり、宣戦布告した瞬間に
-//    相手がすぐ講和してしまい戦争が実質発生しなくなる(ヒステリシスの無い往復)のを防ぐ。
-const PEACE_SUE_POWER_RATIO = 2.0;
+//    AGGRESSION_POWER_RATIO(宣戦布告の閾値)より意図的に大きい値にしてあり、宣戦布告した
+//    瞬間に相手がすぐ講和してしまい戦争が実質発生しなくなる(ヒステリシスの無い往復)のを防ぐ。
+const PEACE_SUE_POWER_RATIO = 2.5;
 // 💡 護衛撤退: 撤退中(HP低下)の味方がこの距離以内にいれば、健在なユニットは敵を追うより先に
 //    合流へ向かう(単独で撤退する負傷ユニットが道中で各個撃破されるのを防ぐ)。
 const ESCORT_RADIUS = 4;
@@ -152,11 +249,23 @@ const ESCORT_RADIUS = 4;
 //    備蓄しない(それ以上は他の生産に回す)。
 const MAX_MISSILE_STOCKPILE = 2;
 
-// 💡 研究の優先順位。安全な間は経済・成長寄り、脅威がある間は弓術(弓兵解禁)を最優先する。
-const TECH_PRIORITY_SAFE = ["pottery", "writing", "astrology", "mining", "animalHusbandry", "archery", "smelting", "apprenticeship"];
-const TECH_PRIORITY_THREATENED = ["animalHusbandry", "archery", "mining", "pottery", "writing", "astrology", "smelting", "apprenticeship"];
-// 💡 社会制度は元々「法典→使節団→外交」という前提条件の連鎖と一致した優先順位で問題ない。
-const CIVIC_PRIORITY = ["codeOfLaws", "emissaries", "diplomacy"];
+// 💡 研究の優先順位。安全な間は経済・成長寄り、脅威がある間は軍事技術(弓術・青銅器・騎乗・
+//    鉄器等によるユニットの上位互換解禁)を最優先する。どちらのリストも、ここに載っていない
+//    技術は autoStartProgress が自動的に末尾へ回して拾うため、載せ忘れても解禁自体は
+//    されなくなるわけではない(優先度が下がるだけ)。
+const TECH_PRIORITY_SAFE = [
+    "pottery", "writing", "astrology", "mining", "animalHusbandry", "archery",
+    "sailing", "currency", "smelting", "education", "apprenticeship",
+    "bronzeWorking", "horsebackRiding", "ironWorking", "shipBuilding", "engineering", "machinery",
+];
+const TECH_PRIORITY_THREATENED = [
+    "animalHusbandry", "archery", "mining", "bronzeWorking", "horsebackRiding",
+    "pottery", "writing", "astrology", "smelting", "ironWorking", "apprenticeship",
+    "engineering", "machinery", "sailing", "currency", "education", "shipBuilding",
+];
+// 💡 既存の「法典→使節団→外交」の連鎖に、政治哲学(軍制改革・神権政治への橋渡し)と
+//    商業(市場の前提の1つ)を割り込ませる。
+const CIVIC_PRIORITY = ["codeOfLaws", "emissaries", "politicalPhilosophy", "commerce", "diplomacy", "militaryTradition", "theocracy"];
 
 /** 指定した国家がBot(自動操作)かどうかを判定する。 */
 export function isBotCiv(civId) {
@@ -175,7 +284,7 @@ export function addBot(controllerPlayer, name) {
     const joinResult = joinGame({ id: civ.id, name: civ.name });
     if (!joinResult.ok) return { ok: false, message: `§c[Bot]【${civ.name}】を追加しましたが、参加に失敗しました: ${joinResult.message}` };
 
-    world.sendMessage(`§a[Bot]【${civ.name}】が追加され、ゲームに参加しました。`);
+    broadcast(`§a[Bot]【${civ.name}】が追加され、ゲームに参加しました。`);
     return { ok: true, message: `§a[Bot]【${civ.name}】を追加し、ゲームに参加させました。` };
 }
 
@@ -210,27 +319,117 @@ function pickRandom(list) {
     return list.length ? list[Math.floor(Math.random() * list.length)] : null;
 }
 
-/** 候補の中に資源のあるマスがあれば、そちらを優先してランダムに1つ選ぶ。 */
+// 💡 連結する水上マスがこの枚数未満(=1〜2マスの池や短い川の切れ端)しかない水域は、
+//    拠点としての価値が低いため、領有の対象から完全に除外する(狭い水上マスは無視してよい、
+//    という前提)。海のように十分広い水域は、後述のとおり領有の優先候補として扱う。
+const MIN_WATER_BODY_SIZE = 3;
+
+/**
+ * (tx, tz)を含む水上マスの連結範囲の広さを、cap枚まで数える(4方向連結のBFS)。
+ * 海のように広い水域を全探索すると重くなるため、cap枚数えた時点で打ち切る
+ * (「十分広いかどうか」の判定にのみ使う近似値であり、正確な総タイル数ではない)。
+ */
+function measureWaterBodySize(tx, tz, tiles, cap) {
+    const startTile = tiles[`${tx},${tz}`];
+    if (!isWaterTerrain(startTile?.type)) return 0;
+
+    const visited = new Set([`${tx},${tz}`]);
+    const queue = [[tx, tz]];
+    let count = 0;
+    while (queue.length > 0 && count < cap) {
+        const [cx, cz] = queue.shift();
+        count++;
+        for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+            const nx = cx + dx;
+            const nz = cz + dz;
+            const key = `${nx},${nz}`;
+            if (visited.has(key)) continue;
+            visited.add(key);
+            const t = tiles[key];
+            if (t && isWaterTerrain(t.type)) queue.push([nx, nz]);
+        }
+    }
+    return count;
+}
+
+/** この水上マスが、拠点として無視してよいほど狭い(連結範囲がMIN_WATER_BODY_SIZE未満)かどうか。 */
+function isNarrowWaterTile(tx, tz, tile, tiles) {
+    return isWaterTerrain(tile.type) && measureWaterBodySize(tx, tz, tiles, MIN_WATER_BODY_SIZE) < MIN_WATER_BODY_SIZE;
+}
+
+/**
+ * 候補の中から優先順位に沿って1つ選ぶ: 資源のあるマス最優先、次に(狭くない)水上マス、
+ * それ以外は残りからランダム。水上マスを積極的に領有・活用させる狙い(狭い水上マスは
+ * 呼び出し元の候補収集時点で除外されている想定。isNarrowWaterTile参照)。
+ */
 function pickBestSite(candidates) {
     const withResource = candidates.filter((c) => c.tile?.resource);
-    return pickRandom(withResource.length > 0 ? withResource : candidates);
+    if (withResource.length > 0) return pickRandom(withResource);
+    const withWater = candidates.filter((c) => isWaterTerrain(c.tile?.type));
+    if (withWater.length > 0) return pickRandom(withWater);
+    return pickRandom(candidates);
 }
 
-/** 最初の都市(首都)を建てるのに良さそうな空きマスを選ぶ(資源があれば優先)。 */
+/** この陸地マス(tx, tz)が、狭くない(MIN_WATER_BODY_SIZE以上連結する)水域に隣接しているかどうか。 */
+function isCoastalSite(tx, tz, tiles) {
+    return getAdjacentTileEntries(tx, tz, tiles)
+        .some((e) => isWaterTerrain(e.tile.type) && !isNarrowWaterTile(e.tx, e.tz, e.tile, tiles));
+}
+
+/**
+ * 都市の建設候補(陸地マス)の中から優先順位に沿って1つ選ぶ: 資源のあるマス最優先、
+ * 次に(狭くない)水域に隣接する沿岸のマスを優先し、それ以外は残りからランダムに選ぶ。
+ * 沿岸に都市を建てることで、その都市が軍艦(§8)を生産できるようになる(isCoastalCity)。
+ */
+function pickBestCitySite(candidates, tiles) {
+    const withResource = candidates.filter((c) => c.tile?.resource);
+    if (withResource.length > 0) return pickRandom(withResource);
+    const coastal = candidates.filter((c) => isCoastalSite(c.tx, c.tz, tiles));
+    if (coastal.length > 0) return pickRandom(coastal);
+    return pickRandom(candidates);
+}
+
+/** 最初の都市(首都)を建てるのに良さそうな空きマスを選ぶ(資源、次に沿岸を優先)。 */
 function pickFirstCitySite(tiles) {
-    return pickBestSite(collectTiles(tiles, (t) => !t.ownerId && !t.city && !isImpassableTerrain(t.type) && !isWaterTerrain(t.type)));
+    return pickBestCitySite(collectTiles(tiles, (t) => !t.ownerId && !t.city && !isImpassableTerrain(t.type) && !isWaterTerrain(t.type)), tiles);
 }
 
-/** 新都市を建てられる、自国の空き領地マスを選ぶ(資源があれば優先)。 */
+// 💡 新都市は、自国の既存都市からこの距離(マス目)未満の場所には建てない。密集させると
+//    互いの領地(施設・区域用のマス)を食い合って非効率になるため、少ない都市数で無駄なく
+//    領土を広げられる間隔をあける。
+const MIN_CITY_SPACING = 4;
+
+/** (tx, tz) が、自国の既存都市すべてからMIN_CITY_SPACING以上離れているかどうか。 */
+function isFarEnoughFromOwnCities(tx, tz, tiles, civId) {
+    for (const key in tiles) {
+        const t = tiles[key];
+        if (t.ownerId !== civId || !t.city) continue;
+        const [ctx, ctz] = key.split(",").map(Number);
+        if (tileDistance(tx, tz, ctx, ctz) < MIN_CITY_SPACING) return false;
+    }
+    return true;
+}
+
+/**
+ * 新都市を建てられる、自国の空き領地マスを選ぶ(資源、次に沿岸を優先)。
+ * 既存の自国都市に近すぎる(MIN_CITY_SPACING未満の)マスは候補から除外する。
+ */
 function pickNewCitySite(tiles, civId) {
-    return pickBestSite(collectTiles(tiles, (t) => t.ownerId === civId && !t.city && !isImpassableTerrain(t.type) && !isWaterTerrain(t.type)));
+    const candidates = collectTiles(tiles, (t) => t.ownerId === civId && !t.city && !isImpassableTerrain(t.type) && !isWaterTerrain(t.type))
+        .filter((c) => isFarEnoughFromOwnCities(c.tx, c.tz, tiles, civId));
+    return pickBestCitySite(candidates, tiles);
 }
 
-/** 自国の領地に隣接する未所有マスを選ぶ(cmdClaimと同じ隣接ルール。資源があれば優先)。 */
+/**
+ * 自国の領地に隣接する未所有マスを選ぶ(cmdClaimと同じ隣接ルール)。資源があれば最優先、
+ * 次に(狭くない)水上マスを優先する。1〜2マスの狭い水域(MIN_WATER_BODY_SIZE未満)は
+ * 候補にすら含めない(拠点として活用しにくいため無視する)。
+ */
 function pickClaimableTile(tiles, civId) {
     const candidates = collectTiles(tiles, (t, key) => {
         if (t.ownerId) return false;
         const [tx, tz] = key.split(",").map(Number);
+        if (isNarrowWaterTile(tx, tz, t, tiles)) return false;
         return getAdjacentTiles(tx, tz, tiles).some((n) => n.ownerId === civId);
     });
     return pickBestSite(candidates);
@@ -242,32 +441,63 @@ function isCoastalCity(tx, tz, tiles) {
 }
 
 /**
+ * 優先順位リストの中の targetId の直後に insertId を割り込ませた新しい配列を返す
+ * (targetId が無ければ末尾に追加する)。元の配列は変更しない。
+ */
+function insertAfter(list, targetId, insertId) {
+    const idx = list.indexOf(targetId);
+    const result = [...list];
+    result.splice(idx === -1 ? result.length : idx + 1, 0, insertId);
+    return result;
+}
+
+/**
  * この都市で今から生産開始できる、優先度順で最初の生産物IDを選ぶ(無ければnull)。
  * 脅威があり、かつ都市数に見合った戦力(MAX_COMBAT_UNITS_PER_CITY)にまだ達していなければ
- * 防衛ユニットを最優先する。その際、戦士と弓兵のうち数が少ない方(同数なら弓兵。
- * 弓兵の技術が無ければ自動的に戦士にフォールバックする)を選ぶことで、常に同じユニットだけ
- * 生産され続けるのを防ぐ。それ以外(脅威が無い、またはもう十分な戦力がある)は
- * 労働者数に応じた経済優先順位を使い、沿岸都市(隣接マスに水上マスがある)であれば
- * まだ都市数に見合った隻数の軍艦を持っていない限り、その優先順位の末尾に軍艦も加える
- * (内陸都市では軍艦は配置できず生産が無駄になるため、沿岸都市でのみ選択肢に加える)。
- * 経済・軍艦のどちらも生産すべきものが無く、かつ戦争中で備蓄が上限未満なら、都市を
- * 一撃で破壊できるミサイルを最後の選択肢として生産する。
- * @param {{ cityCount: number, warriorCount: number, archerCount: number, battleshipCount: number,
- *   missileStock: number, atWar: boolean }} unitCounts
+ * 防衛ユニットを最優先する。その際、近接ユニットと遠距離ユニットのうち数が少ない方
+ * (同数なら遠距離)のカテゴリを選び、そのカテゴリの中で「今生産可能な最も戦闘力の高い
+ * ユニット」(MELEE_UNIT_PRIORITY/RANGED_UNIT_PRIORITY。前提技術が無ければ自動的に
+ * 下位ユニットへフォールバック)を選ぶことで、常に同じ下位ユニットだけ生産され続けるのを防ぐ。
+ * それ以外(脅威が無い、またはもう十分な戦力がある)は労働者数に応じた経済優先順位を使う。
+ * 沿岸都市(隣接マスに水上マスがある)であれば、まだ沿岸都市数に見合った隻数
+ * (MAX_BATTLESHIPS_PER_COASTAL_CITY)の海軍ユニットを持っていない限り、交易所の直後
+ * (市場・オベリスク・訓練場・陸軍ユニットより前)に海軍ユニット(造船術を取得済みなら
+ * 巡洋艦を優先、無ければ軍艦)を割り込ませる。末尾に追加すると常に他の生産に押し出されて
+ * 事実上作られなくなるため、あえて中盤の優先度にしてある(内陸都市では海軍ユニットは
+ * 配置できず生産が無駄になるため、沿岸都市でのみ選択肢に加える)。
+ * 戦争中は、都市1つにつき1基までの対空砲(antiAir。ミサイル迎撃、§17参照)を、穀物庫の直後
+ * (交易所・市場・オベリスク・陸軍ユニットより前)に割り込ませる。既に保有済みの都市は
+ * canStartProduction側(uniquePerCity)が自動的に除外するため、ここでは戦争中かどうかしか
+ * 見ていない(平時は無駄になりうる出費を避けて経済を優先する)。経済・海軍・対空砲の
+ * いずれも生産すべきものが無く、かつ戦争中で備蓄が上限未満なら、都市を一撃で破壊できる
+ * ミサイルを最後の選択肢として生産する。
+ * @param {{ cityCount: number, coastalCityCount: number, meleeCount: number, rangedCount: number,
+ *   battleshipCount: number, missileStock: number, atWar: boolean }} unitCounts
  */
 function pickProductionChoice(city, tile, botIdentity, threatened, unitCounts, tx, tz, tiles) {
     const wantMilitary = threatened
-        && unitCounts.warriorCount + unitCounts.archerCount < unitCounts.cityCount * MAX_COMBAT_UNITS_PER_CITY;
+        && unitCounts.meleeCount + unitCounts.rangedCount < unitCounts.cityCount * MAX_COMBAT_UNITS_PER_CITY;
     if (wantMilitary) {
-        const preferredOrder = unitCounts.archerCount <= unitCounts.warriorCount ? ["archer", "warrior"] : ["warrior", "archer"];
+        const preferredOrder = unitCounts.rangedCount <= unitCounts.meleeCount
+            ? [...RANGED_UNIT_PRIORITY, ...MELEE_UNIT_PRIORITY]
+            : [...MELEE_UNIT_PRIORITY, ...RANGED_UNIT_PRIORITY];
         for (const id of preferredOrder) {
             if (canStartProduction(city, id, tile, botIdentity).ok) return id;
         }
     }
 
     const basePriority = getWorkerCount(city) < WORKER_COUNT_THRESHOLD ? PRODUCTION_PRIORITY_SAFE_EARLY : PRODUCTION_PRIORITY_SAFE_LATE;
-    const canWantBattleship = unitCounts.battleshipCount < unitCounts.cityCount && isCoastalCity(tx, tz, tiles);
-    const priority = canWantBattleship ? [...basePriority, "battleship"] : basePriority;
+    const canWantBattleship = unitCounts.battleshipCount < unitCounts.coastalCityCount * MAX_BATTLESHIPS_PER_COASTAL_CITY
+        && isCoastalCity(tx, tz, tiles);
+    // 💡 先に"battleship"を、その後に同じ位置へ"cruiser"を割り込ませることで、最終的な並びは
+    //    [tradingPost, cruiser, battleship, ...] になる(=造船術が未取得ならcruiser側の
+    //    canStartProductionが失敗して自動的にbattleshipへフォールバックする)。
+    let priority = basePriority;
+    if (canWantBattleship) {
+        priority = insertAfter(priority, "tradingPost", "battleship");
+        priority = insertAfter(priority, "tradingPost", "cruiser");
+    }
+    if (unitCounts.atWar) priority = insertAfter(priority, "granary", "antiAir");
     for (const id of priority) {
         if (canStartProduction(city, id, tile, botIdentity).ok) return id;
     }
@@ -317,6 +547,21 @@ function pickDistrictBuildingChoice(tile, city, civId) {
     return null;
 }
 
+/**
+ * (tx, tz)へ adjacencyBonuses(隣接ボーナスのルール一覧、施設/区域の定義が持つ)を適用した場合に
+ * 得られる、周囲8マス分のボーナスの合計値(食料・生産力など複数種類あるものは単純合計して
+ * 1つの比較用スコアにする)。施設・区域の「設置するマス」を、条件を満たす最初のマスではなく
+ * 最もボーナスが大きいマスから優先させるために使う(pickFacilityPlacement/
+ * pickDistrictPlacement)。
+ */
+function scoreAdjacencyPlacement(tx, tz, tiles, adjacencyBonuses) {
+    if (!adjacencyBonuses) return 0;
+    const bonus = getAdjacencyBonus(tx, tz, tiles, adjacencyBonuses);
+    let total = 0;
+    for (const key in bonus) total += bonus[key];
+    return total;
+}
+
 /** 指定した国家の国力の目安を算出する(都市数×10+全戦闘ユニットの戦闘力合計)。 */
 function computeCivPower(civId, tiles) {
     let power = 0;
@@ -330,6 +575,29 @@ function computeCivPower(civId, tiles) {
 }
 
 /**
+ * civId と targetId の領有マスの中に、互いに radius マス以内まで近づいているペアが
+ * 1つでも存在するかどうかを判定する(宣戦布告の「国境を接しているか」の簡易判定)。
+ * 最初に条件を満たすペアが見つかった時点で打ち切る。
+ */
+function hasNearbyTerritory(civId, targetId, tiles, radius) {
+    const mine = [];
+    const theirs = [];
+    for (const key in tiles) {
+        const t = tiles[key];
+        if (t.ownerId === civId) mine.push(key);
+        else if (t.ownerId === targetId) theirs.push(key);
+    }
+    for (const mKey of mine) {
+        const [mx, mz] = mKey.split(",").map(Number);
+        for (const tKey of theirs) {
+            const [ttx, ttz] = tKey.split(",").map(Number);
+            if (Math.max(Math.abs(mx - ttx), Math.abs(mz - ttz)) <= radius) return true;
+        }
+    }
+    return false;
+}
+
+/**
  * 届いている外交提案を全て承認する(自国にとって関係樹立はリスクが無いため無条件で受け入れる)。
  * その後、他の全国家それぞれについて次の判断を行う(宣戦布告は社会制度・試合設定を問わず
  * 常に行える。不可侵条約・同盟の提案には civic 条件と試合の設定を要求する):
@@ -337,8 +605,13 @@ function computeCivPower(civId, tiles) {
  * - 既に戦争状態の相手は、試合の設定で講和(peaceEnabled)が有効、かつその相手の国力が
  *   自国のPEACE_SUE_POWER_RATIO倍を超えていれば(=圧倒的に負けている)、自分から講和して
  *   撤退する。戦闘そのもの(占領・攻撃・移動)は runBotCombat が別途担当する。
- * - 自国より明確に弱い(国力が自国のAGGRESSION_POWER_RATIO分の1以下)「関係なし」の相手には
- *   自分から宣戦布告して征服を狙う。
+ * - 自国より明確に弱い(国力が自国のAGGRESSION_POWER_RATIO分の1以下)「関係なし」の相手には、
+ *   **既に他の誰とも戦争中でなく、ゲーム開始からAGGRESSION_MIN_TURNターン以上経過しており、
+ *   かつ相手の領土が自国からAGGRESSION_BORDER_RADIUS以内に隣接している**場合に限り、
+ *   自分から宣戦布告して征服を狙う(二正面作戦の回避、序盤の未成熟な国力差での即開戦の回避、
+ *   地理的に接点の無い遠方の国家への無意味な宣戦布告の回避、の3つの安全弁)。
+ *   1ターン中に複数の弱小国へ次々宣戦布告して同時に何ヶ国とも戦争になる事故も防ぐため、
+ *   このターン中に(ループの途中で)新たに宣戦布告した時点でも以降の対象には適用する。
  * - 自国より明確に強い(国力が自国のDIPLOMATIC_THREAT_POWER_RATIO倍以上)相手にのみ、
  *   社会制度の条件を満たしていれば不可侵条約→同盟の順で関係を提案する(段階を踏む)。
  * - どちらでもない(強すぎず弱すぎない)相手には何もしない。
@@ -356,6 +629,8 @@ function runBotDiplomacy(civId, botIdentity, tiles) {
 
     const myPower = computeCivPower(civId, tiles);
     const turn = getTurnState();
+    // 💡 二正面作戦の回避: 既に誰かと戦争中なら、新たな相手へは宣戦布告しない。
+    let atWarWithAnyone = (turn.playerOrder ?? []).some((id) => id !== civId && isAtWar(civId, id));
     for (const targetId of turn.playerOrder ?? []) {
         if (targetId === civId) continue;
         const targetHandle = getCivStorageHandle(targetId);
@@ -375,9 +650,13 @@ function runBotDiplomacy(civId, botIdentity, tiles) {
             continue;
         }
 
-        // 💡 宣戦布告はcivic/試合設定を問わず常に行える。
-        if (rel === "none" && myPower > targetPower * AGGRESSION_POWER_RATIO) {
+        // 💡 宣戦布告はcivic/試合設定を問わず常に行えるが、二正面作戦・序盤の即開戦・
+        //    遠方国家への無意味な宣戦布告を避けるため、3つの条件をすべて満たす場合のみ行う。
+        if (rel === "none" && !atWarWithAnyone && turn.turnNumber >= AGGRESSION_MIN_TURN
+            && myPower > targetPower * AGGRESSION_POWER_RATIO
+            && hasNearbyTerritory(civId, targetId, tiles, AGGRESSION_BORDER_RADIUS)) {
             declareWar(botIdentity, targetHandle);
+            atWarWithAnyone = true;
             continue;
         }
         if (!canPact && !canAlliance) continue;
@@ -391,31 +670,82 @@ function runBotDiplomacy(civId, botIdentity, tiles) {
     }
 }
 
-/** 指定した方向へ、今の移動力の範囲でこのユニットが進入できる最も遠いマスを探す。 */
+/**
+ * 指定した方向へ、今の移動力の範囲でこのユニットが進入できる最も遠いマスを探す。
+ * 経路上の全マス(distance=1から順に辿る途中のマスも含む)が地形・外交関係・占有の
+ * 観点で進入可能である必要があり、途中に障害物(海軍ユニットにとっての陸地、他国の
+ * 「関係なし」領土、他ユニットなど)があればそこで探索を打ち切る。移動力が2以上の
+ * ユニット(軍艦など)が、間に挟まる陸地を飛び越えて別の水域へ「ワープ」してしまう
+ * (=最終着地マスだけを見て、経路上のマスを検証していなかった)不具合の修正。
+ */
 function findValidMoveTarget(unit, tx, tz, dirX, dirZ, maxDist, tiles, config) {
-    for (let dist = maxDist; dist >= 1; dist--) {
+    let farthest = null;
+    for (let dist = 1; dist <= maxDist; dist++) {
         const ntx = tx + dirX * dist;
         const ntz = tz + dirZ * dist;
-        if (ntx < 0 || ntz < 0 || ntx >= config.width || ntz >= config.height) continue;
+        if (ntx < 0 || ntz < 0 || ntx >= config.width || ntz >= config.height) break;
         const t = tiles[`${ntx},${ntz}`];
-        if (!t || t.combatUnit || !canUnitEnterTile(unit, t)) continue;
-        return { tx: ntx, tz: ntz };
+        if (!t || t.combatUnit || !canUnitEnterTile(unit, t)) break;
+        farthest = { tx: ntx, tz: ntz };
     }
-    return null;
+    return farthest;
 }
+
+// 💡 pickMoveDestinationが試す8方向(斜め4 + 直交4)。目標方向への直進(斜め含む)だけでなく
+//    全方向を候補にすることで、直進ルートが地形・他国領土・占有マスで塞がっていても、
+//    迂回できる別ルートがあれば見つけられるようにする(完全なパス探索ではなく、
+//    あくまで「今この一手で目標に一番近づけるマス」を選ぶ貪欲法)。
+const MOVE_DIRECTIONS = [
+    [1, 0], [-1, 0], [0, 1], [0, -1],
+    [1, 1], [1, -1], [-1, 1], [-1, -1],
+];
 
 /**
  * 目標地点へ向かって、今の移動力で進める最善のマスを選ぶ。
- * 目標方向への直進(斜め移動含む)が地形/占有マスで塞がっている場合は、
- * 縦方向・横方向の単軸移動を代わりに試す(簡易な経路探索の代替。障害物の迂回はしない)。
+ * 8方向それぞれについて、その方向へ今の移動力の範囲で進入できる最も遠いマスを求め、
+ * その中から目標地点までの距離が最も縮むマスを選ぶ(簡易な経路探索。深さ1手ぶんの
+ * 貪欲法であり、行き止まりを事前に見抜いて迂回するような先読みはしない)。
+ * どの方向へ動いても目標に近づけない(=完全に行き止まり)場合は null を返し、その場に留まる。
+ * @param {boolean} [allowSidestep=false] true の場合、目標に近づく移動先が無くても、
+ *   進入できる8方向のうち目標に最も近いマス(距離が縮まなくても、横移動・後退でもよい)を
+ *   代わりに返す。数ターン同じ場所で行き詰まっているユニットに、迂回のきっかけを
+ *   与えるための脱出モード(attemptMoveがunit.stuckTurnsを見て有効化する)。
  */
-function pickMoveDestination(unit, tx, tz, target, remaining, tiles, config) {
-    const dirX = Math.sign(target.tx - tx);
-    const dirZ = Math.sign(target.tz - tz);
-    if (dirX === 0 && dirZ === 0) return null;
-    return findValidMoveTarget(unit, tx, tz, dirX, dirZ, remaining, tiles, config)
-        ?? (dirX !== 0 ? findValidMoveTarget(unit, tx, tz, dirX, 0, remaining, tiles, config) : null)
-        ?? (dirZ !== 0 ? findValidMoveTarget(unit, tx, tz, 0, dirZ, remaining, tiles, config) : null);
+function pickMoveDestination(unit, tx, tz, target, remaining, tiles, config, allowSidestep = false) {
+    const currentDist = tileDistance(tx, tz, target.tx, target.tz);
+    let best = null;
+    let bestDist = allowSidestep ? Infinity : currentDist;
+    for (const [dirX, dirZ] of MOVE_DIRECTIONS) {
+        const dest = findValidMoveTarget(unit, tx, tz, dirX, dirZ, remaining, tiles, config);
+        if (!dest) continue;
+        const dist = tileDistance(dest.tx, dest.tz, target.tx, target.tz);
+        if (dist < bestDist) { bestDist = dist; best = dest; }
+    }
+    return best;
+}
+
+/**
+ * pickMoveDestination() を呼びつつ、ユニットの「膠着カウンタ」(unit.stuckTurns)を管理する。
+ * 目標に近づく移動先が見つかった場合はカウンタを0に戻す。見つからなかった場合は+1し、
+ * その結果 STUCK_TURNS_FOR_SIDESTEP に達していれば、目標に近づかない移動(横移動・後退)も
+ * 許可して再挑戦する(=迂回のための「別のアプローチ」)。それでも見つからなければ、
+ * 本当に手詰まり(周囲8マス全てが進入不可)なので、その場に留まる。
+ * 💡 移動に成功した場合はcmdMoveCombatUnitがタイルを保存するため、ここでの永続化は不要。
+ *    移動できなかった場合はどのcmd*関数も呼ばれないため、カウンタの変化をここで明示的に
+ *    保存する(保存しないと、次に誰かがこの行にsetTileするまでメモリ上にしか残らない)。
+ */
+function attemptMove(tx, tz, unit, target, remaining, tiles, config) {
+    const stuck = (unit.stuckTurns ?? 0) >= STUCK_TURNS_FOR_SIDESTEP;
+    const dest = pickMoveDestination(unit, tx, tz, target, remaining, tiles, config, stuck);
+    const nextStuckTurns = dest ? 0 : (unit.stuckTurns ?? 0) + 1;
+    if (unit.stuckTurns !== nextStuckTurns) {
+        unit.stuckTurns = nextStuckTurns;
+        if (!dest) {
+            const tile = tiles[`${tx},${tz}`];
+            if (tile) setTile(tx, tz, tile);
+        }
+    }
+    return dest;
 }
 
 /**
@@ -476,40 +806,48 @@ function findNearestWoundedAlly(tiles, civId, fromTx, fromTz) {
 
 /**
  * 戦争状態にある相手が所有する都市の中から、ミサイルの標的を1つ選ぶ(無ければnull)。
- * 相手の首都を最優先し、無ければ最初に見つかった敵都市を選ぶ(戦争を終わらせる効果が
- * 大きい首都を優先的に狙う)。
+ * 対空砲(antiAir)が無く迎撃されない都市を最優先し、その中でも首都を優先する
+ * (対空砲のある都市を狙うと迎撃されて無駄撃ちになりやすいため。都市を一撃で消滅させる
+ * 切り札のミサイルを無駄にしないよう、確実に着弾する相手を優先する)。
+ * スコア: 対空砲が無い(+2) + 首都である(+1)。最高スコアの都市を選ぶ
+ * (対空砲の無い首都(3) > 対空砲の無い一般都市(2) > 対空砲のある首都(1) > 対空砲のある一般都市(0))。
  */
 function pickMissileTarget(tiles, civId) {
-    let fallback = null;
+    let best = null;
+    let bestScore = -1;
     for (const key in tiles) {
         const t = tiles[key];
         if (!t.city || !t.ownerId || t.ownerId === civId) continue;
         if (!isAtWar(civId, t.ownerId)) continue;
         const [tx, tz] = key.split(",").map(Number);
-        if (t.city.isCapital) return { tx, tz };
-        if (!fallback) fallback = { tx, tz };
+        const score = (t.city.antiAir ? 0 : 2) + (t.city.isCapital ? 1 : 0);
+        if (score > bestScore) { bestScore = score; best = { tx, tz }; }
     }
-    return fallback;
+    return best;
 }
 
 /**
- * 攻撃可能な相手の中から、包囲ボーナス(その相手に既に隣接している味方ユニットの数、
- * combat.js の countFlankingAllies)が最大の相手を優先し、同数ならHPが最も低い
- * (=今ターンで倒せる可能性が最も高い)相手を選ぶ。既に囲んでいる相手を優先することで、
- * 包囲ボーナスを活かして確実に仕留めることを狙う。
+ * 攻撃可能な相手の中から1つ選ぶ。最優先は「今の攻撃力(包囲ボーナス込み)で、最低ダメージ
+ * ロールでも確実に撃破できる相手」(combat.js の canGuaranteeKill)。中途半端に複数体へ
+ * ダメージを分散させるより、確実に1体ずつ数を減らす方が有利なため。確実に倒せる相手が
+ * 複数/皆無の場合はそれぞれの中で、包囲ボーナス(その相手に既に隣接している味方ユニットの数、
+ * combat.js の countFlankingAllies)が最大の相手を優先し、同数ならHPが最も低い相手を選ぶ
+ * (確実に倒せる相手が無い場合も、包囲を活かして次善の一撃を狙う)。
  */
-function pickBestAttackTarget(targets, civId, fromTx, fromTz, tiles) {
+function pickBestAttackTarget(unit, targets, civId, fromTx, fromTz, tiles) {
     let best = null;
+    let bestLethal = false;
     let bestScore = -1;
     let bestHp = Infinity;
     for (const t of targets) {
         const score = countFlankingAllies(t.tx, t.tz, civId, fromTx, fromTz, tiles);
+        const lethal = canGuaranteeKill(unit, t.unit, getFlankingBonus(score));
         const hp = t.unit?.hp ?? t.unit?.maxHp ?? 0;
-        if (!best || score > bestScore || (score === bestScore && hp < bestHp)) {
-            best = t;
-            bestScore = score;
-            bestHp = hp;
-        }
+        const better = !best
+            || (lethal && !bestLethal)
+            || (lethal === bestLethal && score > bestScore)
+            || (lethal === bestLethal && score === bestScore && hp < bestHp);
+        if (better) { best = t; bestLethal = lethal; bestScore = score; bestHp = hp; }
     }
     return best;
 }
@@ -540,8 +878,9 @@ function meleeEscortIsForward(civId, tx, tz, target, tiles) {
 }
 
 /**
- * 自国の都市からTHREAT_RADIUS以内に、外交協定の無い敵ユニットが1体でもいるかどうか。
- * 生産・拡張・研究の優先順位を防衛寄りに切り替えるかどうかの判定に使う。
+ * 自国の都市からTHREAT_RADIUS以内にいる、外交協定の無い敵ユニットの戦闘力の合計が
+ * THREAT_POWER_THRESHOLDを超えるかどうかを判定する。生産・拡張・研究の優先順位を
+ * 防衛寄りに切り替えるかどうかの判定に使う。
  */
 function computeThreatLevel(civId, tiles) {
     const cityPositions = [];
@@ -554,6 +893,7 @@ function computeThreatLevel(civId, tiles) {
     }
     if (cityPositions.length === 0) return false;
 
+    let enemyPower = 0;
     for (const key in tiles) {
         const t = tiles[key];
         const enemyUnit = t.combatUnit;
@@ -561,22 +901,202 @@ function computeThreatLevel(civId, tiles) {
         if (hasDiplomaticAgreement(civId, enemyUnit.ownerId)) continue;
         const radius = isAtWar(civId, enemyUnit.ownerId) ? THREAT_RADIUS_WAR : THREAT_RADIUS_NONE;
         const [tx, tz] = key.split(",").map(Number);
-        if (cityPositions.some((c) => tileDistance(c.tx, c.tz, tx, tz) <= radius)) return true;
+        if (!cityPositions.some((c) => tileDistance(c.tx, c.tz, tx, tz) <= radius)) continue;
+        enemyPower += enemyUnit.combatStrength ?? enemyUnit.rangedCombatStrength ?? 0;
+        if (enemyPower > THREAT_POWER_THRESHOLD) return true;
     }
     return false;
 }
 
 /**
+ * この都市で今から購入できる、定義順で最初の宗教ユニットIDを選ぶ(無ければnull)。
+ * cmdBuyReligiousUnit自体が同じ条件を再検証するため、ここでの判定は「候補があるかどうか」の
+ * 事前確認に過ぎない(必要建造物・審問開始状況の有無、実際の購入コスト(購入回数に応じて
+ * 上昇する。getReligiousUnitCost参照)に対する信仰力の充足を見る)。
+ */
+function pickReligiousUnitChoice(tile, botIdentity) {
+    for (const id of getReligiousUnitIds()) {
+        const def = getReligiousUnitDef(id);
+        if (!def) continue;
+        if (def.requiresBuilding && !tile.city[def.requiresBuilding]) continue;
+        if (def.requiresInquisitionStarted && !hasStartedInquisition(botIdentity)) continue;
+        if ((tile.city.faithStorage ?? 0) < getReligiousUnitCost(botIdentity, def)) continue;
+        return id;
+    }
+    return null;
+}
+
+/**
+ * 布教の目標として最も価値のある都市(自国・他国問わず全ての都市が対象)を1つ選ぶ。
+ * 宗教勝利は「生存する全ての国家の主流宗教が自国の宗教になる」ことが条件(religion.js参照)
+ * なので、既に自国の宗教が主流になっている都市より、まだそうなっていない都市を優先し、
+ * 同条件なら単純に近い都市を選ぶ(伝道者の限られた移動力・布教力を無駄にしないため)。
+ */
+function findBestMissionaryTarget(civId, tiles, fromTx, fromTz) {
+    let best = null;
+    let bestNeedsConversion = false;
+    let bestDist = Infinity;
+    for (const key in tiles) {
+        const t = tiles[key];
+        if (!t.city) continue;
+        const [tx, tz] = key.split(",").map(Number);
+        const needsConversion = getCityDominantReligion(t.city) !== civId;
+        const dist = tileDistance(fromTx, fromTz, tx, tz);
+        if (!best || (needsConversion && !bestNeedsConversion) || (needsConversion === bestNeedsConversion && dist < bestDist)) {
+            best = { tx, tz };
+            bestNeedsConversion = needsConversion;
+            bestDist = dist;
+        }
+    }
+    return best;
+}
+
+/**
+ * 宗教ユニットの移動先を選ぶ。cmdMoveReligiousUnitには地形・所有者・経路上の障害物といった
+ * 制約が一切無く(戦闘ユニットと違い、布教という性質上どの国の領土・地形へも移動できる設計。
+ * combat.js参照)、移動力の範囲内(マス距離、8方向の直進である必要も無い)で移動先に他の
+ * 宗教ユニットさえいなければどこへでも移動できるため、戦闘ユニットのpickMoveDestinationのような
+ * 方向別の経路探索は不要で、単純に「移動力の範囲内で目標に最も近いマス」を総当たりで選べばよい。
+ */
+function pickReligiousMoveDestination(tx, tz, target, remaining, tiles, config) {
+    let best = null;
+    let bestDist = tileDistance(tx, tz, target.tx, target.tz);
+    for (let dz = -remaining; dz <= remaining; dz++) {
+        for (let dx = -remaining; dx <= remaining; dx++) {
+            if (dx === 0 && dz === 0) continue;
+            if (Math.max(Math.abs(dx), Math.abs(dz)) > remaining) continue;
+            const ntx = tx + dx;
+            const ntz = tz + dz;
+            if (ntx < 0 || ntz < 0 || ntx >= config.width || ntz >= config.height) continue;
+            const t = tiles[`${ntx},${ntz}`];
+            if (!t || t.religiousUnit) continue;
+            const dist = tileDistance(ntx, ntz, target.tx, target.tz);
+            if (dist < bestDist) { bestDist = dist; best = { tx: ntx, tz: ntz }; }
+        }
+    }
+    return best;
+}
+
+/** 隣接する(距離1の)敵(同盟関係の無い)宗教ユニットの座標を1つ返す(無ければnull)。 */
+function findAdjacentEnemyReligiousUnit(civId, tx, tz, tiles) {
+    for (const { tx: ntx, tz: ntz, tile } of getAdjacentTileEntries(tx, tz, tiles)) {
+        const enemy = tile.religiousUnit;
+        if (enemy && enemy.ownerId !== civId && !hasDiplomaticAgreement(civId, enemy.ownerId)) {
+            return { tx: ntx, tz: ntz };
+        }
+    }
+    return null;
+}
+
+/**
+ * 1体の宗教ユニット(伝道者/使徒/審問官)の行動を決定・実行する。
+ * (a) 攻撃可能(使徒・審問官)なユニットは、隣接する敵(同盟関係の無い)宗教ユニットがいて
+ *     今ターンまだ攻撃していなければ、最優先で攻撃する(反撃なし。布教/弾圧とは独立した
+ *     行動のため、この後の(c)(d)を妨げない)。
+ * (b) 使徒は、審問が未開始かつ布教力が満タン(=一度も布教していない)なら、審問を開始する
+ *     (一度きりの特殊能力)。国家全体が以後審問済み扱いになり審問官を購入できるようになる、
+ *     長期的な価値の高い投資と判断し、機会があれば即座に行う。この使徒自身は消滅するため、
+ *     残りの行動より先に判定して以降の処理を打ち切る。
+ * (c) 布教可能(伝道者・使徒)なユニットは、隣接する都市があり今ターンまだ未布教で布教力が
+ *     残っていれば布教する(複数隣接していれば自国の宗教がまだ主流でない都市を優先)。
+ * (d) 弾圧可能(審問官)なユニットは、今立っているマスが何らかの都市の領地(所有者問わず)に
+ *     属していれば、布教力を1消費してその都市を弾圧する(自国以外の宗教の圧力を80%削減)。
+ * (e) それ以外は、findBestMissionaryTargetが選んだ都市(自国の宗教がまだ主流でない都市を
+ *     優先)へ向けて移動する(伝道者/使徒は布教のための隣接を、審問官はその都市の領地への
+ *     進入を目指す形になる)。
+ */
+function runBotReligiousUnit(civId, tx, tz, unit, tiles, config, botIdentity) {
+    const def = getReligiousUnitDef(unit.id);
+
+    if (def?.canAttack && !unit.hasAttackedThisTurn) {
+        const attackTarget = findAdjacentEnemyReligiousUnit(civId, tx, tz, tiles);
+        if (attackTarget) cmdAttackReligiousUnit(botIdentity, tx, tz, attackTarget.tx, attackTarget.tz);
+    }
+
+    if (def?.canStartInquisition && !hasStartedInquisition(botIdentity)
+        && (unit.evangelismPower ?? 0) >= (def.evangelismPower ?? 0)) {
+        cmdStartInquisition(botIdentity, tx, tz);
+        return;
+    }
+
+    const canProselytize = def?.canProselytize !== false;
+    if (canProselytize && !unit.hasProselytizedThisTurn && (unit.evangelismPower ?? 0) > 0) {
+        const adjacentCities = getAdjacentTileEntries(tx, tz, tiles).filter((e) => e.tile.city);
+        if (adjacentCities.length > 0) {
+            const cityTarget = adjacentCities.find((e) => getCityDominantReligion(e.tile.city) !== civId) ?? adjacentCities[0];
+            cmdProselytize(botIdentity, tx, tz, cityTarget.tx, cityTarget.tz);
+            return;
+        }
+    }
+
+    if (def?.canSuppress && (unit.evangelismPower ?? 0) > 0) {
+        const currentTile = tiles[`${tx},${tz}`];
+        const cityKey = resolveOwningCityKey(tx, tz, currentTile, currentTile?.ownerId, tiles);
+        if (cityKey && tiles[cityKey]?.city) {
+            cmdInquisitorSuppress(botIdentity, tx, tz);
+            return;
+        }
+    }
+
+    const remaining = unit.movementRemaining ?? unit.movement ?? 0;
+    if (remaining <= 0) return;
+
+    const target = findBestMissionaryTarget(civId, tiles, tx, tz);
+    if (!target) return;
+
+    const dest = pickReligiousMoveDestination(tx, tz, target, remaining, tiles, config);
+    if (dest) cmdMoveReligiousUnit(botIdentity, tx, tz, dest.tx, dest.tz);
+}
+
+/**
+ * 自国の宗教関連の行動をまとめて実行する。
+ * 1. 宗教を未創始なら、条件(聖地・国家全体の信仰力)を満たしていれば創始する
+ *    (cmdFoundReligionが条件を再検証するため、満たしていなければ何も起きない)。
+ * 2. 創始済みなら、宗教ユニットが不在で購入条件を満たす都市があれば購入する。
+ * 3. 自国の宗教ユニット(伝道者)ごとに、布教または移動を行う(runBotReligiousUnit)。
+ */
+function runBotReligion(civId, botIdentity, tiles, config) {
+    if (!hasFoundedReligion(botIdentity)) {
+        cmdFoundReligion(botIdentity);
+    }
+
+    if (hasFoundedReligion(botIdentity)) {
+        tiles = getTiles();
+        for (const key in tiles) {
+            const t = tiles[key];
+            if (t.ownerId !== civId || !t.city || t.religiousUnit) continue;
+            const choice = pickReligiousUnitChoice(t, botIdentity);
+            if (!choice) continue;
+            const [tx, tz] = key.split(",").map(Number);
+            const bot = makeBotIdentity(civId, tx, tz, config);
+            if (bot) cmdBuyReligiousUnit(bot, choice);
+        }
+    }
+
+    tiles = getTiles();
+    for (const key in tiles) {
+        const unit = tiles[key].religiousUnit;
+        if (unit?.ownerId !== civId) continue;
+        const [tx, tz] = key.split(",").map(Number);
+        runBotReligiousUnit(civId, tx, tz, unit, tiles, config, botIdentity);
+    }
+}
+
+/**
  * 1体の戦闘ユニットの行動を決定・実行する。優先順位:
  * (a) 無防備な敵都市の上で今ターン未行動なら占領する。
- * (b) 攻撃範囲内に敵がいれば、その中から包囲ボーナス(既にその相手に隣接している味方の数)が
- *     最大の相手を優先し、同数ならHPが最も低い相手を攻撃する。
- * (c) HPが低ければ(RETREAT_HP_RATIO未満)、最寄りの自都市へ撤退する。
- * (d) 自都市を守っている最中で、近く(GARRISON_ALERT_RADIUS以内)に敵がいなければ、
+ * (b) 同じマスに敵(同盟関係の無い)の宗教ユニットがいて移動力が満タンなら、異教徒として
+ *     排除する(cmdPurgeHeretic。確実に成功する一方的な排除のため、成否がランダムな攻撃(c)
+ *     より先に判定する)。
+ * (c) 攻撃範囲内に敵がいれば、確実に撃破できる相手(canGuaranteeKill)を最優先し、
+ *     いなければその中から包囲ボーナス(既にその相手に隣接している味方の数)が最大の相手を
+ *     優先し、同数ならHPが最も低い相手を攻撃する。
+ * (d) HPが低ければ(RETREAT_HP_RATIO未満)、最寄りの自都市へ撤退する。
+ * (e) 自都市を守っている最中で、近く(GARRISON_ALERT_RADIUS以内)に敵がいなければ、
  *     HPが減っていれば休息して回復し(cmdHealCombatUnit)、満タンならそのまま持ち場を守る。
- * (e) 自分は健在で、近く(ESCORT_RADIUS以内)に撤退中の負傷した味方がいれば、敵を追うより
+ * (f) 自分は健在で、近く(ESCORT_RADIUS以内)に撤退中の負傷した味方がいれば、敵を追うより
  *     先にその護衛(合流)へ向かう(単独で撤退する負傷ユニットが各個撃破されるのを防ぐ)。
- * (f) それ以外は最も近い敵(ユニットまたは都市)へ向けて移動する。ただし遠距離ユニットが
+ * (g) それ以外は最も近い敵(ユニットまたは都市)へ向けて移動する。ただし遠距離ユニットが
  *     自軍の近接ユニットより前に出てしまう場合は、近接ユニットが追いつくまで待機する。
  */
 function runBotCombatUnit(civId, tx, tz, unit, tiles, config, botIdentity) {
@@ -591,11 +1111,20 @@ function runBotCombatUnit(civId, tx, tz, unit, tiles, config, botIdentity) {
         }
     }
 
+    const heretic = tile.religiousUnit;
+    if (heretic && heretic.ownerId !== civId && !hasDiplomaticAgreement(civId, heretic.ownerId)) {
+        const maxMovement = unit.movement ?? 0;
+        if ((unit.movementRemaining ?? maxMovement) >= maxMovement) {
+            cmdPurgeHeretic(botIdentity, tx, tz);
+            return;
+        }
+    }
+
     // 💡 攻撃できるのは宣戦布告済み(戦争状態)の相手のみ。hasAgreementFnは「除外する」述語なので、
     //    戦争状態でない相手を除外する形で渡す。
     const targets = getAttackableTargets(tx, tz, civId, unit, tiles, config, (a, b) => !isAtWar(a, b));
     if (targets.length > 0) {
-        const target = pickBestAttackTarget(targets, civId, tx, tz, tiles);
+        const target = pickBestAttackTarget(unit, targets, civId, tx, tz, tiles);
         cmdAttackCombatUnit(botIdentity, tx, tz, target.tx, target.tz);
         return;
     }
@@ -610,7 +1139,7 @@ function runBotCombatUnit(civId, tx, tz, unit, tiles, config, botIdentity) {
     if (hpRatio < RETREAT_HP_RATIO) {
         const home = findNearestOwnCity(tiles, civId, tx, tz);
         if (home && (home.tx !== tx || home.tz !== tz)) {
-            const dest = pickMoveDestination(unit, tx, tz, home, remaining, tiles, config);
+            const dest = attemptMove(tx, tz, unit, home, remaining, tiles, config);
             if (dest) cmdMoveCombatUnit(botIdentity, tx, tz, dest.tx, dest.tz);
             return;
         }
@@ -637,7 +1166,7 @@ function runBotCombatUnit(civId, tx, tz, unit, tiles, config, botIdentity) {
     const woundedAlly = findNearestWoundedAlly(tiles, civId, tx, tz);
     if (woundedAlly && woundedAlly.dist <= ESCORT_RADIUS
         && (!nearestEnemy || woundedAlly.dist <= tileDistance(tx, tz, nearestEnemy.tx, nearestEnemy.tz))) {
-        const dest = pickMoveDestination(unit, tx, tz, woundedAlly, remaining, tiles, config);
+        const dest = attemptMove(tx, tz, unit, woundedAlly, remaining, tiles, config);
         if (dest) cmdMoveCombatUnit(botIdentity, tx, tz, dest.tx, dest.tz);
         return;
     }
@@ -651,7 +1180,7 @@ function runBotCombatUnit(civId, tx, tz, unit, tiles, config, botIdentity) {
         return;
     }
 
-    const dest = pickMoveDestination(unit, tx, tz, nearestEnemy, remaining, tiles, config);
+    const dest = attemptMove(tx, tz, unit, nearestEnemy, remaining, tiles, config);
     if (dest) cmdMoveCombatUnit(botIdentity, tx, tz, dest.tx, dest.tz);
 }
 
@@ -767,18 +1296,31 @@ export function runBotTurn(civId) {
     //    どちらも「都市1つにつき同時に1つまで」の枠を共有するため、着工済みの都市を記録する。
     const startedDistrictCities = new Set();
 
+    // 💡 新規着工の候補マスを都市ごとにまとめ、隣接ボーナス(scoreAdjacencyPlacement)が
+    //    最も大きいマスから着工する(条件を満たす最初のマスに無条件で着工していた以前の実装だと、
+    //    たまたま先に見つかった質の低いマスに区域を建ててしまうことがあったための改善)。
     tiles = getTiles();
+    const districtCandidatesByCity = new Map();
     for (const key in tiles) {
         const t = tiles[key];
         if (t.ownerId !== civId || t.city || t.facility || t.district || t.underDistrictConstruction) continue;
         const [tx, tz] = key.split(",").map(Number);
         const cityKey = resolveOwningCityKey(tx, tz, t, civId, tiles);
         const cityTile = cityKey ? tiles[cityKey] : null;
-        if (!cityTile?.city || cityTile.city.districtConstruction || startedDistrictCities.has(cityKey)) continue;
+        if (!cityTile?.city || cityTile.city.districtConstruction) continue;
         const bot = makeBotIdentity(civId, tx, tz, config);
         if (!bot) continue;
         const choice = pickDistrictChoice(t, cityTile.city, bot, tiles, cityKey);
-        if (choice) { cmdStartDistrict(bot, choice); startedDistrictCities.add(cityKey); }
+        if (!choice) continue;
+        const score = scoreAdjacencyPlacement(tx, tz, tiles, getDistrictDef(choice)?.adjacencyBonuses);
+        const candidates = districtCandidatesByCity.get(cityKey) ?? [];
+        candidates.push({ bot, choice, score });
+        districtCandidatesByCity.set(cityKey, candidates);
+    }
+    for (const [cityKey, candidates] of districtCandidatesByCity) {
+        candidates.sort((a, b) => b.score - a.score);
+        cmdStartDistrict(candidates[0].bot, candidates[0].choice);
+        startedDistrictCities.add(cityKey);
     }
 
     tiles = getTiles();
@@ -796,7 +1338,11 @@ export function runBotTurn(civId) {
     }
 
     // 6. 施設: 空き領有マスがあれば、労働者の行動回数が続く限り設置する。
+    //    候補マスを隣接ボーナス(scoreAdjacencyPlacement)が大きい順に並べ替えてから設置する。
+    //    労働者の行動回数には限りがあるため、マスを見つけた順に無条件で設置していた以前の
+    //    実装だと、行動回数を使い切った時点で質の良いマスが手つかずのまま残ることがあった。
     tiles = getTiles();
+    const facilityCandidates = [];
     for (const key in tiles) {
         const t = tiles[key];
         if (t.ownerId !== civId || t.city || t.facility || t.district || t.underDistrictConstruction) continue;
@@ -804,24 +1350,35 @@ export function runBotTurn(civId) {
         const bot = makeBotIdentity(civId, tx, tz, config);
         if (!bot) continue;
         const choice = pickFacilityChoice(t, bot);
-        if (choice) cmdInstallFacility(bot, choice);
+        if (!choice) continue;
+        const score = scoreAdjacencyPlacement(tx, tz, tiles, getFacilityDef(choice)?.adjacencyBonuses);
+        facilityCandidates.push({ bot, choice, score });
     }
+    facilityCandidates.sort((a, b) => b.score - a.score);
+    // 💡 行動回数切れなどでcanInstallFacilityの条件を満たさなくなった候補はcmdInstallFacility
+    //    内部の再検証で安全に無視される(候補収集時と設置時の間で状態は変わらないが、念のため)。
+    for (const c of facilityCandidates) cmdInstallFacility(c.bot, c.choice);
 
     // 7. 生産中でない都市があれば、何か生産を開始する。
     tiles = getTiles();
-    // 💡 脅威時の防衛ユニット生産に上限・多様性を持たせるため、現在の都市数、戦士/弓兵/軍艦の
-    //    保有数、ミサイル備蓄、戦争中かどうかをあらかじめ集計しておく(pickProductionChoiceへ渡す)。
-    let unitCounts = { cityCount: 0, warriorCount: 0, archerCount: 0, battleshipCount: 0, missileStock: 0, atWar: false };
+    // 💡 脅威時の防衛ユニット生産に上限・多様性を持たせるため、現在の都市数(沿岸都市数も
+    //    別途)、近接/遠距離/海軍ユニットの保有数、ミサイル備蓄、戦争中かどうかをあらかじめ
+    //    集計しておく(pickProductionChoiceへ渡す)。battleshipCountは軍艦・巡洋艦を
+    //    まとめて数える(どちらも同じ「沿岸都市1つにつきN隻まで」の上限を共有するため)。
+    let unitCounts = { cityCount: 0, coastalCityCount: 0, meleeCount: 0, rangedCount: 0, battleshipCount: 0, missileStock: 0, atWar: false };
     for (const key in tiles) {
         const t = tiles[key];
         if (t.ownerId === civId && t.city) {
             unitCounts.cityCount++;
             unitCounts.missileStock += t.city.missiles ?? 0;
+            const [ctx, ctz] = key.split(",").map(Number);
+            if (isCoastalCity(ctx, ctz, tiles)) unitCounts.coastalCityCount++;
         }
         if (t.combatUnit?.ownerId === civId) {
-            if (t.combatUnit.id === "warrior") unitCounts.warriorCount++;
-            else if (t.combatUnit.id === "archer") unitCounts.archerCount++;
-            else if (t.combatUnit.id === "battleship") unitCounts.battleshipCount++;
+            const unitId = t.combatUnit.id;
+            if (MELEE_UNIT_IDS.includes(unitId)) unitCounts.meleeCount++;
+            else if (RANGED_UNIT_IDS.includes(unitId)) unitCounts.rangedCount++;
+            else if (unitId === "battleship" || unitId === "cruiser") unitCounts.battleshipCount++;
         }
     }
     unitCounts.atWar = (turn.playerOrder ?? []).some((id) => id !== civId && isAtWar(civId, id));
@@ -834,9 +1391,9 @@ export function runBotTurn(civId) {
         const choice = pickProductionChoice(t.city, t, bot, threatened, unitCounts, tx, tz, tiles);
         if (choice) {
             cmdStartProduction(bot, choice);
-            if (choice === "warrior") unitCounts.warriorCount++;
-            else if (choice === "archer") unitCounts.archerCount++;
-            else if (choice === "battleship") unitCounts.battleshipCount++;
+            if (MELEE_UNIT_IDS.includes(choice)) unitCounts.meleeCount++;
+            else if (RANGED_UNIT_IDS.includes(choice)) unitCounts.rangedCount++;
+            else if (choice === "battleship" || choice === "cruiser") unitCounts.battleshipCount++;
         }
     }
 
@@ -848,15 +1405,19 @@ export function runBotTurn(civId) {
         autoStartProgress(originBot, "civic", CIVIC_PRIORITY);
 
         // 9. 外交: 届いた提案を承認し、条件を満たしていれば国力の高い相手へ関係を提案する。
-        //    戦争中で圧倒的に劣勢なら自分から講和する。
+        //    戦争中で圧倒的に劣勢なら自分から講和する。既に誰かと戦争中なら新たな宣戦布告はしない
+        //    (二正面作戦の回避)。
         runBotDiplomacy(civId, originBot, tiles);
+
+        // 10. 宗教: 条件を満たせば創始し、伝道者を購入・移動・布教させる。
+        runBotReligion(civId, originBot, tiles, config);
     }
 
-    // 10. ミサイル: 戦争中で在庫があれば、敵都市(優先して相手の首都)へ1発発射する。
+    // 11. ミサイル: 戦争中で在庫があれば、敵都市(優先して相手の首都)へ1発発射する。
     tiles = getTiles();
     runBotMissile(civId, tiles, config);
 
-    // 11. 戦闘: 自国の戦闘ユニットで、占領・攻撃・移動を行う。
+    // 12. 戦闘: 自国の戦闘ユニットで、占領・攻撃・移動を行う。
     runBotCombat(civId, config);
 }
 
