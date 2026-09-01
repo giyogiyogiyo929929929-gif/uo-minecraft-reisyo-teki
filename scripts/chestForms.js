@@ -12,9 +12,13 @@
 // ChestFormData)を、本プロジェクトのメニュー用途に合わせて簡略化した独自の再実装
 // (FurnaceFormData・プレイヤーの実インベントリ表示機能は不要なため削除)。
 // 詳細は development_resource_packs/testapia_ui/CREDITS.md を参照。
+//
+// 実体の仕組み(マーカー仕込み・アイコン解決・スロット管理)は monitorForm.js の
+// MonitorFormData と共通のため、gridFormData.js の GridFormData に切り出してある。
+// このクラスはチェストUI向けのサイズ表・個数バッジ用プレフィックスだけを差し替える薄い
+// ラッパー。
 
-import { ActionFormData } from "@minecraft/server-ui";
-import { typeIdToID, typeIdToDataId } from "./typeIds.js";
+import { GridFormData } from "./gridFormData.js";
 
 // 💡 チェストの見た目(スロット数)。既定は「大チェスト」相当の54マス
 //    (development_resource_packs/testapia_ui/ui/_global_variables.json で有効化している
@@ -24,20 +28,15 @@ const CHEST_UI_SIZES = new Map([
     ["large", ["§c§h§e§s§t§5§4§r", 54]],
 ]);
 
-export class ChestFormData {
-    #titleText;
-    #buttonArray;
+// 💡 "stack#01dur#00§r" は、チェストUI側のリソースパックが個数バッジ・耐久度バーを
+//    描画するために読み取る固定長のプレフィックス。メニュー用途ではどちらも使わないため
+//    「個数1・ダメージ無し」を表す固定値にしている(表示上は見えない)。
+const CHEST_BADGE_PREFIX = "stack#01dur#00§r";
 
+export class ChestFormData extends GridFormData {
     constructor(size = "large") {
         const sizing = CHEST_UI_SIZES.get(size) ?? CHEST_UI_SIZES.get("large");
-        this.#titleText = { rawtext: [{ text: sizing[0] }] };
-        this.#buttonArray = Array(sizing[1]).fill(["", undefined]);
-        this.slotCount = sizing[1];
-    }
-
-    title(text) {
-        this.#titleText.rawtext.push({ text });
-        return this;
+        super(sizing[0], sizing[1], CHEST_BADGE_PREFIX);
     }
 
     /**
@@ -47,22 +46,6 @@ export class ChestFormData {
      * 3D描画やエンチャント光彩は付かない)。範囲外のslotは無視する。
      */
     button(slot, itemName, lore, texture) {
-        if (!Number.isInteger(slot) || slot < 0 || slot >= this.slotCount) return this;
-        const id = typeIdToDataId.get(texture) ?? typeIdToID.get(texture);
-        // 💡 "stack#01dur#00§r" は、チェストUI側のリソースパックが個数バッジ・耐久度バーを
-        //    描画するために読み取る固定長のプレフィックス。メニュー用途ではどちらも使わないため
-        //    「個数1・ダメージ無し」を表す固定値にしている(表示上は見えない)。
-        const buttonRawtext = { rawtext: [{ text: "stack#01dur#00§r" }, { text: itemName ?? "" }] };
-        if (Array.isArray(lore)) {
-            for (const line of lore) buttonRawtext.rawtext.push({ text: `\n${line}` });
-        }
-        this.#buttonArray[slot] = [buttonRawtext, id === undefined ? texture : id * 65536];
-        return this;
-    }
-
-    show(player) {
-        const form = new ActionFormData().title(this.#titleText);
-        for (const [text, icon] of this.#buttonArray) form.button(text, icon?.toString());
-        return form.show(player);
+        return this.setSlot(slot, itemName, lore, texture);
     }
 }

@@ -6,33 +6,47 @@ import { registerScriptCommands, registerCustomCommands } from "./commands.js";
 import { openMainMenu } from "./ui.js";
 import { getTurnState, getTiles, getMapConfig, getStateVersion, broadcast } from "./state.js";
 import { worldToTile, TERRAIN_TYPES, RESOURCE_TYPES } from "./mapGen.js";
-import { getCityCurrentYields } from "./turns.js";
+import { getCityCurrentYields, getCityGoldBreakdown, formatGoldBreakdownText } from "./turns.js";
 import { forceEndTurnAuto } from "./bots.js";
 import { PRODUCTION_DEFS, getWorkerCount } from "./production.js";
 import { getDistrictDef } from "./districts.js";
 import { getEffectiveCombatStrength, getEffectiveRangedStrength, isRangedUnit, getUnitClassLabel, CITY_MAX_HP, WALL_MAX_HP } from "./combat.js";
-import { getActingPlayer, getActiveCivId, resolveCivName } from "./civs.js";
+import { getActingPlayer, getActiveCivId, resolveCivName, getCivStorageHandle } from "./civs.js";
 import { hasDiplomaticAgreement } from "./diplomacy.js";
 import { syncUnitLabels } from "./unitLabels.js";
+import { syncUnitModels } from "./unitModels.js";
 
 const MENU_ITEM_ID = "minecraft:compass";
 
 // 都市産出量は0.5秒ごとに同じ計算を繰り返す必要がないため短時間キャッシュする。
 // stateVersion が変化した場合は即座に無効化し、マップ状態の変更を反映する。
 const cityYieldCache = new Map();
+// 💡 ゴールドの内訳(getCityGoldBreakdown)はcityYieldCacheと同じ寿命(version/tickの組)で
+//    有効なので、専用のキャッシュMapを別途持ち、同じ無効化タイミングで一緒に破棄する。
+const cityGoldBreakdownCache = new Map();
+// 💡 (バグ修正) HUDの保有ゴールド表示(civId単位、都市のマスとは無関係)は、以前はここの
+//    キャッシュを経由せずgetDynamicPropertyを毎回(0.5秒ごと×オンラインプレイヤー数)直接
+//    呼んでいた。cityYieldCache/cityGoldBreakdownCacheと同じ寿命で一緒にキャッシュ・破棄する。
+const civGoldCache = new Map();
 let cityYieldCacheVersion = -1;
 let cityYieldCacheTick = -1;
 const CITY_YIELD_CACHE_TICKS = 20; // 最大1秒。手動ブロック変更なども長時間古くならないようにする。
 
-function getCachedCityCurrentYields(cityKey, tiles) {
+function refreshCityYieldCacheGeneration() {
     const version = getStateVersion();
     const currentTick = system.currentTick;
 
     if (cityYieldCacheVersion !== version || currentTick - cityYieldCacheTick >= CITY_YIELD_CACHE_TICKS) {
         cityYieldCache.clear();
+        cityGoldBreakdownCache.clear();
+        civGoldCache.clear();
         cityYieldCacheVersion = version;
         cityYieldCacheTick = currentTick;
     }
+}
+
+function getCachedCityCurrentYields(cityKey, tiles) {
+    refreshCityYieldCacheGeneration();
 
     const cached = cityYieldCache.get(cityKey);
     if (cached) return cached;
@@ -42,9 +56,34 @@ function getCachedCityCurrentYields(cityKey, tiles) {
     return yields;
 }
 
+/** getCityGoldBreakdown()と同じ結果を、cityYieldCacheと共通の寿命でキャッシュして返す。 */
+function getCachedCityGoldBreakdown(cityKey, tiles) {
+    refreshCityYieldCacheGeneration();
+
+    const cached = cityGoldBreakdownCache.get(cityKey);
+    if (cached) return cached;
+
+    const breakdown = getCityGoldBreakdown(cityKey, tiles);
+    cityGoldBreakdownCache.set(cityKey, breakdown);
+    return breakdown;
+}
+
+/** viewerCivIdの保有ゴールドを、cityYieldCacheと共通の寿命でキャッシュして返す。 */
+function getCachedCivGold(viewerCivId, viewerHandle) {
+    refreshCityYieldCacheGeneration();
+
+    if (civGoldCache.has(viewerCivId)) return civGoldCache.get(viewerCivId);
+
+    const gold = viewerHandle?.getDynamicProperty("strategic_gold") ?? 0;
+    civGoldCache.set(viewerCivId, gold);
+    return gold;
+}
+
 /** キャッシュを明示的に破棄する。 */
 function clearCityYieldCache() {
     cityYieldCache.clear();
+    cityGoldBreakdownCache.clear();
+    civGoldCache.clear();
     cityYieldCacheVersion = -1;
     cityYieldCacheTick = -1;
 }
@@ -137,6 +176,9 @@ system.runInterval(() => {
     // 💡 マスにいる戦闘ユニット(陸軍/海軍)をワールド内ラベルとして同期表示する。
     //    内部で間引き実行されるため、ここで毎tick呼んでもコストは小さい。
     syncUnitLabels();
+    // 💡 見た目モデルが用意されているユニット(現状は戦車・戦闘機・戦士)を実際のエンティティとして
+    //    マスの上に配置・同期する(unitLabels.jsと同じ間引き設計、unitModels.js参照)。
+    syncUnitModels();
 
     for (const player of world.getAllPlayers()) {
         // ==========================================
@@ -176,6 +218,12 @@ system.runInterval(() => {
             const viewerCivId = getActiveCivId(player);
             const viewerIsParticipant = Array.isArray(turn.playerOrder) && turn.playerOrder.includes(viewerCivId);
             const isFriendlyOwner = (ownerId) => !viewerIsParticipant || !ownerId || ownerId === viewerCivId || hasDiplomaticAgreement(viewerCivId, ownerId);
+
+            // 💡 保有ゴールド(§23)。マスの所有者に関係なく、今操作している国家(ソロテストで
+            //    仮想国家を操作中ならそちら)の残高を常に表示する。
+            const viewerHandle = viewerCivId ? getCivStorageHandle(viewerCivId) : null;
+            const gold = viewerHandle ? getCachedCivGold(viewerCivId, viewerHandle) : 0;
+            const goldLine = viewerHandle ? `\n§6[Gold]x${gold}${gold < 0 ? " §c(破産中！)" : ""}` : "";
 
             // 地形ラベルの取得
             const terrainLabel = TERRAIN_TYPES[tile.type]?.label ?? "未知の地形";
@@ -229,7 +277,12 @@ system.runInterval(() => {
                     const oilText = yields.oil > 0 ? ` §7| §b[Oil]x${yields.oil}` : "";
                     const ironText = yields.iron > 0 ? ` §7| §7[Iron]x${yields.iron}` : "";
                     const faithText = (yields.faith ?? 0) > 0 ? ` §7| §d[Faith]x${yields.faith}` : "";
-                    currentYieldLine = `\n§f今の産出(都市全体): §a[Food]x${yields.food} §7| §6[Prod]x${yields.production}${oilText}${ironText}${faithText}`;
+                    // 💡 ゴールド産出の内訳(§23)。都心の基礎値だけの都市も多いため、内訳が
+                    //    1件だけ(都心のみ)でもそのまま表示する(何もない訳ではないため)。
+                    const goldText = (yields.gold ?? 0) > 0
+                        ? ` §7| §6[Gold]x${yields.gold} §7(${formatGoldBreakdownText(getCachedCityGoldBreakdown(cityKey, tiles))})`
+                        : "";
+                    currentYieldLine = `\n§f今の産出(都市全体): §a[Food]x${yields.food} §7| §6[Prod]x${yields.production}${oilText}${ironText}${faithText}${goldText}`;
 
                     // 💡 進行中の生産(ユニット/建造物)を汎用的に表示。新しい生産物が増えても自動で対応。
                     let productionText = "";
@@ -250,7 +303,11 @@ system.runInterval(() => {
                         const districtProgressText = Math.floor(c.districtConstruction.progress * 10) / 10;
                         districtProductionText = ` §7| §5${districtDef?.icon ?? "[Sacred]"}${districtDef?.label ?? c.districtConstruction.id}区域建設中(${districtProgressText}/${c.districtConstruction.cost})`;
                     }
-                    cityInfoLine = `\n§6【${c.isCapital ? "首都" : "都市"}: ${c.name}】§f 人口:§a${c.population}§f/§e${c.housing} §f| [Worker]${getWorkerCount(c)}人 §f| [Food]貯留${c.foodStorage ?? 0} §f| §c飢餓${c.starvationTurns ?? 0}/3${productionText}${tpText}${missileText}${faithStorageText}${districtProductionText}`;
+                    // 💡 電力(§24)。受電量が1以上か工場を持つ都市に限って表示する。
+                    const powerText = ((c.powerReceived ?? 0) > 0 || c.factory)
+                        ? ` §7| §b[Power]x${c.powerReceived ?? 0}`
+                        : "";
+                    cityInfoLine = `\n§6【${c.isCapital ? "首都" : "都市"}: ${c.name}】§f 人口:§a${c.population}§f/§e${c.housing} §f| [Worker]${getWorkerCount(c)}人 §f| [Food]貯留${c.foodStorage ?? 0} §f| §c飢餓${c.starvationTurns ?? 0}/3${productionText}${tpText}${missileText}${faithStorageText}${districtProductionText}${powerText}`;
                 } else {
                     // 💡 自国・同盟国以外の都市は、偵察による有利化を防ぐため詳細情報を表示しない
                     //    (存在・所有者・都市名までは領有表示で分かるが、それ以上は隠す)。
@@ -264,7 +321,8 @@ system.runInterval(() => {
                 `§f領有: ${ownerText}${cityText}${facilityText}${districtText}\n` +
                 `§fベース産出: ${yieldText}\n${combatUnitText}${religiousUnitText}` +
                 currentYieldLine +
-                cityInfoLine
+                cityInfoLine +
+                goldLine
             );
         } else {
             // 生成されたグリッドの範囲外にプレイヤーがいる場合

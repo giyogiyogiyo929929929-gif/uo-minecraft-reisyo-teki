@@ -52,7 +52,7 @@ function tileCenterLocation(config, tx, tz, dimension) {
 }
 
 function buildCombatUnitText(unit) {
-    const domainTag = unit.domain === "naval" ? "§b[Naval]" : "§a[Land]";
+    const domainTag = unit.domain === "naval" ? "§b[Naval]" : unit.domain === "air" ? "§f[Air]" : "§a[Land]";
     const hp = Math.max(0, Math.round(unit.hp ?? 0));
     const maxHp = unit.maxHp ?? 100;
     return `${domainTag} §f${unit.label ?? unit.id ?? "ユニット"} §7(${getUnitClassLabel(unit.unitClass)})\n§7${unit.ownerName ?? "不明"} §cHP:${hp}/${maxHp}`;

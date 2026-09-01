@@ -27,6 +27,7 @@
 import { hasCompletedProgress, getDefinition } from "./progression.js";
 import { matchesTerrainWeighted, matchesFacility, matchesDistrict, matchesAnyCity, sumAssignedTileYields, sumAssignedTileAdjacencyYields, getFlagFlatYields } from "./adjacency.js";
 import { isWaterTerrain } from "./mapGen.js";
+import { AIRBASE_SLOTS_AIRPORT } from "./airbase.js";
 
 /**
  * @typedef {Object} DistrictDef
@@ -63,8 +64,9 @@ export const DISTRICT_DEFS = {
         icon: "[Industrial]",
         cost: 60,
         requiresTechnology: "apprenticeship",
-        // 💡 工業地帯があるだけで、都市の生産力+3(隣接マスに関係なく毎ターン)。
-        flatYields: { production: 3 },
+        // 💡 工業地帯があるだけで、都市の生産力+4(隣接マスに関係なく毎ターン)。徒弟制度は
+        //    このツリーで最も高額な技術(300)の1つのため、投資に見合うよう+3から引き上げた。
+        flatYields: { production: 4 },
         adjacencyBonuses: [
             { id: "industrialQuarry", label: "採石場からの恩恵", match: matchesFacility("quarry"), yieldPerMatch: { production: 1 } },
             { id: "industrialMountain", label: "山・山脈からの恩恵", match: matchesTerrainWeighted({ mountain: 1, mountainRange: 2 }), yieldPerMatch: { production: 1 } },
@@ -179,6 +181,13 @@ export function startDistrictConstruction(city, tile, id, tileKey) {
  * @property {string} [requiresCivic] 建設に必要な社会制度ID(civic progression)
  * @property {Record<string, number>} [flatYields] この建造物があるだけで(隣接マスに関係なく)
  *   都市に毎ターン加算される産出量(例: { faith: 2 })
+ * @property {number} [goldUpkeep] この建造物1つあたりのゴールド維持費(§23)。省略時は
+ *   turns.js の BUILDING_GOLD_UPKEEP(既定1)が使われる(calculateGoldUpkeep参照)。
+ * @property {string} [exclusiveGroup] 同じ値を持つ他の建造物と排他(同時に1つのみ有効)。
+ *   後から別のグループメンバーを選んで建設完了すると、以前のメンバーは自動的に city[id]=false に
+ *   戻り、onReplacedが呼ばれる(§24。発電所3種が該当。tickDistrictConstruction参照)。
+ * @property {(city: any) => void} [onReplaced] exclusiveGroupの別メンバーに置き換えられた際、
+ *   古い方の建造物側で呼ばれる後始末フック(例: 原子炉の老朽化年数カウンタを消す)。
  * @property {(city: any, tile: any) => void} onComplete 完成時の効果を適用する関数
  * @property {(tx: number, tz: number) => string} [completeMessage] 完成時のメッセージ生成関数
  */
@@ -215,6 +224,116 @@ export const DISTRICT_BUILDING_DEFS = {
         flatYields: { faith: 4 },
         onComplete: (city) => { city.cathedral = true; },
         completeMessage: (tx, tz) => `§e[Complete] (${tx}, ${tz})の聖地に大聖堂が完成しました！ (信仰力の産出+4)`,
+    },
+    seminary: {
+        label: "神学校",
+        icon: "[Seminary]",
+        cost: 130,
+        forDistrict: "sacredSite",
+        requiresTechnology: "education", // 💡 図書館と同じ技術。信仰と科学を橋渡しする位置づけ
+        flatYields: { faith: 5 },
+        onComplete: (city) => { city.seminary = true; },
+        completeMessage: (tx, tz) => `§e[Complete] (${tx}, ${tz})の聖地に神学校が完成しました！ (信仰力の産出+5)`,
+    },
+    pilgrimageRoad: {
+        label: "巡礼路",
+        icon: "[Pilgrimage]",
+        cost: 110,
+        forDistrict: "sacredSite",
+        requiresTechnology: "sailing", // 💡 各地から巡礼者・交易者が訪れる交易路のイメージ
+        flatYields: { faith: 2, gold: 2 },
+        onComplete: (city) => { city.pilgrimageRoad = true; },
+        completeMessage: (tx, tz) => `§e[Complete] (${tx}, ${tz})の聖地に巡礼路が完成しました！ (信仰力の産出+2、ゴールドの産出+2)`,
+    },
+    workshop: {
+        label: "工房",
+        icon: "[Workshop]",
+        cost: 150,
+        forDistrict: "industrialZone",
+        requiresTechnology: "apprenticeship",
+        flatYields: { production: 4 },
+        onComplete: (city) => { city.workshop = true; },
+        completeMessage: (tx, tz) => `§e[Complete] (${tx}, ${tz})の工業地帯に工房が完成しました！ (生産力+4)`,
+    },
+    // 💡 航空基地の空き枠(§航空戦)は flatYields では表現できない特殊効果のため、
+    //    airbase.js の getAirbaseCapacity() が city.airport を直接見て処理する
+    //    (wall/antiAirと同じ考え方。都心は常に1枠、飛行場でさらに+AIRBASE_SLOTS_AIRPORT枠)。
+    airport: {
+        label: "飛行場",
+        icon: "[Airport]",
+        cost: 250,
+        forDistrict: "industrialZone",
+        requiresTechnology: "aviation",
+        goldUpkeep: 2,
+        onComplete: (city) => { city.airport = true; },
+        completeMessage: (tx, tz) => `§e[Complete] (${tx}, ${tz})の工業地帯に飛行場が完成しました！ (航空基地の空き枠+${AIRBASE_SLOTS_AIRPORT}、配置中の航空ユニットのターン終了時回復量が最大に)`,
+    },
+    // 💡 工場・発電所3種の効果(自国の隣接都市への生産力/科学力ボーナス、電力供給、燃料消費、
+    //    CO2蓄積)は flatYields では表現できない特殊効果のため、turns.js の
+    //    applyIndustrialInfrastructure() が fuelResource/powerOutput/co2PerTurn/ownCityBonus
+    //    を直接見て処理する(§24。wall/antiAirと同じ考え方)。
+    factory: {
+        label: "工場",
+        icon: "[Factory]",
+        cost: 300,
+        forDistrict: "industrialZone",
+        requiresTechnology: "machinery",
+        goldUpkeep: 2,
+        onComplete: (city) => { city.factory = true; },
+        completeMessage: (tx, tz) => `§e[Complete] (${tx}, ${tz})に工場が完成しました！ (自国の隣接都市の生産力+3、電力供給2ごとにさらに+3)`,
+    },
+    coalPowerPlant: {
+        label: "石炭火力発電所",
+        icon: "[CoalPlant]",
+        cost: 270,
+        forDistrict: "industrialZone",
+        requiresTechnology: "electricity",
+        exclusiveGroup: "powerPlant",
+        fuelResource: "strategic_coal",
+        fuelLabel: "石炭",
+        powerOutput: 4,
+        co2PerTurn: 6,
+        goldUpkeep: 3,
+        ownCityBonus: { production: 4 },
+        onComplete: (city) => { city.coalPowerPlant = true; },
+        onReplaced: (city) => { city.coalPowerPlant = false; },
+        completeMessage: (tx, tz) => `§e[Complete] (${tx}, ${tz})に石炭火力発電所が完成しました！ (自都市の生産力+4、自国の隣接都市に電力供給、毎ターン石炭1→電力4を発電、CO2大量排出)`,
+    },
+    oilPowerPlant: {
+        label: "石油火力発電所",
+        icon: "[OilPlant]",
+        cost: 300,
+        forDistrict: "industrialZone",
+        requiresTechnology: "electricity",
+        exclusiveGroup: "powerPlant",
+        fuelResource: "strategic_oil",
+        fuelLabel: "石油",
+        powerOutput: 4,
+        co2PerTurn: 3,
+        goldUpkeep: 3,
+        ownCityBonus: { production: 3 },
+        onComplete: (city) => { city.oilPowerPlant = true; },
+        onReplaced: (city) => { city.oilPowerPlant = false; },
+        completeMessage: (tx, tz) => `§e[Complete] (${tx}, ${tz})に石油火力発電所が完成しました！ (自都市の生産力+3、自国の隣接都市に電力供給、毎ターン石油1→電力4を発電、CO2中程度排出)`,
+    },
+    nuclearPowerPlant: {
+        label: "原子力発電所",
+        icon: "[NuclearPlant]",
+        cost: 450,
+        forDistrict: "industrialZone",
+        requiresTechnology: "electricity",
+        exclusiveGroup: "powerPlant",
+        fuelResource: "strategic_uranium",
+        fuelLabel: "ウラン",
+        powerOutput: 16,
+        co2PerTurn: 1,
+        goldUpkeep: 3,
+        ownCityBonus: { production: 5, science: 4 },
+        // 💡 老朽化年数(nuclearPowerPlantAge)は毎ターンturns.js側で+1され、事故の発生率(表示のみ、
+        //    §24)の算出に使われる。プロジェクト「原子炉の再稼働」(production.js)で0にリセットできる。
+        onComplete: (city) => { city.nuclearPowerPlant = true; city.nuclearPowerPlantAge = 0; },
+        onReplaced: (city) => { city.nuclearPowerPlant = false; city.nuclearPowerPlantAge = undefined; },
+        completeMessage: (tx, tz) => `§e[Complete] (${tx}, ${tz})に原子力発電所が完成しました！ (自都市の生産力+5・科学力+4、自国の隣接都市に電力供給、毎ターンウラン1→電力16を発電、CO2少量排出)`,
     },
 };
 
@@ -313,6 +432,17 @@ export function tickDistrictConstruction(city, productionAmount, tiles, ownerId)
 
     if (construction.progress >= construction.cost) {
         if (isBuilding) {
+            // 💡 exclusiveGroup(発電所3種)を持つ建造物が完成した場合、同じグループの他の
+            //    メンバーが既に有効ならその建造物は無効化する(1都市につき発電所は1つのみ。§24)。
+            if (def.exclusiveGroup) {
+                for (const otherId in DISTRICT_BUILDING_DEFS) {
+                    if (otherId === construction.id) continue;
+                    const otherDef = DISTRICT_BUILDING_DEFS[otherId];
+                    if (otherDef.exclusiveGroup === def.exclusiveGroup && city[otherId]) {
+                        otherDef.onReplaced?.(city);
+                    }
+                }
+            }
             def.onComplete?.(city, targetTile);
         } else {
             targetTile.district = { id: construction.id, label: def.label, ownerId: targetTile.ownerId, ownerName: targetTile.ownerName };

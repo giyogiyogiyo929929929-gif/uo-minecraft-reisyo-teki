@@ -1,7 +1,7 @@
 // プレイヤー単位の研究・社会制度の進行を管理する。
 
 export const TECHNOLOGIES = {
-    animalHusbandry: { label: "畜産", cost: 10, prerequisites: [], effect: "弓術の前提条件になる" },
+    animalHusbandry: { label: "畜産", cost: 10, prerequisites: [], effect: "弓術・騎乗の前提条件になる。施設「牧場」を解放" },
     mining: { label: "採掘", cost: 10, prerequisites: [], effect: "施設「採石場」を解放。製錬技術の前提条件になる" },
     // 💡 占星術: 前提条件なし。取得後、都市にオベリスク(信仰力+4)を建設できるようになる。
     astrology: { label: "占星術", cost: 10, prerequisites: [], effect: "建造物「オベリスク」・区域「聖地」を解放" },
@@ -35,6 +35,25 @@ export const TECHNOLOGIES = {
     machinery: { label: "機械工学", cost: 220, prerequisites: ["engineering"], effect: "ユニット「重装弓兵」を解放" },
     // 💡 石工術: 前提は採掘。取得後、都市に建造物「防壁」を建設できるようになる(§13参照)。
     masonry: { label: "石工術", cost: 80, prerequisites: ["mining"], effect: "建造物「防壁」を解放" },
+    // 💡 火薬: 前提は鉄器。取得後、ユニット「銃士」を生産できるようになる(剣士の上位互換)。
+    gunpowder: { label: "火薬", cost: 200, prerequisites: ["ironWorking"], effect: "ユニット「銃士」を解放" },
+    // 💡 冶金術: 前提は火薬・徒弟制度。取得後、ユニット「大砲」を生産できるようになる(カタパルトの上位互換)。
+    metallurgy: { label: "冶金術", cost: 260, prerequisites: ["gunpowder", "apprenticeship"], effect: "ユニット「大砲」を解放" },
+    // 💡 産業化: 前提は冶金術・機械工学。取得後、ユニット「戦車」「戦艦」を生産できるようになる。
+    industrialization: { label: "産業化", cost: 400, prerequisites: ["metallurgy", "machinery"], effect: "ユニット「戦車」「戦艦」を解放" },
+    // 💡 電力: 前提は産業化。取得後、ユニット「機関銃兵」「近代歩兵」を生産できるようになる。
+    electricity: { label: "電力", cost: 350, prerequisites: ["industrialization"], effect: "ユニット「機関銃兵」「近代歩兵」を解放" },
+    // 💡 ロケット工学: 前提は電力(採掘→…→機械工学→産業化→電力→ロケット工学と続く、
+    //    このツリーで最も深い前提チェーンの先)。取得後、ミサイル・対空砲(いずれもcost 200)を
+    //    生産できるようになる。以前はどちらも前提技術なしで生産できてしまっていたため、
+    //    技術ツリーの最終到達点として追加した。
+    rocketry: { label: "ロケット工学", cost: 300, prerequisites: ["electricity"], effect: "ミサイル・対空砲を解放" },
+    // 💡 航空力学: 前提は産業化(電力とは別枝)。取得後、ユニット「戦闘機」を生産可能に。
+    //    「爆撃機」は(航空力学ではなく)ロケット工学を前提にしている。ロケット工学自体が
+    //    電力経由でこのツリー最深部にあるため、航空力学を経由しなくても単独で「空軍の
+    //    最終形態」としての重みが出る(rocketryの前提にaviationを追加すると、ミサイル・
+    //    対空砲まで巻き込んで前提が重くなってしまうため、あえて独立させている)。
+    aviation: { label: "航空力学", cost: 380, prerequisites: ["industrialization"], effect: "ユニット「戦闘機」を解放" },
 };
 
 export const CIVICS = {
@@ -50,6 +69,12 @@ export const CIVICS = {
     theocracy: { label: "神権政治", cost: 35, prerequisites: ["politicalPhilosophy"], effect: "聖地の建造物「大聖堂」を解放" },
     // 💡 商業: 前提は使節団。取得後、建造物「市場」を生産できるようになる(技術「貨幣経済」も別途必要)。
     commerce: { label: "商業", cost: 20, prerequisites: ["emissaries"], effect: "建造物「市場」を解放(技術「貨幣経済」も必要)" },
+    // 💡 封建制度: 前提は政治哲学(軍制改革・神権政治と同じ兄弟分岐)。取得後、ユニット
+    //    「長槍兵」を生産できるようになる。社会制度がユニットを直接解放するのはこれが初めて
+    //    (今までrequiresCivicは建造物のみに使われていた)。
+    feudalism: { label: "封建制度", cost: 60, prerequisites: ["politicalPhilosophy"], effect: "ユニット「長槍兵」を解放" },
+    // 💡 騎士道: 前提は封建制度。取得後、ユニット「騎士」を生産できるようになる(騎兵の上位互換)。
+    chivalry: { label: "騎士道", cost: 90, prerequisites: ["feudalism"], effect: "ユニット「騎士」を解放" },
 };
 
 const CONFIG = {
@@ -151,6 +176,61 @@ export function saveProgressState(player, kind, state) {
 export function resetProgress(player, kind) {
     const state = blankState();
     saveProgressState(player, kind, state);
+}
+
+// 💡 偉人システム。技術/文化力/信仰力の産出の一部を「偉人ポイント」として3種別
+//    (science/civic/faith)別に貯め、閾値に達したら即時ボーナスと引き換えに使い切れる。
+//    技術/文化のような「選択中の項目に注ぎ込む」仕組みは不要な単純な貯蓄なので、
+//    getProgressState/saveProgressStateのような読み取り頻度の高いキャッシュ層は設けず、
+//    Dynamic Propertyを素直に読み書きする(ターン処理・招聘操作のときにしか触らないため)。
+const GREAT_PERSON_POINTS_PROPERTY = "civ:greatPersonPoints";
+export const GREAT_PERSON_THRESHOLD = 150;
+export const GREAT_PERSON_POINT_SHARE = 0.2; // 技術/文化/信仰力の産出のうち偉人ポイントに回る割合
+
+function blankGreatPersonPoints() {
+    return { science: 0, civic: 0, faith: 0 };
+}
+
+export function getGreatPersonPoints(player) {
+    const raw = player?.getDynamicProperty(GREAT_PERSON_POINTS_PROPERTY);
+    if (typeof raw !== "string") return blankGreatPersonPoints();
+    try {
+        const parsed = JSON.parse(raw);
+        return {
+            science: Number(parsed.science) || 0,
+            civic: Number(parsed.civic) || 0,
+            faith: Number(parsed.faith) || 0,
+        };
+    } catch {
+        return blankGreatPersonPoints();
+    }
+}
+
+function saveGreatPersonPoints(player, points) {
+    player.setDynamicProperty(GREAT_PERSON_POINTS_PROPERTY, JSON.stringify(points));
+}
+
+/** technology/civic/faithそれぞれの今ターンの産出のうち、一定割合を偉人ポイントに加算する。 */
+export function addGreatPersonPoints(player, sciencePoints, civicPoints, faithPoints) {
+    if (!player) return;
+    const points = getGreatPersonPoints(player);
+    points.science += Math.max(0, sciencePoints) * GREAT_PERSON_POINT_SHARE;
+    points.civic += Math.max(0, civicPoints) * GREAT_PERSON_POINT_SHARE;
+    points.faith += Math.max(0, faithPoints) * GREAT_PERSON_POINT_SHARE;
+    saveGreatPersonPoints(player, points);
+}
+
+/**
+ * 偉人を招聘する(ポイント種別を1つ消費)。閾値未満なら失敗を返す。
+ * 実際のボーナス効果(技術ポイント付与・信仰力備蓄加算など)は呼び出し元(commands.js)が
+ * 担当する(progression.jsはポイントの管理のみに専念する)。
+ */
+export function recruitGreatPerson(player, type) {
+    const points = getGreatPersonPoints(player);
+    if ((points[type] ?? 0) < GREAT_PERSON_THRESHOLD) return { ok: false };
+    points[type] = 0;
+    saveGreatPersonPoints(player, points);
+    return { ok: true };
 }
 
 export function getDefinition(kind, id) {

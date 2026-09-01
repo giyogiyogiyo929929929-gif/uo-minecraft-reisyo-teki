@@ -3,8 +3,8 @@ import { ActionFormData, ModalFormData, MessageFormData } from "@minecraft/serve
 import { ChestFormData } from "./chestForms.js";
 import { getMapConfig, getTile, getTiles, setTiles, getMatchSettings, setMatchSettings, getMapGenSettings, setMapGenSettings, resetMapGenSettings, broadcast } from "./state.js";
 import { worldToTile, TERRAIN_TYPES, RESOURCE_TYPES } from "./mapGen.js"
-import { turnInfoText, isPlayersTurn, joinGame, endGame, getTurnState, setTurnState, calculateCityFoodIncomes, getCityCurrentYields, debugForceVictory, connectTradeRoutes, getPlayerColor } from "./turns.js";
-import { PRODUCTION_DEFS, canStartProduction, getTotalWorkerActionsRemaining, WORKER_ACTIONS_PER_UNIT, getWorkerCount } from "./production.js";
+import { turnInfoText, isPlayersTurn, joinGame, endGame, getTurnState, setTurnState, calculateCityFoodIncomes, getCityCurrentYields, getCityGoldBreakdown, formatGoldBreakdownText, debugForceVictory, connectTradeRoutes, getPlayerColor, isLuxuryResource, GOLD_PER_LUXURY_RESOURCE } from "./turns.js";
+import { PRODUCTION_DEFS, canStartProduction, getTotalWorkerActionsRemaining, WORKER_ACTIONS_PER_UNIT, getWorkerCount, RUSH_BUY_GOLD_PER_PRODUCTION } from "./production.js";
 import { getFacilityIds, getFacilityDef, canInstallFacility } from "./facilities.js";
 import { getDistrictIds, getDistrictDef, canStartDistrict, getDistrictBuildingIds, getDistrictBuildingDef, canStartDistrictBuilding, isSacredSiteTile, hasCityDistrict } from "./districts.js";
 import {
@@ -12,16 +12,19 @@ import {
     canFoundReligion, getTotalCivFaith, getNationalDominantReligion,
     getCityFollowers, getCityDominantReligion, getReligiousUnitCost, hasStartedInquisition,
 } from "./religion.js";
-import { getDefinitions, getKindLabel, getPointsLabel, getProgressState, hasCompletedProgress, getDefinition } from "./progression.js";
-import { getRelation, sendRequest, getRequestsFor, acceptRequest, rejectRequest, breakRelation, declareWar, isAtWar, hasDiplomaticAgreement } from "./diplomacy.js";
+import { getDefinitions, getKindLabel, getPointsLabel, getProgressState, saveProgressState, hasCompletedProgress, getDefinition, getGreatPersonPoints, GREAT_PERSON_THRESHOLD } from "./progression.js";
+import { getRelation, sendRequest, getRequestsFor, acceptRequest, rejectRequest, breakRelation, declareWar, isAtWar, hasDiplomaticAgreement, getRelationTypeLabel } from "./diplomacy.js";
 import {
     getAttackRange, getAttackableTargets, getAttackableCityTargets, getEffectiveCombatStrength,
-    isRangedUnit, getEffectiveRangedStrength, canUnitEnterTile, canTravelPath, getUnitClassLabel,
-    CITY_MAX_HP, WALL_MAX_HP, CITY_RANGED_ATTACK_RANGE, getBestRangedCombatStrength,
+    isRangedUnit, getEffectiveRangedStrength, getReachablePositions, getUnitClassLabel, tileDistance,
+    CITY_MAX_HP, WALL_MAX_HP, CITY_RANGED_ATTACK_RANGE, getBestRangedCombatStrength, UNIT_CLASS_LABELS,
 } from "./combat.js";
 import { resolveOwningCityKey, getAdjacentTileEntries } from "./adjacency.js";
+import { getAirbaseCapacity, getBasedAirUnits, PILLAGE_MIN_HP_RATIO, canAirUnitPatrol } from "./airbase.js";
 import { getRealPlayer, getControllableCivs, getActiveCivId, setActiveCivId, addVirtualCiv, removeVirtualCiv, getCivStorageHandle, resolveCivName, getVirtualCivById } from "./civs.js";
 import { refreshUnitLabelAt } from "./unitLabels.js";
+import { openMapMonitorMenu, describeMonitorTile } from "./mapMonitor.js";
+import { MonitorFormData, MONITOR_COLS, MONITOR_ROWS } from "./monitorForm.js";
 
 function isOperator(player) {
     return player.playerPermissionLevel === PlayerPermissionLevel.Operator;
@@ -39,6 +42,20 @@ function getMenuStyle(realPlayer) {
 
 function setMenuStyle(realPlayer, style) {
     realPlayer.setDynamicProperty(MENU_STYLE_KEY, style);
+}
+
+// 💡 ユニットの移動・攻撃UI(候補マスの文字リスト / mapMonitor風のグリッドから選ぶ)も、
+//    MENU_STYLE_KEYと同じくプレイヤー個人の好みなのでDynamic Propertyに保存する。
+//    戦闘ユニット・宗教ユニットの「移動」「攻撃」、航空ユニットの「出撃」「略奪」「移設」
+//    すべてをこの1つの設定で切り替える。
+const UNIT_ACTION_UI_STYLE_KEY = "civ:unitActionUiStyle";
+
+function getUnitActionUiStyle(realPlayer) {
+    return realPlayer.getDynamicProperty(UNIT_ACTION_UI_STYLE_KEY) === "monitor" ? "monitor" : "list";
+}
+
+function setUnitActionUiStyle(realPlayer, style) {
+    realPlayer.setDynamicProperty(UNIT_ACTION_UI_STYLE_KEY, style);
 }
 
 // 💡 チェストUIでメインメニューの各ボタンに付けるアイコン(バニラのアイテム/ブロックの
@@ -84,34 +101,63 @@ const MAIN_MENU_ACTION_ICONS = {
     debugallcivs: "minecraft:spyglass",
     civmanage: "minecraft:player_head",
     togglemenustyle: "minecraft:compass",
+    toggleunitactionuistyle: "minecraft:arrow",
     mapview: "minecraft:filled_map",
+    mapmonitor: "minecraft:observer",
     close: "minecraft:barrier",
 };
 
+// 💡 チェストUIの1行あたりのマス数(9×6マスの「大チェスト」前提。ChestFormData("large")参照)。
+//    メインメニューの行分けはこの幅を基準に「次の行の先頭」を計算する。
+const MAIN_MENU_ROW_WIDTH = 9;
+
 /**
  * メインメニューをチェストUI(development_resource_packs/testapia_ui、§18参照)風に表示する。
- * buttons配列のインデックスとチェストのスロット番号を1:1に対応させるため、選ばれたスロット
- * 番号がそのまま buttons のインデックスとして使える。ChestFormDataにはActionFormDataの
- * ようなbody欄が無いため、スロットに余裕があれば最後の1マスに「現在の状況」枠を置いて
- * body[](ターン情報・都市情報など)をそこへ載せる(選んでも buttons の範囲外なので何も
- * 起きず、メニューが閉じるだけ)。このリソースパックがワールド側で有効になっていない場合、
- * マーカー文字列が付いた普通のフォームとして表示されてしまう(見た目が崩れるだけで、
- * 動作自体は壊れない)。
- * @returns {Promise<number|undefined>} 選ばれたスロット番号(=buttonsのインデックス)。
+ * buttons配列は各要素に任意で `group`(例: "game"/"op"/"system")を持たせられ、直前のボタンと
+ * groupが変わるたびに、詰まっていた行の途中であっても次の行の先頭マスまでスロットを送る
+ * ("試合に関係する操作"と"OP専用の操作"などが見た目上も行で分かれるようにするため)。
+ * groupを省略した要素は既定で"game"扱い。この行送りによりスロット番号とbuttonsの
+ * インデックスがずれるため、選ばれたスロット番号→buttonsインデックスの対応表を別途持つ。
+ * ChestFormDataにはActionFormDataのようなbody欄が無いため、最後のマスが空いていれば
+ * 「現在の状況」枠を置いてbody[](ターン情報・都市情報など)をそこへ載せる(選んでも
+ * buttonsの範囲外なので何も起きず、メニューが閉じるだけ)。このリソースパックがワールド側で
+ * 有効になっていない場合、マーカー文字列が付いた普通のフォームとして表示されてしまう
+ * (見た目が崩れるだけで、動作自体は壊れない)。
+ * @returns {Promise<number|undefined>} 選ばれたボタンの buttons 配列インデックス。
  *   キャンセルされた場合は undefined。
  */
 async function showMainMenuChest(realPlayer, body, buttons) {
     const chest = new ChestFormData("large").title("Civ Tactics");
     const capacity = chest.slotCount;
-    for (let i = 0; i < buttons.length && i < capacity; i++) {
+    const slotToButtonIndex = [];
+    let slot = 0;
+    let prevGroup;
+    let droppedCount = 0;
+    for (let i = 0; i < buttons.length; i++) {
+        const group = buttons[i].group ?? "game";
+        if (prevGroup !== undefined && group !== prevGroup && slot % MAIN_MENU_ROW_WIDTH !== 0) {
+            slot = Math.ceil(slot / MAIN_MENU_ROW_WIDTH) * MAIN_MENU_ROW_WIDTH;
+        }
+        prevGroup = group;
+        // 💡 表示しきれないボタンが出た場合、無言で切り捨てず必ずプレイヤーに知らせる
+        //    (チェストUIはボタン数がマスの空き状況によって54個の上限を超えうるため)。
+        if (slot >= capacity) { droppedCount = buttons.length - i; break; }
         const icon = MAIN_MENU_ACTION_ICONS[buttons[i].action] ?? MAIN_MENU_DEFAULT_ICON;
-        chest.button(i, buttons[i].text, null, icon);
+        chest.button(slot, buttons[i].text, null, icon);
+        slotToButtonIndex[slot] = i;
+        slot++;
     }
-    if (buttons.length < capacity) {
+    if (slotToButtonIndex[capacity - 1] === undefined) {
         chest.button(capacity - 1, "§e現在の状況", body, "minecraft:writable_book");
+    } else if (droppedCount === 0) {
+        droppedCount = 1; // 最後のマスも通常のボタンで埋まり、「現在の状況」枠自体も表示できなかった
+    }
+    if (droppedCount > 0) {
+        realPlayer.sendMessage(`§c[Warning] メニュー項目が多すぎて ${droppedCount} 個表示できませんでした。他の操作を先に済ませるか、状況を変えてから開き直してください。`);
     }
     const res = await chest.show(realPlayer);
-    return res.canceled ? undefined : res.selection;
+    if (res.canceled) return undefined;
+    return slotToButtonIndex[res.selection];
 }
 
 // 💡 マップビューア(§18参照)。チェストUI(9×6マス)のうち、下段1行(9マス)は
@@ -156,7 +202,12 @@ function describeMapViewTile(tx, tz, tile) {
         `§7地形: ${terrainLabel}`,
         `§6[Food]x${tile.foodYield ?? 0} §e[Prod]x${tile.productionYield ?? 0}`,
     ];
-    if (tile.resource) lore.push(`§6資源: ${RESOURCE_TYPES[tile.resource]?.label ?? tile.resource}`);
+    if (tile.resource) {
+        const resourceLabel = RESOURCE_TYPES[tile.resource]?.label ?? tile.resource;
+        // 💡 高級資源(§23)は労働時に毎ターンゴールド+GOLD_PER_LUXURY_RESOURCEになるため、マス情報にも表示しておく。
+        const goldNote = isLuxuryResource(tile.resource) ? ` §6[Gold]x${GOLD_PER_LUXURY_RESOURCE}` : "";
+        lore.push(`§6資源: ${resourceLabel}${goldNote}`);
+    }
     if (tile.ownerId) lore.push(`§b所有: ${resolveCivName(tile.ownerId) ?? "?"}`);
     if (tile.combatUnit) {
         const u = tile.combatUnit;
@@ -282,6 +333,13 @@ export async function openMainMenu(player) {
     body.push(`§b保有中の石油: ${oil} 個`);
     const iron = player.getDynamicProperty("strategic_iron") ?? 0;
     body.push(`§7保有中の鉄: ${iron} 個`);
+    const horse = player.getDynamicProperty("strategic_horse") ?? 0;
+    body.push(`§6保有中の馬: ${horse} 個`);
+    const gold = player.getDynamicProperty("strategic_gold") ?? 0;
+    body.push(`§6保有中のゴールド: ${gold}${gold < 0 ? " §c(破産中！毎ターン-10ごとに1体強制解散)" : ""}`);
+    const coal = player.getDynamicProperty("strategic_coal") ?? 0;
+    const uranium = player.getDynamicProperty("strategic_uranium") ?? 0;
+    body.push(`§8保有中の石炭: ${coal} 個 §f| §a保有中のウラン: ${uranium} 個`);
 
     // 💡 戦闘勝利ポイント(他ゲームでいうレート的なもの。ゲームを跨いで持続する)
     const victoryPoints = player.getDynamicProperty("civ:victoryPoints") ?? 0;
@@ -317,6 +375,8 @@ export async function openMainMenu(player) {
             let resLabel = "なし";
             if (currentTile.resource && RESOURCE_TYPES[currentTile.resource]) {
                 resLabel = `§e${RESOURCE_TYPES[currentTile.resource].label}§b`;
+                // 💡 高級資源(§23)は労働時に毎ターンゴールド+GOLD_PER_LUXURY_RESOURCEになるため、マス情報にも表示しておく。
+                if (isLuxuryResource(currentTile.resource)) resLabel += ` §6[Gold]x${GOLD_PER_LUXURY_RESOURCE}§b`;
             }
 
             body.push(`\n§b現在地: ${tileLabel} | 資源: ${resLabel}`);
@@ -388,6 +448,19 @@ export async function openMainMenu(player) {
                 body.push(`§f  - 人口: §a${city.population} §f/ 住宅上限: §e${city.housing} §f| [Worker] 労働者: §b${getWorkerCount(city)} 人 §7(残り行動:${getTotalWorkerActionsRemaining(city)})`);
                 body.push(`§f  - [Yield] 現市民の選択総出力: §6[Food]x${currentYields.food} §f/ §e[Prod]x${currentYields.production} §f/ §d[Faith]x${currentYields.faith ?? 0} §f/ §7[Iron]x${currentYields.iron ?? 0}${currentYields.science ? ` §f/ §b[Science]x${currentYields.science}` : ""}`);
 
+                // 💡 ゴールド産出の内訳(§23)。
+                if ((currentYields.gold ?? 0) > 0) {
+                    const goldBreakdown = getCityGoldBreakdown(`${tx},${tz}`, allTiles);
+                    body.push(`§6  - [Gold] 今の産出: ${currentYields.gold} §7(${formatGoldBreakdownText(goldBreakdown)})`);
+                }
+
+                // 💡 電力(§24)。発電所からの受給量がある、またはこの都市が工場を持つ場合のみ表示する
+                //    (工業地帯と無関係な都市の情報欄を電力0の行で埋めないため)。
+                if ((city.powerReceived ?? 0) > 0 || city.factory) {
+                    const sources = (city.powerSources ?? []).map(s => `${s.plantLabel}@${s.fromCityName} +${s.amount}`).join("、");
+                    body.push(`§b  - [Power] 受電量: ${city.powerReceived ?? 0}${sources ? ` §7(内訳: ${sources})` : " §7(電力供給なし)"}`);
+                }
+
                 // 💡 進行中の生産(ユニット/建造物)を汎用的に表示。新しい生産物を増やしても自動で対応する。
                 if (city.production) {
                     const def = PRODUCTION_DEFS[city.production.id];
@@ -412,7 +485,8 @@ export async function openMainMenu(player) {
                         for (const r of city.tradingPost.routes) {
                             const targetName = allTiles[r.targetKey]?.city?.name ?? `未知の都市(${r.targetKey})`;
                             const scienceText = r.scienceBonus > 0 ? ` §b科学力+${r.scienceBonus}§7` : "";
-                            body.push(`    §7-> [Link] 【${targetName}】残:${r.remainingTurns}T (食料 §a+${r.bonus}§7${scienceText})`);
+                            const goldText = r.goldBonus > 0 ? ` §6ゴールド+${r.goldBonus}§7` : "";
+                            body.push(`    §7-> [Link] 【${targetName}】残:${r.remainingTurns}T (食料 §a+${r.bonus}§7${scienceText}${goldText})`);
                         }
                     } else {
                         body.push(`    §7-> [Link] 交易路: 接続対象(他の都市)なし`);
@@ -479,7 +553,14 @@ export async function openMainMenu(player) {
     if (turn.started) {
         buttons.push({ text: "§b[Diplomacy] 外交メニュー", action: "diplomacy" });
         buttons.push({ text: "§f[Combat] 自分の戦闘ユニット一覧", action: "myunits" });
+        buttons.push({ text: "§9[Airbase] 航空部隊一覧", action: "airunits" });
         buttons.push({ text: "§d[Religion] 宗教", action: "religion" });
+        // 💡 新機能: 偉人システム。3種別(科学/文化/信仰)のいずれか1つでも閾値に達していれば
+        //    メニューに表示する(閾値未満のときは招聘できる偉人がいないため表示しない)。
+        const greatPersonPoints = getGreatPersonPoints(player);
+        if (Object.values(greatPersonPoints).some((v) => v >= GREAT_PERSON_THRESHOLD)) {
+            buttons.push({ text: "§b[Great] 偉人を招聘する", action: "greatperson" });
+        }
     }
     
     if (currentTile && !currentTile.ownerId) {
@@ -504,6 +585,12 @@ export async function openMainMenu(player) {
 
         if ((currentTile.city.missiles ?? 0) > 0) {
             buttons.push({ text: `§c[Missile] ミサイルを発射する (在庫:${currentTile.city.missiles})`, action: "launchmissile" });
+        }
+
+        if (currentTile.city.production) {
+            const remaining = Math.max(0, currentTile.city.production.cost - currentTile.city.production.progress);
+            const goldCost = Math.ceil(remaining * RUSH_BUY_GOLD_PER_PRODUCTION);
+            buttons.push({ text: `§6[Gold] ゴールドで即時完成 (必要:${goldCost})`, action: "rushbuy" });
         }
     }
 
@@ -570,22 +657,30 @@ export async function openMainMenu(player) {
         }
     }
     if (turn.started) { buttons.push({ text: "ターンを終了する", action: "endturn" }); }
-    if (isOp && turn.started) buttons.push({ text: "§6【管理者】手番を強制スキップ", action: "forceendturn" });
-    if (isOp) buttons.push({ text: "§c【管理者】ゲームをリセット", action: "endgame" });
-    if (isOp) buttons.push({ text: "§e[Settings] 試合の設定(産出倍率・外交の有無)", action: "matchsettings" });
-    if (isOp) buttons.push({ text: "§e[Settings] マップ生成の設定(バイオーム・資源)", action: "mapgensettings" });
-    if (isOp && turn.started) buttons.push({ text: "§c[Debug]【デバッグ】指定した国家を即座に勝利させる", action: "debugvictory" });
-    if (isOp && currentTile) buttons.push({ text: "§c[Debug]【デバッグ】このマスを編集する", action: "debugtile" });
-    if (isOp && turn.started) buttons.push({ text: "§b[Intel]【デバッグ】全国家の情報を閲覧する", action: "debugallcivs" });
-    if (isOp) buttons.push({ text: "§d[Civs] 国家管理(ソロテスト用)", action: "civmanage" });
-    if (isOp && config) buttons.push({ text: "§b[Test] マップを見る(チェストUI)", action: "mapview" });
+    if (isOp && turn.started) buttons.push({ text: "§6【管理者】手番を強制スキップ", action: "forceendturn", group: "op" });
+    if (isOp) buttons.push({ text: "§c【管理者】ゲームをリセット", action: "endgame", group: "op" });
+    if (isOp) buttons.push({ text: "§e[Settings] 試合の設定(産出倍率・外交の有無)", action: "matchsettings", group: "op" });
+    if (isOp) buttons.push({ text: "§e[Settings] マップ生成の設定(バイオーム・資源)", action: "mapgensettings", group: "op" });
+    if (isOp && turn.started) buttons.push({ text: "§c[Debug]【デバッグ】指定した国家を即座に勝利させる", action: "debugvictory", group: "op" });
+    if (isOp && currentTile) buttons.push({ text: "§c[Debug]【デバッグ】このマスを編集する", action: "debugtile", group: "op" });
+    if (isOp && turn.started) buttons.push({ text: "§b[Intel]【デバッグ】全国家の情報を閲覧する", action: "debugallcivs", group: "op" });
+    if (isOp) buttons.push({ text: "§d[Civs] 国家管理(ソロテスト用)", action: "civmanage", group: "op" });
+    if (isOp && config) buttons.push({ text: "§b[Test] マップを見る(チェストUI)", action: "mapview", group: "op" });
+    if (isOp && config) buttons.push({ text: "§b[Test] マップモニターを見る(勢力図)", action: "mapmonitor", group: "op" });
     const realPlayer = getRealPlayer(player);
     const menuStyle = getMenuStyle(realPlayer);
     buttons.push({
         text: menuStyle === "chest" ? "§b[UI] 通常のメニューに切り替える" : "§b[UI] チェストUIに切り替える",
         action: "togglemenustyle",
+        group: "system",
     });
-    buttons.push({ text: "閉じる", action: "close" });
+    const unitActionUiStyle = getUnitActionUiStyle(realPlayer);
+    buttons.push({
+        text: unitActionUiStyle === "monitor" ? "§b[UI] ユニット操作をリスト選択に切り替える" : "§b[UI] ユニット操作をモニター選択に切り替える",
+        action: "toggleunitactionuistyle",
+        group: "system",
+    });
+    buttons.push({ text: "閉じる", action: "close", group: "system" });
 
     let selection;
     if (menuStyle === "chest") {
@@ -602,6 +697,10 @@ export async function openMainMenu(player) {
     switch (selectedAction) {
         case "togglemenustyle":
             setMenuStyle(realPlayer, menuStyle === "chest" ? "form" : "chest");
+            await openMainMenu(player);
+            break;
+        case "toggleunitactionuistyle":
+            setUnitActionUiStyle(realPlayer, unitActionUiStyle === "monitor" ? "list" : "monitor");
             await openMainMenu(player);
             break;
         case "help": await openHelpMenu(player); break;
@@ -622,6 +721,7 @@ export async function openMainMenu(player) {
         case "civic": await openProgressMenu(player, "civic"); break;
         case "diplomacy": await openDiplomacyMenu(player); break;
         case "myunits": await openMyUnitsMenu(player); break;
+        case "airunits": await openAirbaseUnitsMenu(player); break;
         case "religion": await openReligionMenu(player); break;
         case "moveunit":
             if (currentTile?.combatUnit?.ownerId === player.id) await openCombatUnitMoveMenu(player, tx, tz);
@@ -666,6 +766,12 @@ export async function openMainMenu(player) {
             await openMissileLaunchMenu(player, tx, tz);
             break;
 
+        case "rushbuy": (await import("./commands.js")).cmdRushBuyProduction(player); break;
+
+        case "greatperson":
+            await openGreatPersonMenu(player);
+            break;
+
         
         // 💡 新機能: 名前変更アクションの処理（ModalFormをポップアップさせてコマンドへ送る）
         case "renamecity":
@@ -700,6 +806,7 @@ export async function openMainMenu(player) {
         case "mapgensettings": if (isOp) await openMapGenSettingsMenu(getRealPlayer(player)); break;
         case "civmanage": if (isOp) await openCivManagementMenu(getRealPlayer(player)); break;
         case "mapview": if (isOp) await openMapViewMenu(getRealPlayer(player)); break;
+        case "mapmonitor": if (isOp) await openMapMonitorMenu(getRealPlayer(player)); break;
         default: break;
     }
 }
@@ -739,6 +846,17 @@ const HELP_TOPICS = [
             "・複数のユニットで敵ユニットを取り囲んでから攻撃すると、包囲ボーナスで有利にダメージを与えられます。",
             "・今ターンまだ行動していないユニットは、その場で休息してHPを回復できます。",
             "・戦争は外交メニューの「講和する」でいつでも終了できます(試合の設定で無効化されていない場合)。",
+        ],
+    },
+    {
+        title: "航空戦",
+        body: [
+            "・航空ユニット(支援偵察機・支援防御機・戦闘機・戦略爆撃機)は陸海軍と違ってマス上を移動せず、都市の航空基地に配置され、そこから直接出撃・帰投します。",
+            "・都心には常に1枠。飛行場(区域専用建造物)で+8枠、滑走路(施設)で+3枠が追加されます。",
+            "・メインメニューの「航空部隊一覧」から、出撃(攻撃)・略奪(戦略爆撃機のみ)・哨戒の切り替え・別の航空基地への移設ができます。",
+            "・戦闘機・支援防御機は哨戒状態にすると、拠点の周囲1マス以内への敵の空爆を迎撃できます(1ターン1回まで)。対空砲による確実な迎撃とは異なり、撃墜できなければ空爆は実行されます。",
+            "・戦略爆撃機は哨戒できない代わりに、敵国の施設・完成済み区域の建造物を略奪できます(HPが最大値の50%以上必要。戦利品は得られません)。",
+            "・今ターン行動しなかった航空ユニットは、ターン終了時にHPが回復します(飛行場があると回復量が最大になります)。",
         ],
     },
     {
@@ -801,9 +919,10 @@ async function openHelpTopicMenu(player, topicIndex) {
  * - 不可侵条約・同盟の有無: 無効にすると、新規の提案送信・承認ができなくなる
  *   (diplomacy.js の sendRequest/acceptRequest がここを見て拒否する。既に成立している
  *   関係はそのまま残る)。
- * - 講和の有無: 無効にすると、一度始まった戦争(war)を breakRelation で終了できなくなる
- *   (diplomacy.js の breakRelation がここを見て拒否する。不可侵条約・同盟の解消は
- *   この設定の影響を受けない)。無効にすると、Bot側の劣勢時の自動講和(bots.js)も行われない。
+ * - 講和の有無: 無効にすると、一度始まった戦争(war)を終了できなくなる(diplomacy.js の
+ *   sendRequest/acceptRequestがtype:"peace"に対してここを見て拒否する。不可侵条約・同盟の
+ *   解消(breakRelation)はこの設定の影響を受けない)。無効にすると、Bot側の劣勢時の
+ *   自動講和提案(bots.js)も行われない。
  * - Botの手番間隔: 全員Botの対戦で、Botの手番から次のBotの手番へ移るまでの間隔(tick)。
  *   bots.js の advanceUntilHuman がここを見て system.runTimeout の遅延に使う。
  * - 行動ログの表示: 無効にすると、領有・生産・戦闘・外交などの行動ログ(world.sendMessage
@@ -1181,9 +1300,15 @@ async function openDebugCivDetailMenu(realPlayer, civId) {
     // 資源・開拓権
     const oil = handle.getDynamicProperty?.("strategic_oil") ?? 0;
     const iron = handle.getDynamicProperty?.("strategic_iron") ?? 0;
+    const horse = handle.getDynamicProperty?.("strategic_horse") ?? 0;
+    const gold = handle.getDynamicProperty?.("strategic_gold") ?? 0;
+    const coal = handle.getDynamicProperty?.("strategic_coal") ?? 0;
+    const uranium = handle.getDynamicProperty?.("strategic_uranium") ?? 0;
+    const co2 = handle.getDynamicProperty?.("strategic_co2") ?? 0;
     const victoryPoints = handle.getDynamicProperty?.("civ:victoryPoints") ?? 0;
     const rights = turn?.playerRights?.[civId] ?? 0;
-    lines.push(`§b[Resource] 石油: ${oil} §f| 鉄: ${iron} §f| 開拓権: ${rights} §f| §6勝利ポイント: ${victoryPoints}`);
+    lines.push(`§b[Resource] 石油: ${oil} §f| 鉄: ${iron} §f| 馬: ${horse} §f| §6ゴールド: ${gold} §f| §8石炭: ${coal} §f| §aウラン: ${uranium} §f| 開拓権: ${rights} §f| §6勝利ポイント: ${victoryPoints}`);
+    lines.push(`§7[CO2] 累計排出量: ${co2}(現時点では未使用の値です)`);
 
     // 研究・社会制度
     const techState = getProgressState(handle, "technology");
@@ -1225,7 +1350,15 @@ async function openDebugCivDetailMenu(realPlayer, civId) {
                 ? `${getDistrictDef(city.districtConstruction.id)?.label ?? city.districtConstruction.id} (${Math.floor(city.districtConstruction.progress)}/${city.districtConstruction.cost})`
                 : "なし";
             lines.push(`§f  ${city.isCapital ? "[首都]" : "[都市]"} ${city.name} (${key}) §7- 人口:${city.population}/住宅:${city.housing}`);
-            lines.push(`§7    産出: [Food]${yields.food} [Prod]${yields.production} [Faith]${yields.faith ?? 0} [Iron]${yields.iron ?? 0} [Science]${yields.science ?? 0} §7| 生産中: ${prodText} §7| 区域建設中: ${districtText}`);
+            lines.push(`§7    産出: [Food]${yields.food} [Prod]${yields.production} [Faith]${yields.faith ?? 0} [Iron]${yields.iron ?? 0} [Science]${yields.science ?? 0} [Gold]${yields.gold ?? 0} §7| 生産中: ${prodText} §7| 区域建設中: ${districtText}`);
+            if ((yields.gold ?? 0) > 0) {
+                lines.push(`§7    ゴールド内訳: ${formatGoldBreakdownText(getCityGoldBreakdown(key, tiles))}`);
+            }
+            // 💡 電力(§24)。発電所からの受給がある、またはこの都市が工場を持つ場合のみ表示。
+            if ((city.powerReceived ?? 0) > 0 || city.factory) {
+                const sources = (city.powerSources ?? []).map(s => `${s.plantLabel}@${s.fromCityName} +${s.amount}`).join("、");
+                lines.push(`§7    電力受給: ${city.powerReceived ?? 0}${sources ? ` (${sources})` : " (供給なし)"}`);
+            }
 
             // 💡 この都市の宗教的圧力の内訳(通常のメニューの都市詳細と同じ表示。§18参照)。
             const pressures = city.religiousPressure ?? {};
@@ -1300,7 +1433,7 @@ async function openDebugTileMenu(realPlayer, tx, tz) {
 
     const body = [
         `§7座標: (${tx}, ${tz})`,
-        `§7地形: ${TERRAIN_TYPES[tile.type]?.label ?? tile.type} §7| 資源: ${tile.resource ? (RESOURCE_TYPES[tile.resource]?.label ?? tile.resource) : "なし"}`,
+        `§7地形: ${TERRAIN_TYPES[tile.type]?.label ?? tile.type} §7| 資源: ${tile.resource ? (RESOURCE_TYPES[tile.resource]?.label ?? tile.resource) : "なし"}${isLuxuryResource(tile.resource) ? ` §6[Gold]x${GOLD_PER_LUXURY_RESOURCE}§7(労働時)` : ""}`,
         `§7基礎産出量: [Food]x${tile.foodYield ?? 0} [Prod]x${tile.productionYield ?? 0}`,
         `§7所有者: ${tile.ownerName ?? "未所有"}`,
         `§7都市: ${tile.city ? tile.city.name : "なし"} §7| 施設: ${tile.facility?.label ?? "なし"} §7| 区域: ${tile.district?.label ?? (tile.underDistrictConstruction ? "建設中" : "なし")}`,
@@ -1312,6 +1445,7 @@ async function openDebugTileMenu(realPlayer, tx, tz) {
         { text: "§f[Owner] 所有者を編集", action: "owner" },
     ];
     if (tile.city) buttons.push({ text: "§6[City] 都市を編集", action: "city" });
+    if (tile.ownerId) buttons.push({ text: "§a[Science] 研究/社会制度を編集", action: "progress" });
     buttons.push({ text: "§7[Facility] 施設を編集", action: "facility" });
     buttons.push({ text: "§5[District] 区域を編集", action: "district" });
     buttons.push({ text: "§c[Combat] 戦闘ユニットを編集", action: "combatunit" });
@@ -1329,6 +1463,7 @@ async function openDebugTileMenu(realPlayer, tx, tz) {
         case "terrain": await openDebugTerrainMenu(realPlayer, tx, tz); break;
         case "owner": await openDebugOwnerMenu(realPlayer, tx, tz); break;
         case "city": await openDebugCityMenu(realPlayer, tx, tz); break;
+        case "progress": await openDebugProgressCategoryMenu(realPlayer, tx, tz); break;
         case "facility": await openDebugFacilityMenu(realPlayer, tx, tz); break;
         case "district": await openDebugDistrictMenu(realPlayer, tx, tz); break;
         case "combatunit": await openDebugCombatUnitMenu(realPlayer, tx, tz); break;
@@ -1336,6 +1471,61 @@ async function openDebugTileMenu(realPlayer, tx, tz) {
         case "pressure": await openDebugPressureMenu(realPlayer, tx, tz); break;
         default: await openMainMenu(realPlayer); break;
     }
+}
+
+/** デバッグ: 足元のマスの所有国家について、技術ツリー/文化ツリーのどちらを編集するか選ぶ。 */
+async function openDebugProgressCategoryMenu(realPlayer, tx, tz) {
+    const tile = getTile(tx, tz);
+    if (!tile?.ownerId) { await openDebugTileMenu(realPlayer, tx, tz); return; }
+
+    const form = new ActionFormData()
+        .title("§c[Debug] 研究/社会制度を編集")
+        .body(`§7対象国家: §f${resolveCivName(tile.ownerId) ?? tile.ownerId}`);
+    form.button("§a[Science] 技術ツリー");
+    form.button("§d[Culture] 社会制度ツリー");
+    form.button("戻る");
+    const res = await form.show(realPlayer);
+    if (res.canceled || res.selection === undefined || res.selection === 2) { await openDebugTileMenu(realPlayer, tx, tz); return; }
+
+    await openDebugProgressMenu(realPlayer, tx, tz, tile.ownerId, res.selection === 0 ? "technology" : "civic");
+}
+
+/**
+ * デバッグ: 指定した国家の技術ツリー/文化ツリーの、指定した1項目を直接タップで
+ * 取得済み⇔未取得に切り替える(前提条件・コストは一切無視する)。取得中(activeId)の
+ * 項目を取得済みにした場合は、activeId/progressをクリアする(繰越ポイントcarryは維持)。
+ */
+async function openDebugProgressMenu(realPlayer, tx, tz, ownerId, kind) {
+    const handle = getCivStorageHandle(ownerId);
+    if (!handle) { realPlayer.sendMessage("§cこの国家の情報を取得できませんでした。(オフラインの人間プレイヤーの可能性があります)"); await openDebugTileMenu(realPlayer, tx, tz); return; }
+
+    const state = getProgressState(handle, kind);
+    const defs = getDefinitions(kind);
+    const items = Object.keys(defs).map((id) => {
+        const done = state.completed.includes(id);
+        const active = state.activeId === id;
+        const tag = done ? "§a[Done]" : active ? "§e[進行中]" : "§7[未取得]";
+        return { text: `${tag} ${defs[id].label}`, action: id };
+    });
+
+    await showPaginatedMenu(
+        realPlayer, `[Debug] ${getKindLabel(kind)}ツリーを直接編集`,
+        `§7対象国家: §f${resolveCivName(ownerId) ?? ownerId}\n§7タップで取得済み⇔未取得を切り替えます(前提条件は無視されます)。`,
+        items,
+        async (id) => {
+            const nowDone = state.completed.includes(id);
+            if (nowDone) {
+                state.completed = state.completed.filter((x) => x !== id);
+            } else {
+                state.completed.push(id);
+                if (state.activeId === id) { state.activeId = null; state.progress = 0; }
+            }
+            saveProgressState(handle, kind, state);
+            realPlayer.sendMessage(`§a【${defs[id].label}】を${nowDone ? "未取得に戻しました" : "取得済みにしました"}。`);
+            await openDebugProgressMenu(realPlayer, tx, tz, ownerId, kind);
+        },
+        async () => await openDebugProgressCategoryMenu(realPlayer, tx, tz),
+    );
 }
 
 /** デバッグ: 地形タイプ・資源・マス固有の基礎産出量(foodYield/productionYield)・伐採状態を直接編集する。 */
@@ -1545,7 +1735,7 @@ async function openDebugCombatUnitMenu(realPlayer, tx, tz) {
     actionButtons.push({ text: "戻る", act: "back" });
 
     const form = new ActionFormData().title("[Combat] 戦闘ユニットを編集")
-        .body(`§7現在: ${unit ? `${unit.label} (HP:${Math.round(unit.hp ?? 0)}/${unit.maxHp ?? 100} 戦闘力:${unit.combatStrength ?? 0} 所有:${unit.ownerName})` : "なし"}`);
+        .body(`§7現在: ${unit ? `${unit.label} (兵種:${unit.unitClass ? getUnitClassLabel(unit.unitClass) : "未分類"} HP:${Math.round(unit.hp ?? 0)}/${unit.maxHp ?? 100} 戦闘力:${unit.combatStrength ?? 0} 所有:${unit.ownerName})` : "なし"}`);
     for (const b of actionButtons) form.button(b.text);
     const res = await form.show(realPlayer);
     if (res.canceled || res.selection === undefined) { await openDebugTileMenu(realPlayer, tx, tz); return; }
@@ -1566,15 +1756,23 @@ async function openDebugCombatUnitMenu(realPlayer, tx, tz) {
     const ownerCivId = unit?.ownerId ?? tile.ownerId ?? civIds[0] ?? null;
     const ownerNames = civIds.map(id => resolveCivName(id) ?? id);
     const domainOptions = ["land", "naval"];
+    // 💡 兵種(unitClass)は combat.js の UNIT_CLASS_COUNTERS(対騎兵は騎兵に+10 等)・都市の
+    //    近接系判定(isMeleeUnitClass)・防壁の被ダメージ倍率などの判定に使われる(§13参照)。
+    //    先頭に「未分類」を挟み、デバッグ配置ユニットを兵種無しのままにもできるようにする。
+    const classIds = ["", ...Object.keys(UNIT_CLASS_LABELS)];
+    const classLabels = classIds.map(id => id ? getUnitClassLabel(id) : "(未分類)");
 
     const modal = new ModalFormData()
         .title("[Combat] 戦闘ユニットを配置/編集")
         .textField("ラベル", "例: 戦士", { defaultValue: unit?.label ?? "戦士" })
         .dropdown("所属国家", ownerNames.length ? ownerNames : ["(参加国家なし)"], { defaultValueIndex: Math.max(0, civIds.indexOf(ownerCivId)) })
         .dropdown("兵科", ["陸軍", "海軍"], { defaultValueIndex: unit?.domain === "naval" ? 1 : 0 })
+        .dropdown("兵種 (unitClass)", classLabels, { defaultValueIndex: Math.max(0, classIds.indexOf(unit?.unitClass ?? "")) })
         .textField("HP", "例: 100", { defaultValue: String(unit?.hp ?? 100) })
         .textField("最大HP (maxHp)", "例: 100", { defaultValue: String(unit?.maxHp ?? 100) })
         .textField("戦闘力 (combatStrength)", "例: 20", { defaultValue: String(unit?.combatStrength ?? 20) })
+        .textField("遠距離戦闘力 (rangedCombatStrength、空欄なら近距離専用ユニット扱い)", "例: 20", { defaultValue: unit?.rangedCombatStrength !== undefined ? String(unit.rangedCombatStrength) : "" })
+        .textField("近距離戦闘力 (meleeCombatStrength、空欄なら戦闘力と同じ)", "例: 15", { defaultValue: unit?.meleeCombatStrength !== undefined ? String(unit.meleeCombatStrength) : "" })
         .textField("移動力 (movement)", "例: 1", { defaultValue: String(unit?.movement ?? 1) })
         .textField("残り移動力 (movementRemaining)", "例: 1", { defaultValue: String(unit?.movementRemaining ?? unit?.movement ?? 1) })
         .textField("攻撃距離 (attackRange)", "例: 1", { defaultValue: String(unit?.attackRange ?? 1) });
@@ -1582,7 +1780,7 @@ async function openDebugCombatUnitMenu(realPlayer, tx, tz) {
     const modalRes = await modal.show(realPlayer);
     if (modalRes.canceled) { await openDebugTileMenu(realPlayer, tx, tz); return; }
 
-    const [label, ownerIndex, domainIndex, hpStr, maxHpStr, strStr, moveStr, moveRemStr, rangeStr] = modalRes.formValues;
+    const [label, ownerIndex, domainIndex, classIndex, hpStr, maxHpStr, strStr, rangedStr, meleeStr, moveStr, moveRemStr, rangeStr] = modalRes.formValues;
     const newOwnerId = civIds.length ? (civIds[ownerIndex] ?? ownerCivId) : ownerCivId;
 
     tile.combatUnit = {
@@ -1592,9 +1790,12 @@ async function openDebugCombatUnitMenu(realPlayer, tx, tz) {
         ownerId: newOwnerId,
         ownerName: resolveCivName(newOwnerId) ?? newOwnerId,
         domain: domainOptions[domainIndex] ?? "land",
+        unitClass: classIds[classIndex] || undefined,
         hp: Number(hpStr) || 0,
         maxHp: Number(maxHpStr) || 100,
         combatStrength: Number(strStr) || 0,
+        rangedCombatStrength: rangedStr?.trim() ? Number(rangedStr) : undefined,
+        meleeCombatStrength: meleeStr?.trim() ? Number(meleeStr) : undefined,
         movement: Number(moveStr) || 0,
         movementRemaining: Number(moveRemStr) || 0,
         attackRange: Number(rangeStr) || 1,
@@ -1769,7 +1970,7 @@ async function openProductionCategoryMenu(player, tx, tz, category) {
             const def = PRODUCTION_DEFS[id];
             if (def.category !== category) continue;
 
-            const check = canStartProduction(city, id, tile, player);
+            const check = canStartProduction(city, id, tile, player, `${tx},${tz}`, allTiles);
             if (!check.ok) {
                 if (def.uniquePerCity && def.hasBuilt?.(city)) {
                     body.push(`§7${def.icon} ${def.label}: 建設済み`);
@@ -1781,13 +1982,25 @@ async function openProductionCategoryMenu(player, tx, tz, category) {
                     body.push(`§7[Locked] ${def.icon} ${def.label}: 社会制度【${civicDef?.label ?? def.requiresCivic}】が必要`);
                 } else if (def.disallowInCapital && city.isCapital) {
                     body.push(`§7${def.icon} ${def.label}: この都市は既に首都です`);
+                } else if (def.requiresBuildingFlag && !city[def.requiresBuildingFlag]) {
+                    body.push(`§7${def.icon} ${def.label}: 対応する建造物が必要`);
+                } else if (check.message) {
+                    // 💡 上記のどれにも当てはまらない理由(航空基地の空き枠不足など)は
+                    //    canStartProductionのmessageをそのまま出す。ここが無いと該当ユニットの
+                    //    ボタンが理由の説明なしに一覧から消えるだけになってしまう。
+                    body.push(`§7${def.icon} ${def.label}: ${check.message.replace(/^§c/, "")}`);
                 }
                 continue;
             }
 
             const estTurns = production > 0 ? Math.ceil(def.cost / production) : "--";
             const classTag = def.unitClass ? `§7[${getUnitClassLabel(def.unitClass)}]§r ` : "";
-            buttons.push({ text: `${classTag}${def.icon} ${def.label}を生産する (必要生産力:${def.cost}、予測:約${estTurns}T)`, action: `start:${id}` });
+            let capacityTag = "";
+            if (def.requiresAirbaseCapacity) {
+                const capacity = getAirbaseCapacity(city, `${tx},${tz}`, allTiles);
+                capacityTag = ` (航空基地空き枠:${getBasedAirUnits(city).length}/${capacity})`;
+            }
+            buttons.push({ text: `${classTag}${def.icon} ${def.label}を生産する (必要生産力:${def.cost}、予測:約${estTurns}T)${capacityTag}`, action: `start:${id}` });
         }
     }
 
@@ -1939,6 +2152,44 @@ async function openMissileLaunchMenu(player, tx, tz) {
     (await import("./commands.js")).cmdLaunchMissile(player, targetTx, targetTz);
 }
 
+/**
+ * 偉人を招聘するメニュー(新要素)。3種別(科学/文化/信仰)の現在の偉人ポイントを表示し、
+ * 閾値に達している種別だけをボタンとして選べる(未達の種別はそもそも選んでも失敗するだけ
+ * なので、押せるボタン自体を出さない)。
+ */
+async function openGreatPersonMenu(player) {
+    const points = getGreatPersonPoints(player);
+    // 💡 招聘時の実際のボーナス量(commands.jsのGREAT_PERSON_EFFECTS)からラベルを組み立てる。
+    //    以前はボーナス量("250"/"50")をここに直書きしていたため、commands.js側の値を変えると
+    //    表示だけ古いまま取り残される事故があった。
+    const { GREAT_PERSON_LABELS, GREAT_PERSON_EFFECTS } = await import("./commands.js");
+    const labels = {
+        science: `${GREAT_PERSON_LABELS.science}(技術ポイント+${GREAT_PERSON_EFFECTS.science.points})`,
+        civic: `${GREAT_PERSON_LABELS.civic}(社会制度ポイント+${GREAT_PERSON_EFFECTS.civic.points})`,
+        faith: `${GREAT_PERSON_LABELS.faith}(自国の全都市の信仰力備蓄+${GREAT_PERSON_EFFECTS.faith.faithBonus})`,
+    };
+    const body = [
+        `§a科学: ${Math.floor(points.science)}/${GREAT_PERSON_THRESHOLD}`,
+        `§d文化: ${Math.floor(points.civic)}/${GREAT_PERSON_THRESHOLD}`,
+        `§e信仰: ${Math.floor(points.faith)}/${GREAT_PERSON_THRESHOLD}`,
+    ].join("\n");
+    const items = Object.keys(labels)
+        .filter((type) => (points[type] ?? 0) >= GREAT_PERSON_THRESHOLD)
+        .map((type) => ({ text: `§b[Great] ${labels[type]}を招聘する`, action: type }));
+
+    await showPaginatedMenu(
+        getRealPlayer(player),
+        "[Great] 偉人を招聘する",
+        body,
+        items,
+        async (action) => {
+            (await import("./commands.js")).cmdRecruitGreatPerson(player, action);
+            await openMainMenu(player);
+        },
+        async () => { await openMainMenu(player); },
+    );
+}
+
 /** 研究ツリー／社会制度ツリーの共通選択画面。 */
 async function openProgressMenu(player, kind) {
     const state = getProgressState(player, kind);
@@ -2081,7 +2332,7 @@ function openIncomingRequestsMenu(player, allCivs) {
         .body("対応する提案を選択してください。");
 
     requests.forEach(r => {
-        const typeLabel = r.type === "pact" ? "不可侵条約" : "同盟";
+        const typeLabel = getRelationTypeLabel(r.type);
         form.button(`【${r.fromName}】からの${typeLabel}の提案`);
     });
 
@@ -2089,7 +2340,7 @@ function openIncomingRequestsMenu(player, allCivs) {
         if (res.canceled) return;
         const selectedReq = requests[res.selection];
 
-        const typeLabel = selectedReq.type === "pact" ? "不可侵条約" : "同盟";
+        const typeLabel = getRelationTypeLabel(selectedReq.type);
         new MessageFormData()
             .title(`提案の確認: ${selectedReq.fromName}`)
             .body(`【${selectedReq.fromName}】から【${typeLabel}】の提案が届いています。\n承認しますか？`)
@@ -2126,6 +2377,7 @@ function openCivDiplomacyDetail(player, targetCiv, allCivs) {
     const diplomacyEnabled = getMatchSettings().diplomacyEnabled;
     const canProposePact = diplomacyEnabled && hasCompletedProgress(player, "civic", "emissaries");
     const canProposeAlliance = diplomacyEnabled && hasCompletedProgress(player, "civic", "diplomacy");
+    const peaceEnabled = getMatchSettings().peaceEnabled;
 
     let relText = "関係なし";
     if (currentRel === "pact") relText = "不可侵条約 締結中";
@@ -2142,6 +2394,9 @@ function openCivDiplomacyDetail(player, targetCiv, allCivs) {
         if (!canProposePact) body.push("§7※不可侵条約の提案には社会制度「使節団」の取得が必要です");
         if (!canProposeAlliance) body.push("§7※同盟の提案には社会制度「外交」の取得が必要です");
     }
+    if (currentRel === "war" && !peaceEnabled) {
+        body.push("§7※この試合では講和(戦争状態の解消)が無効に設定されています");
+    }
 
     const buttons = [];
     if (currentRel === "none") {
@@ -2154,10 +2409,12 @@ function openCivDiplomacyDetail(player, targetCiv, allCivs) {
         buttons.push({ text: "[Break] 同盟を解消する", action: "break" });
     }
     if (currentRel === "war") {
-        buttons.push({ text: "§a[Peace] 講和する(戦争を終了する)", action: "break" });
+        if (peaceEnabled) buttons.push({ text: "§a[Peace] 講和を提案する(相手の承諾が必要)", action: "proposePeace" });
     } else {
         buttons.push({ text: "§4[War] 宣戦布告する", action: "declareWar" });
     }
+    // 💡 §23参照。関係の種類を問わず(戦争中でも)一方的に贈与できる、相手の承諾を要さない取引。
+    buttons.push({ text: "§6[Gold] ゴールドを贈る", action: "giftgold" });
     if (buttons.length === 0) buttons.push({ text: "閉じる", action: "close" });
 
     const form = new ActionFormData()
@@ -2171,8 +2428,10 @@ function openCivDiplomacyDetail(player, targetCiv, allCivs) {
 
         if (selected === "proposePact") sendDiplomaticProposal(player, targetCiv, "pact");
         if (selected === "proposeAlliance") sendDiplomaticProposal(player, targetCiv, "alliance");
+        if (selected === "proposePeace") sendDiplomaticProposal(player, targetCiv, "peace");
         if (selected === "break") confirmBreakRelation(player, targetCiv);
         if (selected === "declareWar") confirmDeclareWar(player, targetCiv);
+        if (selected === "giftgold") promptGiftGold(player, targetCiv);
     });
 }
 
@@ -2190,19 +2449,17 @@ function sendDiplomaticProposal(player, targetCiv, type) {
     player.sendMessage(res.message);
 }
 
-/** 関係破棄(講和を含む)の確認ダイアログ */
+/** 不可侵条約・同盟の解消・破棄の確認ダイアログ(相手の承諾は不要、即座に反映される)。 */
 function confirmBreakRelation(player, targetCiv) {
     const realPlayer = getRealPlayer(player);
     const currentRel = getRelation(player, targetCiv.id);
-    const isWar = currentRel === "war";
-    const typeLabel = currentRel === "pact" ? "不可侵条約" : currentRel === "alliance" ? "同盟" : "戦争";
-    const actionLabel = isWar ? "講和" : "解消・破棄";
+    const typeLabel = getRelationTypeLabel(currentRel);
 
     new MessageFormData()
-        .title(`確認: ${isWar ? "講和" : `${typeLabel}の解消`}`)
-        .body(`本当に【${targetCiv.name}】と${isWar ? "講和し、戦争を終了" : `の【${typeLabel}】を解消・破棄`}しますか？\nこの操作は即座に反映されます。`)
+        .title(`確認: ${typeLabel}の解消`)
+        .body(`本当に【${targetCiv.name}】との【${typeLabel}】を解消・破棄しますか？\nこの操作は即座に反映されます。`)
         .button1("キャンセル")
-        .button2(`${actionLabel}する`)
+        .button2("解消・破棄する")
         .show(realPlayer)
         .then(res => {
             if (res.selection === 1) {
@@ -2229,6 +2486,22 @@ function confirmDeclareWar(player, targetCiv) {
                 else player.sendMessage(result.message);
             }
         });
+}
+
+/**
+ * 💡 §23参照。他国家へのゴールドの贈与。相手の承諾を要さない一方的な取引で、金額をModalFormで
+ *    入力させてから commands.js の cmdGiftGold を呼ぶ(関係の種類・戦争中かどうかを問わず可能)。
+ */
+async function promptGiftGold(player, targetCiv) {
+    const realPlayer = getRealPlayer(player);
+    const gold = player.getDynamicProperty("strategic_gold") ?? 0;
+    const modal = new ModalFormData()
+        .title(`[Gold] ${targetCiv.name} へゴールドを贈る`)
+        .textField(`金額 (保有: ${gold})`, "例: 50", { defaultValue: "50" });
+    const res = await modal.show(realPlayer);
+    if (res.canceled) return;
+    const [amountStr] = res.formValues;
+    (await import("./commands.js")).cmdGiftGold(player, targetCiv.id, amountStr);
 }
 
 /** 1ページあたりの選択肢の最大数。ボタンが多すぎるとフォームを開く際に重くなる(数秒固まる)ため制限する。 */
@@ -2276,8 +2549,27 @@ async function showPaginatedMenu(realPlayer, title, bodyText, items, onSelect, o
     }
 }
 
-/** 現在位置の戦闘ユニットが移動できるマスを一覧表示する。 */
+/**
+ * プレイヤー個人の設定(UNIT_ACTION_UI_STYLE_KEY、メインメニューの「ユニット操作を〜に
+ * 切り替える」で変更可能)に応じて、文字リスト版(listFn)かモニター風グリッド版(monitorFn)の
+ * どちらを開くかへ振り分ける共通の窓口。戦闘/宗教/航空ユニットの各メニュー関数は
+ * どれもこの振り分けをそのまま使うだけなので、呼び出し元は設定を意識する必要が無い。
+ * extraArgsは航空ユニットのunitIndexなど、(player, fromTx, fromTz)だけでは特定できない
+ * 追加引数をそのままlistFn/monitorFnへ横流しするためのもの。
+ */
+async function dispatchByUnitActionStyle(player, fromTx, fromTz, listFn, monitorFn, ...extraArgs) {
+    const style = getUnitActionUiStyle(getRealPlayer(player));
+    if (style === "monitor") await monitorFn(player, fromTx, fromTz, ...extraArgs);
+    else await listFn(player, fromTx, fromTz, ...extraArgs);
+}
+
+/** 現在位置の戦闘ユニットが移動できるマスを一覧表示する(§7 moveunitアクション、自分の戦闘ユニット一覧からの「移動」)。 */
 async function openCombatUnitMoveMenu(player, fromTx, fromTz) {
+    await dispatchByUnitActionStyle(player, fromTx, fromTz, openCombatUnitMoveMenuList, openCombatUnitMoveMenuMonitor);
+}
+
+/** 現在位置の戦闘ユニットが移動できるマスを一覧表示する(文字リスト版)。 */
+async function openCombatUnitMoveMenuList(player, fromTx, fromTz) {
     const source = getTile(fromTx, fromTz);
     const unit = source?.combatUnit;
     if (!unit || unit.ownerId !== player.id) return;
@@ -2287,44 +2579,31 @@ async function openCombatUnitMoveMenu(player, fromTx, fromTz) {
     const body = [`${unit.label ?? "戦闘ユニット"}  HP: ${unit.hp ?? 0}/${unit.maxHp ?? 100}  戦闘力: ${getEffectiveCombatStrength(unit)}(基本${unit.combatStrength ?? 0})`, `残り移動力: ${remaining}`];
     const config = getMapConfig();
     const tiles = getTiles();
+    const reachable = remaining > 0 && config ? getReachablePositions(unit, fromTx, fromTz, tiles, config, remaining) : new Map();
 
     // 💡 新機能: プレイヤーが今実際に立っているマスへワンタップで移動できる特別な選択肢。
     //    移動先の候補を毎回一覧からスクロールして探さなくても、目的地まで歩いてメニューを
     //    開くだけで移動できる(cmdClaim/cmdSettleと同じ「足元を対象にする」操作感)。
     if (remaining > 0 && config) {
         const { tx: standTx, tz: standTz } = worldToTile(config, Math.floor(player.location.x), Math.floor(player.location.z));
-        if (standTx !== fromTx || standTz !== fromTz) {
-            const standDistance = Math.max(Math.abs(standTx - fromTx), Math.abs(standTz - fromTz));
+        if ((standTx !== fromTx || standTz !== fromTz) && reachable.has(`${standTx},${standTz}`)) {
             const standTile = tiles[`${standTx},${standTz}`];
-            const canStandMove = standDistance >= 1 && standDistance <= remaining
-                && standTx >= 0 && standTz >= 0 && standTx < config.width && standTz < config.height
-                && standTile && !standTile.combatUnit && canUnitEnterTile(unit, standTile)
-                && canTravelPath(unit, fromTx, fromTz, standTx, standTz, tiles);
-            if (canStandMove) {
-                const cityText = standTile.city ? ` | 都市: ${standTile.city.name}` : "";
-                items.push({ text: `§a[Here] 今いる場所へ移動 (${standTx}, ${standTz})${cityText}`, action: { tx: standTx, tz: standTz } });
-            }
+            const cityText = standTile.city ? ` | 都市: ${standTile.city.name}` : "";
+            items.push({ text: `§a[Here] 今いる場所へ移動 (${standTx}, ${standTz})${cityText}`, action: { tx: standTx, tz: standTz } });
         }
     }
 
     if (remaining > 0 && config) {
-        for (let dz = -remaining; dz <= remaining; dz++) {
-            for (let dx = -remaining; dx <= remaining; dx++) {
-                const distance = Math.max(Math.abs(dx), Math.abs(dz));
-                if (distance === 0 || distance > remaining) continue;
-                const tx = fromTx + dx;
-                const tz = fromTz + dz;
-                if (tx < 0 || tz < 0 || tx >= config.width || tz >= config.height) continue;
-
-                const tile = tiles[`${tx},${tz}`];
-                if (!tile || tile.combatUnit) continue;
-                if (!canUnitEnterTile(unit, tile)) continue;
-                if (!canTravelPath(unit, fromTx, fromTz, tx, tz, tiles)) continue;
-                const cityText = tile.city
-                    ? ` | 都市: ${tile.city.name} (人口:${tile.city.population}/${tile.city.housing})`
-                    : "";
-                items.push({ text: `(${tx}, ${tz})${cityText}`, action: { tx, tz } });
-            }
+        const destinations = [...reachable.keys()].map(key => {
+            const [tx, tz] = key.split(",").map(Number);
+            return { tx, tz };
+        }).sort((a, b) => (a.tz - b.tz) || (a.tx - b.tx));
+        for (const { tx, tz } of destinations) {
+            const tile = tiles[`${tx},${tz}`];
+            const cityText = tile.city
+                ? ` | 都市: ${tile.city.name} (人口:${tile.city.population}/${tile.city.housing})`
+                : "";
+            items.push({ text: `(${tx}, ${tz})${cityText}`, action: { tx, tz } });
         }
     } else {
         body.push("§7移動力が残っていません。次の自分のターン開始時に回復します。");
@@ -2338,17 +2617,167 @@ async function openCombatUnitMoveMenu(player, fromTx, fromTz) {
         body.join("\n"),
         items,
         async (action) => {
-            (await import("./commands.js")).cmdMoveCombatUnit(player, fromTx, fromTz, action.tx, action.tz);
+            await (await import("./commands.js")).cmdMoveCombatUnit(player, fromTx, fromTz, action.tx, action.tz);
         },
         async () => { await openMainMenu(player); },
     );
 }
 
+// 💡 ユニットの移動・攻撃(戦闘/宗教どちらも)で共通の「周囲をモニター風グリッドで表示し、
+//    特定条件を満たすマスだけ専用マーカーで選べるようにする」ピッカーの土台。最終行
+//    (UNIT_PICKER_CONTROL_ROW)を移動ボタン専用に確保するため、タイル表示に使えるのは
+//    UNIT_PICKER_TILE_ROWS行ぶんだけ。列はmapMonitor.jsのメイン画面と違い見出し列を
+//    持たないため、MONITOR_COLS(15、奇数)をそのまま使える。15は9マスの十字クラスタと
+//    同じ奇数なので、真ん中(列7)にぴったり対称配置できる。
+const UNIT_PICKER_TILE_ROWS = MONITOR_ROWS - 1;
+const UNIT_PICKER_CONTROL_ROW = MONITOR_ROWS - 1;
+const UNIT_PICKER_CONTROL_HELP_COL = 0;
+const UNIT_PICKER_CONTROL_WEST_COL = 2;
+const UNIT_PICKER_CONTROL_NORTH_COL = 5;
+const UNIT_PICKER_CONTROL_SOUTH_COL = MONITOR_COLS - 1 - 5;
+const UNIT_PICKER_CONTROL_EAST_COL = MONITOR_COLS - 1 - 2;
+const UNIT_PICKER_CONTROL_CLOSE_COL = MONITOR_COLS - 1;
+
 /**
- * 現在位置の戦闘ユニットが攻撃できるマス(攻撃距離内に敵ユニットがいるマス)だけを一覧表示する。
- * 攻撃距離は移動タブと同じ考え方(マス目の最大差)で、移動力(または明示的な攻撃距離)ぶんの範囲。
+ * 表示範囲を「centerTx/centerTzを中心に据えつつ、マップ端ではみ出さないようclampする」方式
+ * (mapMonitor.jsのgetMonitorViewportと同じ考え方)で導出する。単純に中心の位置だけを
+ * 基準にすると、マップ端付近では表示範囲がマップ外へはみ出してその分空白になり、結果的に
+ * 対象がグリッドの隅に偏って見えてしまうため。
+ */
+function getUnitPickerViewport(config, centerTx, centerTz, viewTx, viewTz) {
+    const cols = Math.min(MONITOR_COLS, config.width);
+    const rows = Math.min(UNIT_PICKER_TILE_ROWS, config.height);
+    const maxTx = Math.max(0, config.width - cols);
+    const maxTz = Math.max(0, config.height - rows);
+    const defaultTx = centerTx - Math.floor(cols / 2);
+    const defaultTz = centerTz - Math.floor(rows / 2);
+    const viewStartTx = Math.max(0, Math.min(maxTx, viewTx ?? defaultTx));
+    const viewStartTz = Math.max(0, Math.min(maxTz, viewTz ?? defaultTz));
+    return { cols, rows, viewStartTx, viewStartTz };
+}
+
+/**
+ * ユニットの移動・攻撃(戦闘/宗教どちらも)共通のモニター風ピッカー。centerTx/centerTzを
+ * 中心とした範囲を表示し、resolveMarker(tx, tz, tile)が値を返したマスだけ専用マーカーで
+ * 選べるようにする(nullを返したマスはmapMonitor.jsのdescribeMonitorTileで通常の
+ * 勢力図と同じ見た目になる)。最終行に西・北・南・東の移動ボタン(mapMonitor.jsの
+ * openMapMonitorMenuと同じ、押すたびに表示範囲を1画面ぶんずらして開き直す方式)を置き、
+ * 攻撃距離・移動力が届く範囲がグリッドに収まりきらない場合でも見て回れるようにしてある。
+ * 選択可能なマスを選ぶとonSelect(tx, tz)を呼ぶ。それ以外の選択(選択不可のマスや使い方欄)は
+ * 同じ範囲を再表示するだけ、閉じるボタンとキャンセルは素直に閉じる。
+ * @param {string} title
+ * @param {number} centerTx
+ * @param {number} centerTz
+ * @param {(tx: number, tz: number, tile: object) => ({icon: string, name: string, lore?: string[]}|null)} resolveMarker
+ * @param {(tx: number, tz: number) => Promise<void>} onSelect
+ * @param {string[]} usageLore 使い方欄のロア(マーカーの色の意味などをここで説明する)
+ * @param {number} [viewTx]
+ * @param {number} [viewTz]
+ */
+async function openUnitPickerMonitor(player, title, centerTx, centerTz, resolveMarker, onSelect, usageLore, viewTx, viewTz) {
+    const realPlayer = getRealPlayer(player);
+    const config = getMapConfig();
+    if (!config) { await openMainMenu(player); return; }
+    const tiles = getTiles();
+
+    const { cols, rows, viewStartTx, viewStartTz } = getUnitPickerViewport(config, centerTx, centerTz, viewTx, viewTz);
+
+    const monitor = new MonitorFormData().title(title);
+    // slot番号 → 選択可能だったマスのtx/tz。選択結果がこのマスだった場合のみonSelectを呼ぶ。
+    const selectableBySlot = new Map();
+    for (let row = 0; row < rows; row++) {
+        const tz = viewStartTz + row;
+        for (let col = 0; col < cols; col++) {
+            const tx = viewStartTx + col;
+            const tile = tiles[`${tx},${tz}`];
+            if (!tile) continue;
+
+            const slot = row * MONITOR_COLS + col;
+            const marker = resolveMarker(tx, tz, tile);
+            if (marker) {
+                monitor.cell(slot, marker.name, marker.lore, marker.icon);
+                selectableBySlot.set(slot, { tx, tz });
+            } else {
+                const { icon, name, lore } = describeMonitorTile({ ...tile, tx, tz });
+                monitor.cell(slot, name, lore, icon);
+            }
+        }
+    }
+
+    const b = UNIT_PICKER_CONTROL_ROW * MONITOR_COLS;
+    monitor.cell(b + UNIT_PICKER_CONTROL_HELP_COL, "§e使い方", usageLore, "minecraft:book");
+    monitor.cell(b + UNIT_PICKER_CONTROL_WEST_COL, "§b◀ 西へ移動", null, "textures/ui/monitor/arrow_left");
+    monitor.cell(b + UNIT_PICKER_CONTROL_NORTH_COL, "§b▲ 北へ移動", null, "textures/ui/monitor/arrow_up");
+    monitor.cell(b + UNIT_PICKER_CONTROL_SOUTH_COL, "§b▼ 南へ移動", null, "textures/ui/monitor/arrow_down");
+    monitor.cell(b + UNIT_PICKER_CONTROL_EAST_COL, "§b▶ 東へ移動", null, "textures/ui/monitor/arrow_right");
+    monitor.cell(b + UNIT_PICKER_CONTROL_CLOSE_COL, "§c閉じる", null, "minecraft:barrier");
+
+    const res = await monitor.show(realPlayer);
+    if (res.canceled || res.selection === undefined) return;
+
+    const selRow = Math.floor(res.selection / MONITOR_COLS);
+    const selCol = res.selection % MONITOR_COLS;
+    if (selRow === UNIT_PICKER_CONTROL_ROW) {
+        switch (selCol) {
+            case UNIT_PICKER_CONTROL_WEST_COL: await openUnitPickerMonitor(player, title, centerTx, centerTz, resolveMarker, onSelect, usageLore, viewStartTx - cols, viewStartTz); return;
+            case UNIT_PICKER_CONTROL_NORTH_COL: await openUnitPickerMonitor(player, title, centerTx, centerTz, resolveMarker, onSelect, usageLore, viewStartTx, viewStartTz - rows); return;
+            case UNIT_PICKER_CONTROL_SOUTH_COL: await openUnitPickerMonitor(player, title, centerTx, centerTz, resolveMarker, onSelect, usageLore, viewStartTx, viewStartTz + rows); return;
+            case UNIT_PICKER_CONTROL_EAST_COL: await openUnitPickerMonitor(player, title, centerTx, centerTz, resolveMarker, onSelect, usageLore, viewStartTx + cols, viewStartTz); return;
+            case UNIT_PICKER_CONTROL_CLOSE_COL: return; // 閉じる
+        }
+        await openUnitPickerMonitor(player, title, centerTx, centerTz, resolveMarker, onSelect, usageLore, viewStartTx, viewStartTz); // 使い方欄をタップした場合は同じ範囲を再表示
+        return;
+    }
+
+    const target = selectableBySlot.get(res.selection);
+    if (target) await onSelect(target.tx, target.tz);
+    else await openUnitPickerMonitor(player, title, centerTx, centerTz, resolveMarker, onSelect, usageLore, viewStartTx, viewStartTz); // 選択不可のマスをタップした場合は同じ範囲を再表示
+}
+
+/**
+ * 現在位置の戦闘ユニットが移動できるマスを、openUnitPickerMonitorを使ったグリッド画面から
+ * 選ぶ(モニター版)。移動可能なマスは専用のマーカーテクスチャ(move_reachable、
+ * 白枠+ミント色)で強調し、選ぶとその場でcmdMoveCombatUnitを呼ぶ。
+ */
+async function openCombatUnitMoveMenuMonitor(player, fromTx, fromTz) {
+    const source = getTile(fromTx, fromTz);
+    const unit = source?.combatUnit;
+    if (!unit || unit.ownerId !== player.id) return;
+
+    const remaining = unit.movementRemaining ?? unit.movement ?? 0;
+    const tiles = getTiles();
+    const config = getMapConfig();
+    const title = `[Warrior] 移動 - ${unit.label ?? "戦闘ユニット"} (残り移動力 ${remaining})`;
+    const reachable = remaining > 0 && config ? getReachablePositions(unit, fromTx, fromTz, tiles, config, remaining) : new Map();
+
+    const resolveMarker = (tx, tz, tile) => {
+        const cost = reachable.get(`${tx},${tz}`);
+        if (cost === undefined) return null;
+        const cityText = tile.city ? ` | 都市: ${tile.city.name} (人口:${tile.city.population}/${tile.city.housing})` : "";
+        return { icon: "textures/ui/monitor/move_reachable", name: `§a[Here] ここへ移動 (${tx}, ${tz})${cityText}`, lore: [`§7消費移動力: ${cost}`] };
+    };
+    const onSelect = async (tx, tz) => { await (await import("./commands.js")).cmdMoveCombatUnit(player, fromTx, fromTz, tx, tz); };
+
+    await openUnitPickerMonitor(player, title, fromTx, fromTz, resolveMarker, onSelect, [
+        "§7矢印ボタンで表示範囲を移動できます。",
+        "§7ミント色のマスが移動可能な範囲です。",
+    ]);
+}
+
+/**
+ * 現在位置の戦闘ユニットが攻撃できるマスを表示する。openCombatUnitMoveMenuと同じく、
+ * プレイヤー個人の設定(UNIT_ACTION_UI_STYLE_KEY)で文字リスト版/モニター版を振り分ける窓口。
  */
 async function openCombatUnitAttackMenu(player, fromTx, fromTz) {
+    await dispatchByUnitActionStyle(player, fromTx, fromTz, openCombatUnitAttackMenuList, openCombatUnitAttackMenuMonitor);
+}
+
+/**
+ * 現在位置の戦闘ユニットが攻撃できるマス(攻撃距離内に敵ユニットがいるマス)だけを一覧表示する
+ * (文字リスト版)。攻撃距離は移動タブと同じ考え方(マス目の最大差)で、移動力(または明示的な
+ * 攻撃距離)ぶんの範囲。
+ */
+async function openCombatUnitAttackMenuList(player, fromTx, fromTz) {
     const source = getTile(fromTx, fromTz);
     const unit = source?.combatUnit;
     if (!unit || unit.ownerId !== player.id) return;
@@ -2402,6 +2831,67 @@ async function openCombatUnitAttackMenu(player, fromTx, fromTz) {
         },
         async () => { await openMainMenu(player); },
     );
+}
+
+/**
+ * 現在位置の戦闘ユニットが攻撃できるマスを、openUnitPickerMonitorを使ったグリッド画面から
+ * 選ぶ(モニター版)。攻撃可能なマス(敵ユニット・敵都市)は専用のマーカーテクスチャ
+ * (attack_target、白枠+赤色。移動先マーカーのmove_reachableと対になる色)で強調し、
+ * 選ぶとその場でcmdAttackCombatUnit/cmdAttackCityを呼ぶ。
+ */
+async function openCombatUnitAttackMenuMonitor(player, fromTx, fromTz) {
+    const source = getTile(fromTx, fromTz);
+    const unit = source?.combatUnit;
+    if (!unit || unit.ownerId !== player.id) return;
+
+    const remaining = unit.movementRemaining ?? unit.movement ?? 0;
+    const range = getAttackRange(unit);
+    const config = getMapConfig();
+    const tiles = getTiles();
+    const title = `[Warrior] 攻撃 - ${unit.label ?? "戦闘ユニット"} (攻撃距離 ${range})`;
+
+    // 💡 tx,tz → 攻撃対象の情報(種別と、マーカー表示に使う中身)。選択時にどちらのコマンドを
+    //    呼ぶか(cmdAttackCity/cmdAttackCombatUnit)の判定にも使う。
+    const targetsByKey = new Map();
+    if (remaining > 0) {
+        const hasAgreementFn = (a, b) => !isAtWar(a, b);
+        for (const t of getAttackableTargets(fromTx, fromTz, player.id, unit, tiles, config, hasAgreementFn)) {
+            targetsByKey.set(`${t.tx},${t.tz}`, { type: "unit", unit: t.unit });
+        }
+        for (const t of getAttackableCityTargets(fromTx, fromTz, player.id, unit, tiles, config, hasAgreementFn)) {
+            targetsByKey.set(`${t.tx},${t.tz}`, { type: "city", city: t.city });
+        }
+    }
+
+    const resolveMarker = (tx, tz) => {
+        const info = targetsByKey.get(`${tx},${tz}`);
+        if (!info) return null;
+        if (info.type === "city") {
+            const wallText = info.city.wall ? ` §b[Wall]${Math.max(0, Math.round(info.city.wallHp ?? WALL_MAX_HP))}/${WALL_MAX_HP}` : "";
+            return {
+                icon: "textures/ui/monitor/attack_target",
+                name: `§c[Siege] 攻撃: 都市【${info.city.name}】`,
+                lore: [`§7HP: ${Math.max(0, Math.round(info.city.hp ?? CITY_MAX_HP))}/${CITY_MAX_HP}${wallText}`],
+            };
+        }
+        const enemyUnit = info.unit;
+        return {
+            icon: "textures/ui/monitor/attack_target",
+            name: `§c[Combat] 攻撃: ${enemyUnit.label ?? enemyUnit.id}(${getUnitClassLabel(enemyUnit.unitClass)})`,
+            lore: [`§7HP: ${Math.max(0, Math.round(enemyUnit.hp ?? 0))}/${enemyUnit.maxHp ?? 100} 戦闘力: ${getEffectiveCombatStrength(enemyUnit)}`],
+        };
+    };
+    const onSelect = async (tx, tz) => {
+        const info = targetsByKey.get(`${tx},${tz}`);
+        const commands = await import("./commands.js");
+        if (info?.type === "city") commands.cmdAttackCity(player, fromTx, fromTz, tx, tz);
+        else commands.cmdAttackCombatUnit(player, fromTx, fromTz, tx, tz);
+    };
+
+    await openUnitPickerMonitor(player, title, fromTx, fromTz, resolveMarker, onSelect, [
+        "§7矢印ボタンで表示範囲を移動できます。",
+        "§7赤色のマスが攻撃可能な対象(敵ユニット・敵都市)です。",
+    ]);
 }
 
 /** [Siege] 防壁を持つ都市の遠距離攻撃メニュー。範囲内(CITY_RANGED_ATTACK_RANGE)の敵ユニットを一覧表示する。 */
@@ -2521,6 +3011,368 @@ async function openUnitActionMenu(player, tx, tz) {
     else await openMyUnitsMenu(player);
 }
 
+// ==================== §航空戦: 航空ユニットのUI ====================
+// 航空ユニットは陸海軍と違ってマス上を移動しないため、myunits/openUnitActionMenuとは別系統の
+// メニュー群にする。ここでの「拠点」は都心タイル(tx,tz)+その航空基地内でのユニット番号
+// (index、city.airbase.unitsの配列インデックス)の組で1機を指す。
+
+const AIR_ROLE_LABELS = { recon: "支援偵察機", defense: "支援防御機", fighter: "戦闘機", bomber: "戦略爆撃機" };
+
+/**
+ * ⚔ §航空戦。自分が航空基地に配置している航空ユニットの一覧を表示する(全都市ぶんまとめて)。
+ * openMyUnitsMenuと同じく、そのユニットの拠点にいなくてもここから直接操作メニューを開ける
+ * (航空ユニットはそもそも拠点から動かないため、その場にいる必要はなおさら無い)。
+ */
+async function openAirbaseUnitsMenu(player) {
+    const config = getMapConfig();
+    const tiles = config ? getTiles() : {};
+
+    const myUnits = [];
+    const cityCapacities = [];
+    for (const key in tiles) {
+        const tile = tiles[key];
+        if (!tile.city || tile.ownerId !== player.id) continue;
+        const [txStr, tzStr] = key.split(",");
+        const tx = Number(txStr), tz = Number(tzStr);
+        const basedUnits = getBasedAirUnits(tile.city);
+        basedUnits.forEach((unit, index) => {
+            if (unit.ownerId === player.id) myUnits.push({ tx, tz, unit, index, city: tile.city });
+        });
+        cityCapacities.push({ tx, tz, name: tile.city.name, used: basedUnits.length, capacity: getAirbaseCapacity(tile.city, key, tiles) });
+    }
+
+    const body = [`§f配置中の航空ユニット: §b${myUnits.length} 機`, "§f都市ごとの航空基地 空き枠:"];
+    for (const c of cityCapacities) body.push(`§7・(${c.tx}, ${c.tz})【${c.name}】: §b${c.used}/${c.capacity}`);
+    body.push("");
+    const items = [];
+    for (const entry of myUnits) {
+        const unit = entry.unit;
+        const roleLabel = AIR_ROLE_LABELS[unit.airRole] ?? unit.airRole ?? "航空";
+        const patrolText = unit.patrol ? " §b[Patrol]哨戒中" : "";
+        const actedText = unit.actedThisTurn ? " §7(行動済み)" : "";
+        items.push({
+            text: `${unit.label ?? roleLabel} (拠点:${entry.tx},${entry.tz}【${entry.city.name}】) HP:${Math.max(0, Math.round(unit.hp ?? 0))}/${unit.maxHp ?? 100}${patrolText}${actedText}`,
+            action: { tx: entry.tx, tz: entry.tz, index: entry.index },
+        });
+    }
+    if (myUnits.length === 0) body.push("§7現在、航空基地に配置している航空ユニットはいません。都心には常に1枠あります(飛行場・滑走路でさらに拡張可能)。");
+
+    await showPaginatedMenu(
+        getRealPlayer(player),
+        "[Airbase] 航空部隊一覧",
+        body.join("\n"),
+        items,
+        async (action) => { await openAirUnitActionMenu(player, action.tx, action.tz, action.index); },
+        async () => { await openMainMenu(player); },
+    );
+}
+
+/** 一覧から選んだ航空ユニットに対して「出撃/略奪/哨戒/移設」を選べるアクションメニュー。 */
+async function openAirUnitActionMenu(player, baseTx, baseTz, unitIndex) {
+    const tile = getTile(baseTx, baseTz);
+    const unit = getBasedAirUnits(tile?.city)[unitIndex];
+    if (!unit || unit.ownerId !== player.id) { await openAirbaseUnitsMenu(player); return; }
+
+    const roleLabel = AIR_ROLE_LABELS[unit.airRole] ?? unit.airRole ?? "航空";
+    const canPatrol = canAirUnitPatrol(unit);
+    const body = [
+        `${unit.label ?? roleLabel}  拠点: (${baseTx}, ${baseTz})【${tile.city.name}】`,
+        `HP: ${Math.max(0, Math.round(unit.hp ?? 0))}/${unit.maxHp ?? 100}  遠距離戦闘力: ${unit.rangedCombatStrength ?? 0}  近距離戦闘力: ${unit.meleeCombatStrength ?? 0}`,
+        canPatrol ? `迎撃戦闘力: ${unit.interceptCombatStrength}${unit.patrol ? " §b[Patrol]哨戒中" : ""}` : "§7このユニットは哨戒できません。",
+        `攻撃距離: ${getAttackRange(unit)} | 航続距離: ${unit.movement ?? 0} | 今ターン: ${unit.actedThisTurn ? "§7行動済み" : "§a未行動"}`,
+    ];
+
+    const buttons = [];
+    if (!unit.actedThisTurn) buttons.push({ text: "§c[Airstrike] 出撃(攻撃)", action: "strike" });
+    if (unit.airRole === "bomber" && !unit.actedThisTurn) buttons.push({ text: "§c[Pillage] 略奪", action: "pillage" });
+    if (canPatrol) buttons.push({ text: unit.patrol ? "§b[Patrol] 哨戒を解除する" : "§b[Patrol] 哨戒を開始する", action: "patrol" });
+    if (!unit.actedThisTurn) buttons.push({ text: "§e[Rebase] 別の航空基地へ移設する", action: "rebase" });
+    buttons.push({ text: "戻る", action: null });
+
+    const form = new ActionFormData().title(unit.label ?? roleLabel).body(body.join("\n"));
+    for (const btn of buttons) form.button(btn.text);
+    const result = await form.show(getRealPlayer(player));
+    if (result.canceled || result.selection === undefined) return;
+    const action = buttons[result.selection]?.action;
+
+    if (action === "strike") await openAirStrikeMenu(player, baseTx, baseTz, unitIndex);
+    else if (action === "pillage") await openAirPillageMenu(player, baseTx, baseTz, unitIndex);
+    else if (action === "patrol") {
+        (await import("./commands.js")).cmdSetAirPatrol(player, baseTx, baseTz, unitIndex, !unit.patrol);
+        await openAirUnitActionMenu(player, baseTx, baseTz, unitIndex);
+    } else if (action === "rebase") await openAirRebaseMenu(player, baseTx, baseTz, unitIndex);
+    else await openAirbaseUnitsMenu(player);
+}
+
+/**
+ * 出撃(攻撃)先を選ぶメニュー。戦闘/宗教ユニットの移動・攻撃と同じく、プレイヤー個人の設定
+ * (UNIT_ACTION_UI_STYLE_KEY)で文字リスト版/モニター版を振り分ける窓口。
+ */
+async function openAirStrikeMenu(player, baseTx, baseTz, unitIndex) {
+    await dispatchByUnitActionStyle(player, baseTx, baseTz, openAirStrikeMenuList, openAirStrikeMenuMonitor, unitIndex);
+}
+
+/** 出撃(攻撃)先を、拠点から攻撃距離内の敵ユニット/敵都市の一覧から選ぶ(文字リスト版)。 */
+async function openAirStrikeMenuList(player, baseTx, baseTz, unitIndex) {
+    const tile = getTile(baseTx, baseTz);
+    const unit = getBasedAirUnits(tile?.city)[unitIndex];
+    if (!unit || unit.ownerId !== player.id) { await openAirbaseUnitsMenu(player); return; }
+
+    const config = getMapConfig();
+    const tiles = getTiles();
+    const hasAgreementFn = (a, b) => !isAtWar(a, b);
+    const items = [];
+    for (const t of getAttackableTargets(baseTx, baseTz, player.id, unit, tiles, config, hasAgreementFn)) {
+        const enemyUnit = t.unit;
+        items.push({
+            text: `[Combat] (${t.tx}, ${t.tz}) | ${enemyUnit.label ?? enemyUnit.id} HP:${Math.max(0, Math.round(enemyUnit.hp ?? 0))}/${enemyUnit.maxHp ?? 100}`,
+            action: { tx: t.tx, tz: t.tz },
+        });
+    }
+    for (const t of getAttackableCityTargets(baseTx, baseTz, player.id, unit, tiles, config, hasAgreementFn)) {
+        const wallText = t.city.wall ? ` §b[Wall]${Math.max(0, Math.round(t.city.wallHp ?? WALL_MAX_HP))}/${WALL_MAX_HP}` : "";
+        items.push({
+            text: `[Siege] (${t.tx}, ${t.tz}) | 都市【${t.city.name}】 HP:${Math.max(0, Math.round(t.city.hp ?? CITY_MAX_HP))}/${CITY_MAX_HP}${wallText}`,
+            action: { tx: t.tx, tz: t.tz },
+        });
+    }
+
+    const body = [`${unit.label ?? "航空ユニット"} の出撃可能な対象(攻撃距離: ${getAttackRange(unit)})`];
+    if (items.length === 0) body.push("§7攻撃可能な対象(攻撃距離内の敵ユニット・敵都市)がありません。");
+
+    await showPaginatedMenu(
+        getRealPlayer(player),
+        "[Airstrike] 出撃先を選択",
+        body.join("\n"),
+        items,
+        async (action) => { (await import("./commands.js")).cmdAirStrike(player, baseTx, baseTz, unitIndex, action.tx, action.tz); },
+        async () => { await openAirUnitActionMenu(player, baseTx, baseTz, unitIndex); },
+    );
+}
+
+/**
+ * 出撃(攻撃)先を、openUnitPickerMonitorを使ったグリッド画面から選ぶ(モニター版)。
+ * 攻撃可能なマス(敵ユニット・敵都市)はopenCombatUnitAttackMenuMonitorと同じattack_target
+ * マーカー(白枠+赤色)で強調し、選ぶとその場でcmdAirStrikeを呼ぶ。
+ */
+async function openAirStrikeMenuMonitor(player, baseTx, baseTz, unitIndex) {
+    const tile = getTile(baseTx, baseTz);
+    const unit = getBasedAirUnits(tile?.city)[unitIndex];
+    if (!unit || unit.ownerId !== player.id) { await openAirbaseUnitsMenu(player); return; }
+
+    const config = getMapConfig();
+    const tiles = getTiles();
+    const hasAgreementFn = (a, b) => !isAtWar(a, b);
+    const title = `[Airstrike] 出撃先を選択 - ${unit.label ?? "航空ユニット"} (攻撃距離 ${getAttackRange(unit)})`;
+
+    const targetsByKey = new Map();
+    for (const t of getAttackableTargets(baseTx, baseTz, player.id, unit, tiles, config, hasAgreementFn)) {
+        targetsByKey.set(`${t.tx},${t.tz}`, { type: "unit", unit: t.unit });
+    }
+    for (const t of getAttackableCityTargets(baseTx, baseTz, player.id, unit, tiles, config, hasAgreementFn)) {
+        targetsByKey.set(`${t.tx},${t.tz}`, { type: "city", city: t.city });
+    }
+
+    const resolveMarker = (tx, tz) => {
+        const info = targetsByKey.get(`${tx},${tz}`);
+        if (!info) return null;
+        if (info.type === "city") {
+            const wallText = info.city.wall ? ` §b[Wall]${Math.max(0, Math.round(info.city.wallHp ?? WALL_MAX_HP))}/${WALL_MAX_HP}` : "";
+            return {
+                icon: "textures/ui/monitor/attack_target",
+                name: `§c[Siege] 出撃: 都市【${info.city.name}】`,
+                lore: [`§7HP: ${Math.max(0, Math.round(info.city.hp ?? CITY_MAX_HP))}/${CITY_MAX_HP}${wallText}`],
+            };
+        }
+        const enemyUnit = info.unit;
+        return {
+            icon: "textures/ui/monitor/attack_target",
+            name: `§c[Combat] 出撃: ${enemyUnit.label ?? enemyUnit.id}`,
+            lore: [`§7HP: ${Math.max(0, Math.round(enemyUnit.hp ?? 0))}/${enemyUnit.maxHp ?? 100}`],
+        };
+    };
+    const onSelect = async (tx, tz) => { (await import("./commands.js")).cmdAirStrike(player, baseTx, baseTz, unitIndex, tx, tz); };
+
+    await openUnitPickerMonitor(player, title, baseTx, baseTz, resolveMarker, onSelect, [
+        "§7矢印ボタンで表示範囲を移動できます。",
+        "§7赤色のマスが出撃可能な対象(敵ユニット・敵都市)です。",
+    ]);
+}
+
+/**
+ * 略奪先を選ぶメニュー。戦闘/宗教ユニットの移動・攻撃と同じく、プレイヤー個人の設定
+ * (UNIT_ACTION_UI_STYLE_KEY)で文字リスト版/モニター版を振り分ける窓口。
+ */
+async function openAirPillageMenu(player, baseTx, baseTz, unitIndex) {
+    await dispatchByUnitActionStyle(player, baseTx, baseTz, openAirPillageMenuList, openAirPillageMenuMonitor, unitIndex);
+}
+
+/**
+ * 拠点から攻撃距離内にある敵国の施設/完成済み区域を、その場で全走査して列挙する共通ロジック
+ * (文字リスト版・モニター版どちらからも呼ぶ)。
+ */
+function findPillageTargets(player, baseTx, baseTz, range, config, tiles) {
+    const targets = [];
+    if (!config) return targets;
+    for (let dz = -range; dz <= range; dz++) {
+        for (let dx = -range; dx <= range; dx++) {
+            const distance = Math.max(Math.abs(dx), Math.abs(dz));
+            if (distance === 0 || distance > range) continue;
+            const tx = baseTx + dx, tz = baseTz + dz;
+            if (tx < 0 || tz < 0 || tx >= config.width || tz >= config.height) continue;
+            const t = tiles[`${tx},${tz}`];
+            if (!t || !t.ownerId || t.ownerId === player.id || !isAtWar(player.id, t.ownerId)) continue;
+            if (t.facility) targets.push({ tx, tz, label: `施設「${t.facility.label ?? "施設"}」` });
+            else if (t.district && !t.underDistrictConstruction) targets.push({ tx, tz, label: `区域「${t.district.label ?? "区域"}」` });
+        }
+    }
+    return targets;
+}
+
+/** 略奪先を、拠点から攻撃距離内にある敵国の施設/完成済み区域の一覧から選ぶ(戦略爆撃機のみ、文字リスト版)。 */
+async function openAirPillageMenuList(player, baseTx, baseTz, unitIndex) {
+    const tile = getTile(baseTx, baseTz);
+    const unit = getBasedAirUnits(tile?.city)[unitIndex];
+    if (!unit || unit.ownerId !== player.id) { await openAirbaseUnitsMenu(player); return; }
+
+    const config = getMapConfig();
+    const tiles = getTiles();
+    const range = getAttackRange(unit);
+    const items = findPillageTargets(player, baseTx, baseTz, range, config, tiles)
+        .map(t => ({ text: `[Pillage] (${t.tx}, ${t.tz}) | ${t.label}`, action: { tx: t.tx, tz: t.tz } }));
+
+    const body = [
+        `${unit.label ?? "戦略爆撃機"} の略奪可能な対象(攻撃距離: ${range})`,
+        `§7HP: ${Math.max(0, Math.round(unit.hp ?? 0))}/${unit.maxHp ?? 100}(略奪には最大値の${Math.round(PILLAGE_MIN_HP_RATIO * 100)}%以上が必要)`,
+    ];
+    if (items.length === 0) body.push("§7略奪可能な対象(敵国の施設・完成済み区域)がありません。");
+
+    await showPaginatedMenu(
+        getRealPlayer(player),
+        "[Pillage] 略奪先を選択",
+        body.join("\n"),
+        items,
+        async (action) => { (await import("./commands.js")).cmdAirPillage(player, baseTx, baseTz, unitIndex, action.tx, action.tz); },
+        async () => { await openAirUnitActionMenu(player, baseTx, baseTz, unitIndex); },
+    );
+}
+
+/**
+ * 略奪先を、openUnitPickerMonitorを使ったグリッド画面から選ぶ(モニター版)。
+ * 略奪可能なマス(敵国の施設・完成済み区域)はattack_targetマーカーで強調し、
+ * 選ぶとその場でcmdAirPillageを呼ぶ。
+ */
+async function openAirPillageMenuMonitor(player, baseTx, baseTz, unitIndex) {
+    const tile = getTile(baseTx, baseTz);
+    const unit = getBasedAirUnits(tile?.city)[unitIndex];
+    if (!unit || unit.ownerId !== player.id) { await openAirbaseUnitsMenu(player); return; }
+
+    const config = getMapConfig();
+    const tiles = getTiles();
+    const range = getAttackRange(unit);
+    const title = `[Pillage] 略奪先を選択 - ${unit.label ?? "戦略爆撃機"} (攻撃距離 ${range})`;
+
+    const targetsByKey = new Map();
+    for (const t of findPillageTargets(player, baseTx, baseTz, range, config, tiles)) {
+        targetsByKey.set(`${t.tx},${t.tz}`, t);
+    }
+
+    const resolveMarker = (tx, tz) => {
+        const info = targetsByKey.get(`${tx},${tz}`);
+        if (!info) return null;
+        return { icon: "textures/ui/monitor/attack_target", name: `§c[Pillage] 略奪: ${info.label}`, lore: null };
+    };
+    const onSelect = async (tx, tz) => { (await import("./commands.js")).cmdAirPillage(player, baseTx, baseTz, unitIndex, tx, tz); };
+
+    await openUnitPickerMonitor(player, title, baseTx, baseTz, resolveMarker, onSelect, [
+        "§7矢印ボタンで表示範囲を移動できます。",
+        "§7赤色のマスが略奪可能な対象(敵国の施設・完成済み区域)です。",
+        `§7HP: ${Math.max(0, Math.round(unit.hp ?? 0))}/${unit.maxHp ?? 100}(略奪には最大値の${Math.round(PILLAGE_MIN_HP_RATIO * 100)}%以上が必要)`,
+    ]);
+}
+
+/**
+ * 移設先を選ぶメニュー。戦闘/宗教ユニットの移動・攻撃と同じく、プレイヤー個人の設定
+ * (UNIT_ACTION_UI_STYLE_KEY)で文字リスト版/モニター版を振り分ける窓口。
+ */
+async function openAirRebaseMenu(player, baseTx, baseTz, unitIndex) {
+    await dispatchByUnitActionStyle(player, baseTx, baseTz, openAirRebaseMenuList, openAirRebaseMenuMonitor, unitIndex);
+}
+
+/** 移設先を、航続距離内かつ空き枠のある自国都市の一覧から選ぶ(文字リスト版)。 */
+async function openAirRebaseMenuList(player, baseTx, baseTz, unitIndex) {
+    const tile = getTile(baseTx, baseTz);
+    const unit = getBasedAirUnits(tile?.city)[unitIndex];
+    if (!unit || unit.ownerId !== player.id) { await openAirbaseUnitsMenu(player); return; }
+
+    const tiles = getTiles();
+    const items = [];
+    for (const key in tiles) {
+        const t = tiles[key];
+        if (!t.city || t.ownerId !== player.id || key === `${baseTx},${baseTz}`) continue;
+        const [tx, tz] = key.split(",").map(Number);
+        if (tileDistance(baseTx, baseTz, tx, tz) > (unit.movement ?? 0)) continue;
+        const capacity = getAirbaseCapacity(t.city, key, tiles);
+        const based = getBasedAirUnits(t.city).length;
+        if (based >= capacity) continue;
+        items.push({ text: `[Rebase] (${tx}, ${tz}) 【${t.city.name}】 空き枠: ${based}/${capacity}`, action: { tx, tz } });
+    }
+
+    const body = [`${unit.label ?? "航空ユニット"} の移設先(航続距離: ${unit.movement ?? 0})`];
+    if (items.length === 0) body.push("§7移設可能な航空基地(空き枠のある自国都市)が航続距離内にありません。");
+
+    await showPaginatedMenu(
+        getRealPlayer(player),
+        "[Rebase] 移設先を選択",
+        body.join("\n"),
+        items,
+        async (action) => { (await import("./commands.js")).cmdRebaseAirUnit(player, baseTx, baseTz, unitIndex, action.tx, action.tz); },
+        async () => { await openAirUnitActionMenu(player, baseTx, baseTz, unitIndex); },
+    );
+}
+
+/**
+ * 移設先を、openUnitPickerMonitorを使ったグリッド画面から選ぶ(モニター版)。
+ * 移設可能な自国都市はmove_reachableマーカー(白枠+ミント色。移動系アクションの色)で強調し、
+ * 選ぶとその場でcmdRebaseAirUnitを呼ぶ。
+ */
+async function openAirRebaseMenuMonitor(player, baseTx, baseTz, unitIndex) {
+    const tile = getTile(baseTx, baseTz);
+    const unit = getBasedAirUnits(tile?.city)[unitIndex];
+    if (!unit || unit.ownerId !== player.id) { await openAirbaseUnitsMenu(player); return; }
+
+    const tiles = getTiles();
+    const title = `[Rebase] 移設先を選択 - ${unit.label ?? "航空ユニット"} (航続距離 ${unit.movement ?? 0})`;
+
+    const destinationsByKey = new Map();
+    for (const key in tiles) {
+        const t = tiles[key];
+        if (!t.city || t.ownerId !== player.id || key === `${baseTx},${baseTz}`) continue;
+        const [tx, tz] = key.split(",").map(Number);
+        if (tileDistance(baseTx, baseTz, tx, tz) > (unit.movement ?? 0)) continue;
+        const capacity = getAirbaseCapacity(t.city, key, tiles);
+        const based = getBasedAirUnits(t.city).length;
+        if (based >= capacity) continue;
+        destinationsByKey.set(key, { name: t.city.name, based, capacity });
+    }
+
+    const resolveMarker = (tx, tz) => {
+        const info = destinationsByKey.get(`${tx},${tz}`);
+        if (!info) return null;
+        return {
+            icon: "textures/ui/monitor/move_reachable",
+            name: `§a[Rebase] 移設: 【${info.name}】`,
+            lore: [`§7空き枠: ${info.based}/${info.capacity}`],
+        };
+    };
+    const onSelect = async (tx, tz) => { (await import("./commands.js")).cmdRebaseAirUnit(player, baseTx, baseTz, unitIndex, tx, tz); };
+
+    await openUnitPickerMonitor(player, title, baseTx, baseTz, resolveMarker, onSelect, [
+        "§7矢印ボタンで表示範囲を移動できます。",
+        "§7ミント色のマスが移設可能な自国の航空基地です。",
+    ]);
+}
+
 /**
  * ⛪ 宗教メニュー。
  * ・未創始: 国家全体の信仰力の進捗(現在値/100)と、聖地の有無を表示。条件を満たせば創始できる。
@@ -2607,6 +3459,12 @@ async function openDistrictBuildingMenu(player, tx, tz) {
     const city = cityKey ? allTiles[cityKey]?.city : null;
 
     const body = [`(${tx}, ${tz}) の【${tile.district.label ?? tile.district.id}】に建設する建造物を選んでください。`, "§7建設には帰属都市の生産力を複数ターンかけて使います。"];
+    // 💡 原子力発電所の老朽化リスク(表示のみ、§24)。実際に事故が発生する処理は無い。
+    if (city?.nuclearPowerPlant) {
+        const age = city.nuclearPowerPlantAge ?? 0;
+        const risk = Math.min(100, age * 2);
+        body.push(`§c[Reactor] 原子力発電所 稼働年数:${age}ターン(事故発生率:約${risk}%、プロジェクト「原子炉の再稼働」でリセット可)`);
+    }
     const items = [];
 
     for (const id of getDistrictBuildingIds()) {
@@ -2624,7 +3482,12 @@ async function openDistrictBuildingMenu(player, tx, tz) {
             }
             continue;
         }
-        items.push({ text: `${def.icon} ${def.label} (コスト:${def.cost})`, action: id });
+        // 💡 発電所3種はexclusiveGroupで排他(§24)。既に別の発電所が有効な状態でもここには
+        //    候補として出るため、選ぶと置き換わることが分かるよう注記する。
+        const replaceNote = def.exclusiveGroup && getDistrictBuildingIds().some(
+            (otherId) => otherId !== id && getDistrictBuildingDef(otherId).exclusiveGroup === def.exclusiveGroup && city?.[otherId]
+        ) ? " §c(既存の発電所と置き換え)" : "";
+        items.push({ text: `${def.icon} ${def.label} (コスト:${def.cost})${replaceNote}`, action: id });
     }
     if (items.length === 0) body.push("§7現在建設できる建造物がありません。");
 
@@ -2667,8 +3530,16 @@ async function openBuyReligiousUnitMenu(player, tx, tz) {
     );
 }
 
-/** 現在位置の宗教ユニットが移動できるマスを一覧表示する(戦闘ユニットの移動メニューと同型)。 */
+/**
+ * 現在位置の宗教ユニットが移動できるマスを表示する。openCombatUnitMoveMenuと同じく、
+ * プレイヤー個人の設定(UNIT_ACTION_UI_STYLE_KEY)で文字リスト版/モニター版を振り分ける窓口。
+ */
 async function openReligiousUnitMoveMenu(player, fromTx, fromTz) {
+    await dispatchByUnitActionStyle(player, fromTx, fromTz, openReligiousUnitMoveMenuList, openReligiousUnitMoveMenuMonitor);
+}
+
+/** 現在位置の宗教ユニットが移動できるマスを一覧表示する(戦闘ユニットの移動メニューと同型、文字リスト版)。 */
+async function openReligiousUnitMoveMenuList(player, fromTx, fromTz) {
     const source = getTile(fromTx, fromTz);
     const unit = source?.religiousUnit;
     if (!unit || unit.ownerId !== player.id) { await openMainMenu(player); return; }
@@ -2682,10 +3553,10 @@ async function openReligiousUnitMoveMenu(player, fromTx, fromTz) {
     if (remaining > 0 && config) {
         for (let dz = -remaining; dz <= remaining; dz++) {
             for (let dx = -remaining; dx <= remaining; dx++) {
-                const distance = Math.max(Math.abs(dx), Math.abs(dz));
-                if (distance === 0 || distance > remaining) continue;
                 const tx = fromTx + dx;
                 const tz = fromTz + dz;
+                const distance = tileDistance(fromTx, fromTz, tx, tz);
+                if (distance === 0 || distance > remaining) continue;
                 if (tx < 0 || tz < 0 || tx >= config.width || tz >= config.height) continue;
                 const tile = tiles[`${tx},${tz}`];
                 if (!tile || tile.religiousUnit) continue;
@@ -2701,6 +3572,33 @@ async function openReligiousUnitMoveMenu(player, fromTx, fromTz) {
         async (action) => { (await import("./commands.js")).cmdMoveReligiousUnit(player, fromTx, fromTz, action.tx, action.tz); },
         async () => { await openMainMenu(player); },
     );
+}
+
+/**
+ * 現在位置の宗教ユニットが移動できるマスを、openUnitPickerMonitorを使ったグリッド画面から
+ * 選ぶ(モニター版)。移動可能なマス(距離が移動力以内かつ他の宗教ユニットがいない)は
+ * move_reachableマーカーで強調する。
+ */
+async function openReligiousUnitMoveMenuMonitor(player, fromTx, fromTz) {
+    const source = getTile(fromTx, fromTz);
+    const unit = source?.religiousUnit;
+    if (!unit || unit.ownerId !== player.id) { await openMainMenu(player); return; }
+
+    const remaining = unit.movementRemaining ?? unit.movement ?? 0;
+    const title = `[Missionary] 移動 - ${unit.label ?? "宗教ユニット"} (残り移動力 ${remaining})`;
+
+    const resolveMarker = (tx, tz, tile) => {
+        const distance = tileDistance(fromTx, fromTz, tx, tz);
+        if (distance === 0 || distance > remaining || tile.religiousUnit) return null;
+        const cityText = tile.city ? ` | 都市: ${tile.city.name}` : "";
+        return { icon: "textures/ui/monitor/move_reachable", name: `§a[Here] ここへ移動 (${tx}, ${tz})${cityText}`, lore: [`§7距離: ${distance}`] };
+    };
+    const onSelect = async (tx, tz) => { (await import("./commands.js")).cmdMoveReligiousUnit(player, fromTx, fromTz, tx, tz); };
+
+    await openUnitPickerMonitor(player, title, fromTx, fromTz, resolveMarker, onSelect, [
+        "§7矢印ボタンで表示範囲を移動できます。",
+        "§7ミント色のマスが移動可能な範囲です。",
+    ]);
 }
 
 /** 隣接する都市への布教先を一覧表示する。 */
@@ -2730,8 +3628,16 @@ async function openProselytizeMenu(player, fromTx, fromTz) {
     );
 }
 
-/** 隣接する敵の宗教ユニットへの攻撃先を一覧表示する(使徒・審問官など canAttack:true のユニットのみ)。 */
+/**
+ * 現在位置の宗教ユニットが攻撃できるマスを表示する。openCombatUnitMoveMenuと同じく、
+ * プレイヤー個人の設定(UNIT_ACTION_UI_STYLE_KEY)で文字リスト版/モニター版を振り分ける窓口。
+ */
 async function openReligiousUnitAttackMenu(player, fromTx, fromTz) {
+    await dispatchByUnitActionStyle(player, fromTx, fromTz, openReligiousUnitAttackMenuList, openReligiousUnitAttackMenuMonitor);
+}
+
+/** 隣接する敵の宗教ユニットへの攻撃先を一覧表示する(使徒・審問官など canAttack:true のユニットのみ、文字リスト版)。 */
+async function openReligiousUnitAttackMenuList(player, fromTx, fromTz) {
     const source = getTile(fromTx, fromTz);
     const unit = source?.religiousUnit;
     if (!unit || unit.ownerId !== player.id) { await openMainMenu(player); return; }
@@ -2764,4 +3670,45 @@ async function openReligiousUnitAttackMenu(player, fromTx, fromTz) {
         async (action) => { (await import("./commands.js")).cmdAttackReligiousUnit(player, fromTx, fromTz, action.tx, action.tz); },
         async () => { await openMainMenu(player); },
     );
+}
+
+/**
+ * 隣接する敵の宗教ユニットへの攻撃先を、openUnitPickerMonitorを使ったグリッド画面から選ぶ
+ * (モニター版)。宗教ユニットの攻撃は常に隣接マスのみ(getAdjacentTileEntries)なので、
+ * 攻撃可能なマーカー(attack_target)が付くのは周囲8マスのうち条件を満たすものだけになる。
+ */
+async function openReligiousUnitAttackMenuMonitor(player, fromTx, fromTz) {
+    const source = getTile(fromTx, fromTz);
+    const unit = source?.religiousUnit;
+    if (!unit || unit.ownerId !== player.id) { await openMainMenu(player); return; }
+
+    const def = getReligiousUnitDef(unit.id);
+    const title = `[Combat] 宗教ユニットで攻撃 - ${unit.label ?? "宗教ユニット"}`;
+
+    const targetsByKey = new Map();
+    if (def?.canAttack && !unit.hasAttackedThisTurn) {
+        const tiles = getTiles();
+        for (const { tx, tz, tile } of getAdjacentTileEntries(fromTx, fromTz, tiles)) {
+            if (tile.religiousUnit && tile.religiousUnit.ownerId !== player.id) {
+                targetsByKey.set(`${tx},${tz}`, tile.religiousUnit);
+            }
+        }
+    }
+
+    const resolveMarker = (tx, tz) => {
+        const enemy = targetsByKey.get(`${tx},${tz}`);
+        if (!enemy) return null;
+        return {
+            icon: "textures/ui/monitor/attack_target",
+            name: `§c[Combat] 攻撃: ${enemy.ownerName ?? "?"}の${enemy.label ?? "宗教ユニット"}`,
+            lore: [`§7HP: ${Math.max(0, enemy.hp ?? 0)}/${enemy.maxHp ?? 100}`],
+        };
+    };
+    const onSelect = async (tx, tz) => { (await import("./commands.js")).cmdAttackReligiousUnit(player, fromTx, fromTz, tx, tz); };
+
+    const usageLore = ["§7矢印ボタンで表示範囲を移動できます。", "§7赤色のマスが攻撃可能な対象です(反撃はありません)。"];
+    if (!def?.canAttack) usageLore.push("§7このユニットは敵の宗教ユニットを攻撃できません。");
+    else if (unit.hasAttackedThisTurn) usageLore.push("§7この宗教ユニットは今ターン既に攻撃しました。(1ターン1回まで)");
+
+    await openUnitPickerMonitor(player, title, fromTx, fromTz, resolveMarker, onSelect, usageLore);
 }

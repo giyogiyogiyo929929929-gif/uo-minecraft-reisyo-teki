@@ -1,0 +1,2918 @@
+diff --git a/scripts/bots.js b/scripts/bots.js
+index 72b1f26..613c516 100644
+--- a/scripts/bots.js
++++ b/scripts/bots.js
+@@ -46,7 +46,7 @@
+ // 2. 脅威が無く、開拓権があれば、自国の空き領地マス(既存の自国都市からMIN_CITY_SPACING未満の
+ //    近すぎる場所は除外した上で、資源、次に沿岸を優先)に新都市を建てる(脅威がある間は
+ //    拡張より防衛を優先し、新都市の建設を見送る)。沿岸に都市を建てることで、その都市が
+-//    軍艦(7.参照)を生産できるようになる。
++//    帆船(7.参照)を生産できるようになる。
+ // 3. 自国の領地に隣接する未所有マス(資源があれば最優先、次に狭くない水上マスを優先)を、
+ //    最大3マス/ターンまで領有する。1〜2マスしかない狭い水域(MIN_WATER_BODY_SIZE未満)は
+ //    候補にすら含めない。
+@@ -66,7 +66,7 @@
+ //    することで、同じユニットだけを際限なく生産し続けることを防ぐ)。沿岸都市(隣接マスに
+ //    水上マスがある)なら、沿岸都市数に見合った隻数(MAX_BATTLESHIPS_PER_COASTAL_CITY隻/
+ //    沿岸都市)の海軍ユニットをまだ持っていない限り、交易所の直後(市場・オベリスク・
+-//    訓練場・陸軍ユニットより前)に海軍ユニット(造船術を取得済みなら巡洋艦、なければ軍艦)を
++//    訓練場・陸軍ユニットより前)に海軍ユニット(造船術を取得済みなら巡洋艦、なければ帆船)を
+ //    割り込ませる(末尾に追加すると他の生産に押し出されて事実上作られなくなるため、
+ //    あえて中盤の優先度にしてある。内陸都市では配置できないため対象外)。戦争中は、
+ //    都市1つにつき1基までの対空砲(ミサイル迎撃、§17参照)を穀物庫の直後に割り込ませる
+@@ -104,23 +104,26 @@
+ //     1発だけミサイルを発射する(都市を一撃で消滅させる切り札のため、1ターンにつき最大1発)。
+ // 12. 自国の戦闘ユニットごとに、次の優先順で1つだけ行動する(攻撃・追跡・占領は戦争状態の
+ //     相手のみが対象。「関係なし」・不可侵条約・同盟の相手は対象にしない)。近接ユニット
+-//     (戦士等)を遠距離ユニット(弓兵等)より先に処理することで、(f)の移動判断が同ターン内の
++//     (戦士等)を遠距離ユニット(弓兵等)より先に処理することで、(g)の移動判断が同ターン内の
+ //     戦士の前進結果を踏まえられるようにしている:
+-//     (a) 無防備な敵都市の上で今ターン未行動なら占領する。
++//     (a) 無防備な敵都市(都心のHPが既に0)の上で今ターン未行動なら占領する。
+ //     (b) 同じマスに敵(同盟関係の無い)の宗教ユニットがいて移動力が満タンなら、異教徒として
+ //         排除する(cmdPurgeHeretic)。一方的かつ確実に成功するため、成否がランダムな
+ //         攻撃(c)より先に判定する。
+-//     (c) 攻撃範囲内に敵がいれば、まず「今の攻撃力(包囲ボーナス込み)で最低ダメージロールでも
+-//         確実に撃破できる相手」(combat.js の canGuaranteeKill)を最優先で狙う(中途半端に
+-//         複数体を削るより確実に数を減らす)。確実に倒せる相手が複数/皆無の場合は、その中で
+-//         包囲ボーナス(countFlankingAllies。既にその敵に隣接している味方ユニットの数)が
+-//         最大の相手を選び、同数ならHPが最も低い相手を選んで攻撃する。
+-//     (d) HPが低ければ(RETREAT_HP_RATIO未満)、最寄りの自都市へ撤退する。
+-//     (e) 自都市を守備中で、近く(GARRISON_ALERT_RADIUS以内)に敵がいなければ持ち場を守る。
+-//     (f) 自分は健在で、近く(ESCORT_RADIUS以内)に撤退中の負傷した味方がいれば
++//     (c) 攻撃範囲内に敵ユニットがいれば、まず「今の攻撃力(包囲ボーナス込み)で最低ダメージ
++//         ロールでも確実に撃破できる相手」(combat.js の canGuaranteeKill)を最優先で狙う
++//         (中途半端に複数体を削るより確実に数を減らす)。確実に倒せる相手が複数/皆無の場合は、
++//         その中で包囲ボーナス(countFlankingAllies。既にその敵に隣接している味方ユニットの数)
++//         が最大の相手を選び、同数ならHPが最も低い相手を選んで攻撃する。
++//     (d) 攻撃範囲内に敵ユニットはいないが敵の都市(都心)があれば、都心のHPが最も低い都市を
++//         優先して攻城する(cmdAttackCity。§13。都心はHPを0にしない限り占領できないため、
++//         これが無いとBotは都市を一切陥落させられなくなる)。
++//     (e) HPが低ければ(RETREAT_HP_RATIO未満)、最寄りの自都市へ撤退する。
++//     (f) 自都市を守備中で、近く(GARRISON_ALERT_RADIUS以内)に敵がいなければ持ち場を守る。
++//     (g) 自分は健在で、近く(ESCORT_RADIUS以内)に撤退中の負傷した味方がいれば
+ //         (かつ最寄りの敵と同じかそれ以上に近ければ)、敵を追うより先にその護衛(合流)へ
+ //         向かう(単独で撤退する負傷ユニットが道中で各個撃破されるのを防ぐ)。
+-//     (g) それ以外は最も近い敵(ユニットまたは都市)へ向けて移動する(8方向のうち目標に
++//     (h) それ以外は最も近い敵(ユニットまたは都市)へ向けて移動する(8方向のうち目標に
+ //         最も近づけるマスを選ぶ簡易な経路探索。1手先読みの貪欲法であり、行き止まりを
+ //         事前に見抜いて迂回するような本格的なパス探索ではないが、直進ルートが地形・
+ //         他国領土・占有マスで塞がっていても、他の方向から迂回できればそちらを選べる)。
+@@ -151,13 +154,13 @@ import { canStartProduction, getWorkerCount } from "./production.js";
+ import { getDefinitions, getProgressState, startProgress, hasCompletedProgress } from "./progression.js";
+ import { getFacilityIds, getFacilityDef, canInstallFacility } from "./facilities.js";
+ import { getDistrictIds, getDistrictDef, canStartDistrict, getDistrictBuildingIds, canStartDistrictBuilding } from "./districts.js";
+-import { canUnitEnterTile, tileDistance, getAttackableTargets, isRangedUnit, countFlankingAllies, getFlankingBonus, canGuaranteeKill } from "./combat.js";
++import { canUnitEnterTile, tileDistance, getAttackableTargets, getAttackableCityTargets, isRangedUnit, countFlankingAllies, getFlankingBonus, canGuaranteeKill, CITY_MAX_HP } from "./combat.js";
+ import { getRelation, getRequestsFor, sendRequest, acceptRequest, hasDiplomaticAgreement, isAtWar, declareWar, breakRelation } from "./diplomacy.js";
+ import { hasFoundedReligion, getReligiousUnitDef, getReligiousUnitIds, getCityDominantReligion, getReligiousUnitCost, hasStartedInquisition } from "./religion.js";
+ import {
+     cmdClaim, cmdSettle, cmdBuyRights, cmdStartProduction,
+     cmdInstallFacility, cmdStartDistrict, cmdStartDistrictBuilding,
+-    cmdMoveCombatUnit, cmdAttackCombatUnit, cmdCaptureCity, cmdHealCombatUnit, cmdPurgeHeretic,
++    cmdMoveCombatUnit, cmdAttackCombatUnit, cmdAttackCity, cmdCaptureCity, cmdHealCombatUnit, cmdPurgeHeretic,
+     cmdLaunchMissile,
+     cmdFoundReligion, cmdBuyReligiousUnit, cmdMoveReligiousUnit, cmdProselytize,
+     cmdAttackReligiousUnit, cmdStartInquisition, cmdInquisitorSuppress,
+@@ -177,20 +180,20 @@ const DEFAULT_BOT_TURN_DELAY_TICKS = 5;
+ //    ここには判定ロジックを重複させない)。カタパルトは遠距離戦闘力こそ最大だが近接戦闘力が
+ //    低い攻城ユニットのため、フォールバック順ではクロスボウ兵の下(=より打たれ強い方を先に
+ //    使い切ってから頼る)にしてある。
+-const MELEE_UNIT_PRIORITY = ["swordsman", "spearman", "horseman", "warrior"];
+-const RANGED_UNIT_PRIORITY = ["crossbowman", "catapult", "archer"];
++const MELEE_UNIT_PRIORITY = ["tank", "modernInfantry", "musketman", "swordsman", "knight", "pikeman", "spearman", "horseman", "warrior"];
++const RANGED_UNIT_PRIORITY = ["machineGunner", "artillery", "crossbowman", "cannon", "catapult", "archer"];
+ const MELEE_UNIT_IDS = [...MELEE_UNIT_PRIORITY];
+ const RANGED_UNIT_IDS = [...RANGED_UNIT_PRIORITY];
+ // 💡 生産の優先順位。労働者が少ないうちは労働者を優先し、増えたら建造物/防衛ユニットへ回す。
+ // 脅威(THREAT_RADIUS以内の敵ユニット)が無い間の優先順位。
+-const PRODUCTION_PRIORITY_SAFE_EARLY = ["worker", "granary", "tradingPost", "market", "obelisk", "trainingGround", ...MELEE_UNIT_PRIORITY, ...RANGED_UNIT_PRIORITY];
+-const PRODUCTION_PRIORITY_SAFE_LATE = ["granary", "tradingPost", "market", "obelisk", "trainingGround", ...MELEE_UNIT_PRIORITY, ...RANGED_UNIT_PRIORITY, "worker"];
++const PRODUCTION_PRIORITY_SAFE_EARLY = ["worker", "granary", "tradingPost", "market", "obelisk", "trainingGround", "wall", ...MELEE_UNIT_PRIORITY, ...RANGED_UNIT_PRIORITY];
++const PRODUCTION_PRIORITY_SAFE_LATE = ["granary", "tradingPost", "market", "obelisk", "trainingGround", "wall", ...MELEE_UNIT_PRIORITY, ...RANGED_UNIT_PRIORITY, "worker"];
+ const WORKER_COUNT_THRESHOLD = 3;
+ // 💡 脅威時でも際限なく戦士/弓兵を生産し続けると、経済(労働者・建造物)が完全に止まり、
+ //    かつ同じユニットばかりになってしまうため、都市数に対してこの倍率までの戦闘ユニット
+ //    (戦士+弓兵の合計)を持てば、脅威時でも経済優先度に戻す上限とする。
+ const MAX_COMBAT_UNITS_PER_CITY = 3;
+-// 💡 沿岸都市1つにつき保有してよい軍艦の隻数の目安。内陸都市は軍艦を配置できないため、
++// 💡 沿岸都市1つにつき保有してよい帆船の隻数の目安。内陸都市は帆船を配置できないため、
+ //    上限は「沿岸都市の数×この値」で計算する(unitCounts.coastalCityCount参照)。
+ const MAX_BATTLESHIPS_PER_COASTAL_CITY = 2;
+ 
+@@ -211,7 +214,7 @@ const GARRISON_ALERT_RADIUS = THREAT_RADIUS_WAR;
+ //    この値を超えて初めて「脅威あり」と判定する(computeThreatLevel)。以前は範囲内に敵が
+ //    1体でもいれば即座に脅威ありとしていたが、それだと素通りするだけの単独ユニット1体
+ //    (戦士20・弓兵15など)でも経済(生産・拡張・研究)を丸ごと防衛優先へ切り替えてしまい
+-//    過敏だったため、まとまった戦力(戦士2体分、または軍艦1隻分を超える戦闘力)が
++//    過敏だったため、まとまった戦力(戦士2体分、または帆船1隻分を超える戦闘力)が
+ //    近づいて初めて反応するよう段階化した。
+ const THREAT_POWER_THRESHOLD = 20;
+ // 💡 移動判断(撤退・護衛・追跡のいずれか)で、目標に近づく移動先が見つからない状態が
+@@ -255,17 +258,20 @@ const MAX_MISSILE_STOCKPILE = 2;
+ //    されなくなるわけではない(優先度が下がるだけ)。
+ const TECH_PRIORITY_SAFE = [
+     "pottery", "writing", "astrology", "mining", "animalHusbandry", "archery",
+-    "sailing", "currency", "smelting", "education", "apprenticeship",
++    "sailing", "currency", "smelting", "masonry", "education", "apprenticeship",
+     "bronzeWorking", "horsebackRiding", "ironWorking", "shipBuilding", "engineering", "machinery",
++    "gunpowder", "metallurgy", "industrialization", "electricity", "rocketry",
+ ];
+ const TECH_PRIORITY_THREATENED = [
+-    "animalHusbandry", "archery", "mining", "bronzeWorking", "horsebackRiding",
++    "animalHusbandry", "archery", "mining", "masonry", "bronzeWorking", "horsebackRiding",
+     "pottery", "writing", "astrology", "smelting", "ironWorking", "apprenticeship",
+-    "engineering", "machinery", "sailing", "currency", "education", "shipBuilding",
++    "engineering", "machinery", "gunpowder", "metallurgy", "industrialization", "electricity",
++    "rocketry", "sailing", "currency", "education", "shipBuilding",
+ ];
+-// 💡 既存の「法典→使節団→外交」の連鎖に、政治哲学(軍制改革・神権政治への橋渡し)と
+-//    商業(市場の前提の1つ)を割り込ませる。
+-const CIVIC_PRIORITY = ["codeOfLaws", "emissaries", "politicalPhilosophy", "commerce", "diplomacy", "militaryTradition", "theocracy"];
++// 💡 既存の「法典→使節団→外交」の連鎖に、政治哲学(軍制改革・神権政治・封建制度への橋渡し)と
++//    商業(市場の前提の1つ)を割り込ませる。封建制度→騎士道は長槍兵・騎士(production.js)を
++//    解放する、社会制度が直接ユニットを解放する初の例。
++const CIVIC_PRIORITY = ["codeOfLaws", "emissaries", "politicalPhilosophy", "commerce", "diplomacy", "militaryTradition", "theocracy", "feudalism", "chivalry"];
+ 
+ /** 指定した国家がBot(自動操作)かどうかを判定する。 */
+ export function isBotCiv(civId) {
+@@ -379,7 +385,7 @@ function isCoastalSite(tx, tz, tiles) {
+ /**
+  * 都市の建設候補(陸地マス)の中から優先順位に沿って1つ選ぶ: 資源のあるマス最優先、
+  * 次に(狭くない)水域に隣接する沿岸のマスを優先し、それ以外は残りからランダムに選ぶ。
+- * 沿岸に都市を建てることで、その都市が軍艦(§8)を生産できるようになる(isCoastalCity)。
++ * 沿岸に都市を建てることで、その都市が帆船(§8)を生産できるようになる(isCoastalCity)。
+  */
+ function pickBestCitySite(candidates, tiles) {
+     const withResource = candidates.filter((c) => c.tile?.resource);
+@@ -435,7 +441,7 @@ function pickClaimableTile(tiles, civId) {
+     return pickBestSite(candidates);
+ }
+ 
+-/** この都市タイル(tx, tz)が隣接マスに水上マスを持つ(=軍艦を配置できる沿岸都市)かどうか。 */
++/** この都市タイル(tx, tz)が隣接マスに水上マスを持つ(=帆船を配置できる沿岸都市)かどうか。 */
+ function isCoastalCity(tx, tz, tiles) {
+     return getAdjacentTiles(tx, tz, tiles).some((n) => isWaterTerrain(n.type));
+ }
+@@ -462,7 +468,7 @@ function insertAfter(list, targetId, insertId) {
+  * 沿岸都市(隣接マスに水上マスがある)であれば、まだ沿岸都市数に見合った隻数
+  * (MAX_BATTLESHIPS_PER_COASTAL_CITY)の海軍ユニットを持っていない限り、交易所の直後
+  * (市場・オベリスク・訓練場・陸軍ユニットより前)に海軍ユニット(造船術を取得済みなら
+- * 巡洋艦を優先、無ければ軍艦)を割り込ませる。末尾に追加すると常に他の生産に押し出されて
++ * 巡洋艦を優先、無ければ帆船)を割り込ませる。末尾に追加すると常に他の生産に押し出されて
+  * 事実上作られなくなるため、あえて中盤の優先度にしてある(内陸都市では海軍ユニットは
+  * 配置できず生産が無駄になるため、沿岸都市でのみ選択肢に加える)。
+  * 戦争中は、都市1つにつき1基までの対空砲(antiAir。ミサイル迎撃、§17参照)を、穀物庫の直後
+@@ -474,6 +480,24 @@ function insertAfter(list, targetId, insertId) {
+  * @param {{ cityCount: number, coastalCityCount: number, meleeCount: number, rangedCount: number,
+  *   battleshipCount: number, missileStock: number, atWar: boolean }} unitCounts
+  */
++// 💡 canStartProductionは、生産完了時に戦略資源を消費するユニット(horseman/knight→馬、
++//    swordsman/musketman/cannon→鉄、tank/dreadnought→石油。production.jsの
++//    placeProducedCombatUnitConsumingResource参照)の在庫を判定しない(完成時にonCompleteが
++//    中止する設計。§23参照)ため、Botがそれを知らずに在庫0のまま選び続けて生産→中止を
++//    繰り返さないよう、Bot側だけの追加ガードとして在庫が無ければ候補から外す
++//    (canStartProductionの仕様自体は変更しない)。
++const BOT_UNIT_RESOURCE_REQUIREMENTS = {
++    horseman: "strategic_horse", knight: "strategic_horse",
++    swordsman: "strategic_iron", musketman: "strategic_iron", cannon: "strategic_iron",
++    tank: "strategic_oil", dreadnought: "strategic_oil",
++    antiAir: "strategic_uranium", // 💡 §24。missileは下記の専用分岐で同じガードをかける
++};
++function canBotStartProduction(city, id, tile, botIdentity) {
++    const resourceProp = BOT_UNIT_RESOURCE_REQUIREMENTS[id];
++    if (resourceProp && (botIdentity.getDynamicProperty(resourceProp) ?? 0) < 1) return false;
++    return canStartProduction(city, id, tile, botIdentity).ok;
++}
++
+ function pickProductionChoice(city, tile, botIdentity, threatened, unitCounts, tx, tz, tiles) {
+     const wantMilitary = threatened
+         && unitCounts.meleeCount + unitCounts.rangedCount < unitCounts.cityCount * MAX_COMBAT_UNITS_PER_CITY;
+@@ -482,27 +506,35 @@ function pickProductionChoice(city, tile, botIdentity, threatened, unitCounts, t
+             ? [...RANGED_UNIT_PRIORITY, ...MELEE_UNIT_PRIORITY]
+             : [...MELEE_UNIT_PRIORITY, ...RANGED_UNIT_PRIORITY];
+         for (const id of preferredOrder) {
+-            if (canStartProduction(city, id, tile, botIdentity).ok) return id;
++            if (canBotStartProduction(city, id, tile, botIdentity)) return id;
+         }
+     }
+ 
+     const basePriority = getWorkerCount(city) < WORKER_COUNT_THRESHOLD ? PRODUCTION_PRIORITY_SAFE_EARLY : PRODUCTION_PRIORITY_SAFE_LATE;
+     const canWantBattleship = unitCounts.battleshipCount < unitCounts.coastalCityCount * MAX_BATTLESHIPS_PER_COASTAL_CITY
+         && isCoastalCity(tx, tz, tiles);
+-    // 💡 先に"battleship"を、その後に同じ位置へ"cruiser"を割り込ませることで、最終的な並びは
+-    //    [tradingPost, cruiser, battleship, ...] になる(=造船術が未取得ならcruiser側の
+-    //    canStartProductionが失敗して自動的にbattleshipへフォールバックする)。
++    // 💡 先に"battleship"(帆船)を、次に"cruiser"(巡洋艦)を、最後に"dreadnought"(戦艦)を
++    //    同じ位置へ割り込ませることで、最終的な並びは [tradingPost, dreadnought, cruiser,
++    //    battleship, ...] になる(=それぞれの前提技術が未取得ならcanStartProductionが失敗し、
++    //    自動的に1段階下の海軍ユニットへフォールバックする)。
+     let priority = basePriority;
+     if (canWantBattleship) {
+         priority = insertAfter(priority, "tradingPost", "battleship");
+         priority = insertAfter(priority, "tradingPost", "cruiser");
++        priority = insertAfter(priority, "tradingPost", "dreadnought");
++    }
++    // 💡 戦争中は都心の耐久力を上げる防壁(§13)を、対空砲よりさらに優先して割り込ませる
++    //    (壁は都心のHP自体を守る基礎防衛、対空砲はミサイルという特定脅威への対策のため)。
++    if (unitCounts.atWar) {
++        priority = insertAfter(priority, "granary", "antiAir");
++        priority = insertAfter(priority, "granary", "wall");
+     }
+-    if (unitCounts.atWar) priority = insertAfter(priority, "granary", "antiAir");
+     for (const id of priority) {
+-        if (canStartProduction(city, id, tile, botIdentity).ok) return id;
++        if (canBotStartProduction(city, id, tile, botIdentity)) return id;
+     }
+ 
+     if (unitCounts.atWar && unitCounts.missileStock < MAX_MISSILE_STOCKPILE
++        && (botIdentity.getDynamicProperty("strategic_uranium") ?? 0) >= 1
+         && canStartProduction(city, "missile", tile, botIdentity).ok) {
+         return "missile";
+     }
+@@ -540,9 +572,12 @@ function pickDistrictChoice(tile, city, botIdentity, tiles, cityKey) {
+ }
+ 
+ /** この(完成済み区域の)マスに今から着工できる、定義順で最初の区域専用建造物IDを選ぶ(無ければnull)。 */
+-function pickDistrictBuildingChoice(tile, city, civId) {
++function pickDistrictBuildingChoice(tile, city, botIdentity) {
+     for (const id of getDistrictBuildingIds()) {
+-        if (canStartDistrictBuilding(tile, id, civId, city).ok) return id;
++        // 💡 (バグ修正) 以前はplayer(botIdentity)を渡していなかったため、requiresTechnology/
++        //    requiresCivicを持つ建造物(library/cathedral/workshop/factory/発電所3種)を
++        //    Botが一切選べなかった(前提無しのshrineだけが選ばれ続けていた)。
++        if (canStartDistrictBuilding(tile, id, botIdentity.id, city, botIdentity).ok) return id;
+     }
+     return null;
+ }
+@@ -675,7 +710,7 @@ function runBotDiplomacy(civId, botIdentity, tiles) {
+  * 経路上の全マス(distance=1から順に辿る途中のマスも含む)が地形・外交関係・占有の
+  * 観点で進入可能である必要があり、途中に障害物(海軍ユニットにとっての陸地、他国の
+  * 「関係なし」領土、他ユニットなど)があればそこで探索を打ち切る。移動力が2以上の
+- * ユニット(軍艦など)が、間に挟まる陸地を飛び越えて別の水域へ「ワープ」してしまう
++ * ユニット(帆船など)が、間に挟まる陸地を飛び越えて別の水域へ「ワープ」してしまう
+  * (=最終着地マスだけを見て、経路上のマスを検証していなかった)不具合の修正。
+  */
+ function findValidMoveTarget(unit, tx, tz, dirX, dirZ, maxDist, tiles, config) {
+@@ -1084,19 +1119,22 @@ function runBotReligion(civId, botIdentity, tiles, config) {
+ 
+ /**
+  * 1体の戦闘ユニットの行動を決定・実行する。優先順位:
+- * (a) 無防備な敵都市の上で今ターン未行動なら占領する。
++ * (a) 無防備な敵都市(都心のHPが既に0)の上で今ターン未行動なら占領する。
+  * (b) 同じマスに敵(同盟関係の無い)の宗教ユニットがいて移動力が満タンなら、異教徒として
+  *     排除する(cmdPurgeHeretic。確実に成功する一方的な排除のため、成否がランダムな攻撃(c)
+  *     より先に判定する)。
+- * (c) 攻撃範囲内に敵がいれば、確実に撃破できる相手(canGuaranteeKill)を最優先し、
++ * (c) 攻撃範囲内に敵ユニットがいれば、確実に撃破できる相手(canGuaranteeKill)を最優先し、
+  *     いなければその中から包囲ボーナス(既にその相手に隣接している味方の数)が最大の相手を
+  *     優先し、同数ならHPが最も低い相手を攻撃する。
+- * (d) HPが低ければ(RETREAT_HP_RATIO未満)、最寄りの自都市へ撤退する。
+- * (e) 自都市を守っている最中で、近く(GARRISON_ALERT_RADIUS以内)に敵がいなければ、
++ * (d) 攻撃範囲内に敵ユニットはいないが敵の都市(都心)があれば、都心のHPが最も低い(最も
++ *     陥落に近い)都市を優先して攻城する(cmdAttackCity。§13。これが無いとBotは都市の
++ *     HPを一切削れず、占領を進められなくなる)。
++ * (e) HPが低ければ(RETREAT_HP_RATIO未満)、最寄りの自都市へ撤退する。
++ * (f) 自都市を守っている最中で、近く(GARRISON_ALERT_RADIUS以内)に敵がいなければ、
+  *     HPが減っていれば休息して回復し(cmdHealCombatUnit)、満タンならそのまま持ち場を守る。
+- * (f) 自分は健在で、近く(ESCORT_RADIUS以内)に撤退中の負傷した味方がいれば、敵を追うより
++ * (g) 自分は健在で、近く(ESCORT_RADIUS以内)に撤退中の負傷した味方がいれば、敵を追うより
+  *     先にその護衛(合流)へ向かう(単独で撤退する負傷ユニットが各個撃破されるのを防ぐ)。
+- * (g) それ以外は最も近い敵(ユニットまたは都市)へ向けて移動する。ただし遠距離ユニットが
++ * (h) それ以外は最も近い敵(ユニットまたは都市)へ向けて移動する。ただし遠距離ユニットが
+  *     自軍の近接ユニットより前に出てしまう場合は、近接ユニットが追いつくまで待機する。
+  */
+ function runBotCombatUnit(civId, tx, tz, unit, tiles, config, botIdentity) {
+@@ -1129,6 +1167,17 @@ function runBotCombatUnit(civId, tx, tz, unit, tiles, config, botIdentity) {
+         return;
+     }
+ 
++    // 💡 攻撃範囲内に敵ユニットがいなくても、敵の都市(都心)が範囲内にあれば攻城を行う
++    //    (§13。都心はHPを0にしない限り占領できないため、これが無いとBotは一切都市を
++    //    陥落させられなくなる)。HPが最も低い=最も陥落に近い都市を優先して攻撃を集中させる。
++    const cityTargets = getAttackableCityTargets(tx, tz, civId, unit, tiles, config, (a, b) => !isAtWar(a, b));
++    if (cityTargets.length > 0) {
++        const cityTarget = cityTargets.reduce((best, t) =>
++            (t.city.hp ?? CITY_MAX_HP) < (best.city.hp ?? CITY_MAX_HP) ? t : best);
++        cmdAttackCity(botIdentity, tx, tz, cityTarget.tx, cityTarget.tz);
++        return;
++    }
++
+     const remaining = unit.movementRemaining ?? unit.movement ?? 0;
+     if (remaining <= 0) return;
+ 
+@@ -1333,7 +1382,7 @@ export function runBotTurn(civId) {
+         if (!cityTile?.city || cityTile.city.districtConstruction || startedDistrictCities.has(cityKey)) continue;
+         const bot = makeBotIdentity(civId, tx, tz, config);
+         if (!bot) continue;
+-        const choice = pickDistrictBuildingChoice(t, cityTile.city, civId);
++        const choice = pickDistrictBuildingChoice(t, cityTile.city, bot);
+         if (choice) { cmdStartDistrictBuilding(bot, choice); startedDistrictCities.add(cityKey); }
+     }
+ 
+@@ -1363,8 +1412,8 @@ export function runBotTurn(civId) {
+     tiles = getTiles();
+     // 💡 脅威時の防衛ユニット生産に上限・多様性を持たせるため、現在の都市数(沿岸都市数も
+     //    別途)、近接/遠距離/海軍ユニットの保有数、ミサイル備蓄、戦争中かどうかをあらかじめ
+-    //    集計しておく(pickProductionChoiceへ渡す)。battleshipCountは軍艦・巡洋艦を
+-    //    まとめて数える(どちらも同じ「沿岸都市1つにつきN隻まで」の上限を共有するため)。
++    //    集計しておく(pickProductionChoiceへ渡す)。battleshipCountは帆船・巡洋艦・戦艦を
++    //    まとめて数える(いずれも同じ「沿岸都市1つにつきN隻まで」の上限を共有するため)。
+     let unitCounts = { cityCount: 0, coastalCityCount: 0, meleeCount: 0, rangedCount: 0, battleshipCount: 0, missileStock: 0, atWar: false };
+     for (const key in tiles) {
+         const t = tiles[key];
+@@ -1378,7 +1427,7 @@ export function runBotTurn(civId) {
+             const unitId = t.combatUnit.id;
+             if (MELEE_UNIT_IDS.includes(unitId)) unitCounts.meleeCount++;
+             else if (RANGED_UNIT_IDS.includes(unitId)) unitCounts.rangedCount++;
+-            else if (unitId === "battleship" || unitId === "cruiser") unitCounts.battleshipCount++;
++            else if (unitId === "battleship" || unitId === "cruiser" || unitId === "dreadnought") unitCounts.battleshipCount++;
+         }
+     }
+     unitCounts.atWar = (turn.playerOrder ?? []).some((id) => id !== civId && isAtWar(civId, id));
+@@ -1393,7 +1442,7 @@ export function runBotTurn(civId) {
+             cmdStartProduction(bot, choice);
+             if (MELEE_UNIT_IDS.includes(choice)) unitCounts.meleeCount++;
+             else if (RANGED_UNIT_IDS.includes(choice)) unitCounts.rangedCount++;
+-            else if (choice === "battleship" || choice === "cruiser") unitCounts.battleshipCount++;
++            else if (choice === "battleship" || choice === "cruiser" || choice === "dreadnought") unitCounts.battleshipCount++;
+         }
+     }
+ 
+diff --git a/scripts/combat.js b/scripts/combat.js
+index 90d6ce2..b593c03 100644
+--- a/scripts/combat.js
++++ b/scripts/combat.js
+@@ -15,7 +15,7 @@
+ //   (commands.js の cmdMoveCombatUnit)は、2つのサブ関数を直接使う。
+ //
+ // 【移動経路の検証(飛び越え禁止)】
+-// ・移動力2以上のユニット(軍艦など)が、最終着地マスだけを見て「入れるかどうか」を
++// ・移動力2以上のユニット(帆船など)が、最終着地マスだけを見て「入れるかどうか」を
+ //   判定すると、間に挟まる陸地(海軍ユニットの場合)や他国の「関係なし」領土、他ユニットを
+ //   飛び越えて移動できてしまう(bots.js の Bot だけでなく commands.js の cmdMoveCombatUnit
+ //   経由でプレイヤーの手動移動も同様)。canTravelPath が、8方向の直進(縦・横・斜め)上の
+@@ -59,6 +59,17 @@
+ //   という戦術的な選択を後押しする。反撃側の戦闘力には影響しない(包囲は「攻める側」の
+ //   有利さであり、囲まれている防御側の反撃の強さ自体は変えない)。呼び出し元
+ //   (commands.js の cmdAttackCombatUnit)が攻撃実行時の盤面から算出し、resolveCombat に渡す。
++//
++// 【兵種(unitClass)とクラス相性ボーナス】
++// 陸軍ユニットは production.js の定義・配置される個体データの両方に unitClass
++// ("melee"/"antiCavalry"/"cavalry"/"ranged"/"siege"。海軍は"naval")を持つ。
++// UNIT_CLASS_COUNTERS に「このクラスは、あのクラス相手なら戦闘力+n」という relationship を
++// 定義しておくと、getClassMatchupBonus() がそれを見て自動的にボーナスを算出する
++// (例: 対騎兵(spearman)は騎兵(horseman)相手に+10)。このボーナスは「攻撃側/防御側」ではなく
++// 「そのユニット自身の戦闘力」に乗るため、対騎兵ユニットが騎兵を攻撃する場合も、逆に騎兵に
++// 攻撃された場合(防御・反撃のいずれも)も等しく効く。resolveCombat/canGuaranteeKill の
++// 両方に組み込まれており、新しい relationship を UNIT_CLASS_COUNTERS に追加するだけで
++// 反映側のコードは変更不要(adjacency.js の隣接ボーナスと同じ設計思想)。
+ 
+ import { isWaterTerrain, isImpassableTerrain } from "./mapGen.js";
+ import { canEnterTerritory } from "./diplomacy.js";
+@@ -75,6 +86,70 @@ const RANGED_UNIT_ATTACK_RANGE_THRESHOLD = 2;
+ const FLANKING_BONUS_PER_ALLY = 3;
+ const FLANKING_MAX_ALLIES = 4;
+ 
++// 【都市(都心)の耐久力・防壁】
++// 都市自身のマス("都心")は、通常の戦闘ユニットとは別に独自のHP・戦闘力を持つ防衛拠点として
++// 機能する(§13参照)。都心のHPが0を超えている間、敵(自国でも同盟・不可侵条約の相手でもない)
++// ユニットはそのマスへ進入できない(canUnitEnterCityTile)。
++export const CITY_MAX_HP = 200;
++export const CITY_HP_REGEN_PER_TURN = 30;
++// 都市戦闘力 = 自国最強の近接系ユニットの戦闘力 - このペナルティ、または都市に駐留中の
++// ユニットの実効戦闘力、のどちらか大きい方(getCityCombatStrength)。
++export const CITY_COMBAT_STRENGTH_PENALTY = 10;
++// 防壁が無ければ都市は遠距離攻撃できない。防壁完成後の遠距離攻撃の射程。
++export const CITY_RANGED_ATTACK_RANGE = 3;
++export const WALL_MAX_HP = 100;
++// 💡 防壁があるときの被ダメージ倍率。攻城(siege)ユニットだけは防壁の軽減効果をすり抜ける
++//    (Civilization VIの「攻城兵器は城壁の防御を無視する」という考え方を踏襲)。
++const WALL_DAMAGE_MULTIPLIERS = { melee: 0.15, antiCavalry: 0.15, cavalry: 0.15, ranged: 0.5, siege: 1 };
++// 💡 「近接ユニット」として扱う兵種の集合。都市戦闘力の算出基準(近接系ユニットの中で最強)・
++//    都市への反撃の可否(近接系からの攻撃にのみ都市は反撃する)・防壁の被ダメージ倍率の
++//    いずれもこの集合を基準にする。
++const MELEE_LIKE_CLASSES = new Set(["melee", "antiCavalry", "cavalry"]);
++
++/** unitClass が近接系(melee/antiCavalry/cavalry)かどうか。 */
++export function isMeleeUnitClass(unitClass) {
++    return MELEE_LIKE_CLASSES.has(unitClass);
++}
++
++/** 兵種(unitClass)の表示名。UIやHUDでの表示に使う(未分類のユニットは呼び出し元でフォールバックする)。 */
++export const UNIT_CLASS_LABELS = {
++    melee: "近接",
++    antiCavalry: "対騎兵",
++    cavalry: "騎兵",
++    ranged: "遠隔",
++    siege: "攻城",
++    naval: "海軍",
++};
++
++/** 兵種の表示名を取得する(未知の値ならそのまま返す)。 */
++export function getUnitClassLabel(unitClass) {
++    return UNIT_CLASS_LABELS[unitClass] ?? unitClass ?? "不明";
++}
++
++// 💡 「このクラスは、あのクラス相手なら戦闘力+n」という一方向の relationship の一覧。
++//    対騎兵(スピアマン系)は騎兵の機動力を封じる専門兵科という位置づけで、騎兵と戦う間
++//    (攻撃・防御・反撃のいずれでも)+10される。近接ユニットは、対騎兵ユニットの得意分野
++//    (騎兵封じ)の裏を返す形で+5される(騎兵ほどではないが、対騎兵は近接戦での取り回しに
++//    やや劣るという位置づけ)。新しい relationship を1行足すだけで、
++//    resolveCombat/canGuaranteeKillの両方に自動的に反映される。
++const UNIT_CLASS_COUNTERS = [
++    { attackerClass: "antiCavalry", targetClass: "cavalry", bonus: 10 },
++    { attackerClass: "melee", targetClass: "antiCavalry", bonus: 5 },
++];
++
++/**
++ * unit(の兵種)が opponent(の兵種)を相手にしているとき受け取る戦闘力ボーナスを算出する。
++ * 複数の relationship に一致する場合は合算する(現状は1つしか無いが、将来の拡張に備える)。
++ */
++export function getClassMatchupBonus(unit, opponent) {
++    if (!unit?.unitClass || !opponent?.unitClass) return 0;
++    let bonus = 0;
++    for (const rule of UNIT_CLASS_COUNTERS) {
++        if (rule.attackerClass === unit.unitClass && rule.targetClass === opponent.unitClass) bonus += rule.bonus;
++    }
++    return bonus;
++}
++
+ /** ユニットの攻撃距離を取得する。明示的な attackRange が無ければ移動力(movement)と同じ範囲を使う。 */
+ export function getAttackRange(unit) {
+     return unit?.attackRange ?? unit?.movement ?? 0;
+@@ -113,12 +188,22 @@ export function canUnitEnterOwnership(unit, tile) {
+     return canEnterTerritory(unit?.ownerId, tile.ownerId);
+ }
+ 
++/**
++ * 指定したタイルが他国の都市(都心)で、かつそのHPがまだ0を超えている場合、そのユニットは
++ * 進入できない(都心はHPを0にしない限り突破できない防衛拠点として機能する。§13参照)。
++ * 自国の都市には常に進入できる。
++ */
++export function canUnitEnterCityTile(unit, tile) {
++    if (!tile?.city || tile.ownerId === unit?.ownerId) return true;
++    return (tile.city.hp ?? CITY_MAX_HP) <= 0;
++}
++
+ /**
+  * 指定した戦闘ユニットが、指定したタイルへ進入できるかどうかを総合判定する
+- * (地形適性 + 所有者との外交関係の両方を満たす必要がある)。
++ * (地形適性 + 所有者との外交関係 + 都心のHPの3つすべてを満たす必要がある)。
+  */
+ export function canUnitEnterTile(unit, tile) {
+-    return canUnitEnterTerrain(unit, tile) && canUnitEnterOwnership(unit, tile);
++    return canUnitEnterTerrain(unit, tile) && canUnitEnterOwnership(unit, tile) && canUnitEnterCityTile(unit, tile);
+ }
+ 
+ /**
+@@ -129,7 +214,7 @@ export function canUnitEnterTile(unit, tile) {
+  *   (dx・dzの絶対値が一致せず、どちらも0でもない)は経路が定義できないため不可とする。
+  * ・通過点(距離1〜distance-1のマス。最終マスは含まない)は、地形・外交関係・他ユニットの
+  *   占有の観点ですべて進入可能である必要がある。
+- * 移動力2以上のユニット(軍艦など)が、間に挟まる陸地(海軍ユニットの場合)や他国の
++ * 移動力2以上のユニット(帆船など)が、間に挟まる陸地(海軍ユニットの場合)や他国の
+  * 「関係なし」領土、他ユニットを飛び越えて移動してしまうのを防ぐための経路検証。
+  */
+ export function canTravelPath(unit, fromTx, fromTz, toTx, toTz, tiles) {
+@@ -228,10 +313,12 @@ export function getFlankingBonus(flankingAllyCount) {
+  * true を返す安全側の見積もりになる(実際には最低値以上のダメージが出ることが多いため、
+  * この判定が false でも運良く倒せることはあるが、逆にtrueなのに倒せないことは無い)。
+  * 複数の攻撃対象から確実に仕留められる相手を優先する(pickBestAttackTarget)ために使う。
++ * クラス相性ボーナス(getClassMatchupBonus。例: 対騎兵が騎兵を攻撃する場合)も加味する。
+  */
+ export function canGuaranteeKill(attacker, defender, flankingBonus = 0) {
+-    const attackerStrength = getFirstStrikeStrength(attacker) + flankingBonus;
+-    const diff = attackerStrength - getEffectiveCombatStrength(defender);
++    const attackerStrength = getFirstStrikeStrength(attacker) + getClassMatchupBonus(attacker, defender) + flankingBonus;
++    const defenderStrength = getEffectiveCombatStrength(defender) + getClassMatchupBonus(defender, attacker);
++    const diff = attackerStrength - defenderStrength;
+     const minDamage = Math.floor(DAMAGE_MIN * Math.exp(diff * DAMAGE_EXPONENT_SCALE));
+     const hp = defender?.hp ?? defender?.maxHp ?? 0;
+     return hp <= minDamage;
+@@ -242,6 +329,8 @@ export function canGuaranteeKill(attacker, defender, flankingBonus = 0) {
+  * hasAgreementFn(playerId, otherOwnerId) が true を返した相手のユニットは対象から除外する。
+  * 呼び出し元は「戦争状態でない(=攻撃できない)相手」を除外する述語(例:
+  * `(a, b) => !isAtWar(a, b)`)を渡す(commands.js の cmdAttackCombatUnit と同じ判定基準)。
++ * 💡 都市のマスに駐留するユニットは対象に含めない。都市自身が防衛の主体になる(§13)ため、
++ *    直接の攻撃対象は都市そのもの(getAttackableCityTargets)になる。
+  * @returns {{ tx: number, tz: number, tile: any, unit: any }[]}
+  */
+ export function getAttackableTargets(fromTx, fromTz, playerId, unit, tiles, config, hasAgreementFn) {
+@@ -259,6 +348,7 @@ export function getAttackableTargets(fromTx, fromTz, playerId, unit, tiles, conf
+             if (tx < 0 || tz < 0 || tx >= config.width || tz >= config.height) continue;
+ 
+             const tile = tiles[`${tx},${tz}`];
++            if (tile?.city) continue;
+             const enemyUnit = tile?.combatUnit;
+             if (!enemyUnit || enemyUnit.ownerId === playerId) continue;
+             if (hasAgreementFn?.(playerId, enemyUnit.ownerId)) continue;
+@@ -269,6 +359,36 @@ export function getAttackableTargets(fromTx, fromTz, playerId, unit, tiles, conf
+     return targets;
+ }
+ 
++/**
++ * 指定した戦闘ユニットが今攻撃できる、敵の都市(都心)が存在するマスの一覧を返す。
++ * 駐留ユニットの有無に関わらず都市自体を対象として返す(getAttackableTargetsと同じ
++ * hasAgreementFnの使い方)。
++ * @returns {{ tx: number, tz: number, tile: any, city: any }[]}
++ */
++export function getAttackableCityTargets(fromTx, fromTz, playerId, unit, tiles, config, hasAgreementFn) {
++    const targets = [];
++    const range = getAttackRange(unit);
++    if (range <= 0 || !config) return targets;
++
++    for (let dz = -range; dz <= range; dz++) {
++        for (let dx = -range; dx <= range; dx++) {
++            const distance = Math.max(Math.abs(dx), Math.abs(dz));
++            if (distance === 0 || distance > range) continue;
++
++            const tx = fromTx + dx;
++            const tz = fromTz + dz;
++            if (tx < 0 || tz < 0 || tx >= config.width || tz >= config.height) continue;
++
++            const tile = tiles[`${tx},${tz}`];
++            if (!tile?.city || !tile.ownerId || tile.ownerId === playerId) continue;
++            if (hasAgreementFn?.(playerId, tile.ownerId)) continue;
++
++            targets.push({ tx, tz, tile, city: tile.city });
++        }
++    }
++    return targets;
++}
++
+ /**
+  * 24〜36のランダム基礎ダメージに、戦闘力の差による指数補正をかけて算出する。
+  * 💡 小数点以下は切り捨てる。
+@@ -319,10 +439,17 @@ function getCounterStrength(defender, attacker, distance) {
+  * }}
+  */
+ export function resolveCombat(attacker, defender, distance = 1, flankingBonus = 0) {
++    // 💡 クラス相性ボーナス(getClassMatchupBonus。例: 対騎兵は騎兵相手に+10)は、攻撃側/防御側の
++    //    役割ではなく「そのユニット自身の戦闘力」に乗る。そのため、攻撃側は先制攻撃(offense)にも
++    //    反撃を受ける際の抵抗力(defense)にも同じattackerBonusが、防御側は抵抗力(defense)にも
++    //    反撃時の攻撃力(offense)にも同じdefenderBonusが、一貫して加算される。
++    const attackerBonus = getClassMatchupBonus(attacker, defender);
++    const defenderBonus = getClassMatchupBonus(defender, attacker);
++
+     // 1. 先制攻撃(攻撃側 → 防御側)。
+     //    攻撃側の攻撃力は先制攻撃のルールに従って選択し、防御側の抵抗力は常に近距離戦闘力を用いる。
+-    const firstStrikeStrength = getFirstStrikeStrength(attacker) + flankingBonus;
+-    const firstDamage = rollDamage(firstStrikeStrength, getEffectiveCombatStrength(defender));
++    const firstStrikeStrength = getFirstStrikeStrength(attacker) + attackerBonus + flankingBonus;
++    const firstDamage = rollDamage(firstStrikeStrength, getEffectiveCombatStrength(defender) + defenderBonus);
+     defender.hp = (defender.hp ?? 0) - firstDamage;
+     const defenderDestroyed = defender.hp <= 0;
+ 
+@@ -339,11 +466,129 @@ export function resolveCombat(attacker, defender, distance = 1, flankingBonus =
+     } else {
+         // 2. 反撃(防御側 → 攻撃側)。
+         //    防御側は今受けたばかりのダメージによる戦闘力低下(HP10減少ごとに-1)が反撃にも反映される。
+-        const counterStrength = getCounterStrength(defender, attacker, distance);
+-        counterDamage = rollDamage(counterStrength, getEffectiveCombatStrength(attacker));
++        const counterStrength = getCounterStrength(defender, attacker, distance) + defenderBonus;
++        counterDamage = rollDamage(counterStrength, getEffectiveCombatStrength(attacker) + attackerBonus);
+         attacker.hp = (attacker.hp ?? 0) - counterDamage;
+         attackerDestroyed = attacker.hp <= 0;
+     }
+ 
+     return { firstDamage, counterDamage, defenderDestroyed, attackerDestroyed, counterSkippedReason };
++}
++
++// 【都市(都心)の攻防】
++// 都市自身のマスを直接攻撃できるようにする一連の関数。§13/README参照。
++
++/** civId が保有する近接系(melee/antiCavalry/cavalry)ユニット(海軍除く)の中で最も高い戦闘力(基礎値)。無ければ0。 */
++export function getBestMeleeCombatStrength(civId, tiles) {
++    let best = 0;
++    for (const key in tiles) {
++        const unit = tiles[key].combatUnit;
++        if (unit?.ownerId !== civId || unit.domain === "naval") continue;
++        if (!isMeleeUnitClass(unit.unitClass)) continue;
++        best = Math.max(best, unit.combatStrength ?? 0);
++    }
++    return best;
++}
++
++/** civId が保有する遠距離系ユニット(海軍除く)の中で最も高い遠距離戦闘力(基礎値)。無ければ0。 */
++export function getBestRangedCombatStrength(civId, tiles) {
++    let best = 0;
++    for (const key in tiles) {
++        const unit = tiles[key].combatUnit;
++        if (unit?.ownerId !== civId || unit.domain === "naval") continue;
++        if (!isRangedUnit(unit)) continue;
++        best = Math.max(best, unit.rangedCombatStrength ?? unit.combatStrength ?? 0);
++    }
++    return best;
++}
++
++/**
++ * 都市戦闘力(近接ユニットに攻撃された際、都市が反撃・抵抗に用いる戦闘力)を算出する。
++ * = max(自国最強の近接系ユニットの戦闘力 - CITY_COMBAT_STRENGTH_PENALTY, 駐留ユニットの実効戦闘力)
++ * 駐留ユニットは「今そのマスに実在する個体」なのでHPによる低下(getEffectiveCombatStrength)を
++ * 反映するが、国内最強ユニットの項は「自国の軍事力の目安」という位置づけのため基礎値を使う。
++ * @param {string} civId 都市の所有国家ID
++ * @param {any} tiles 全タイルデータ
++ * @param {any} [garrisonUnit] 都市のマスに駐留中の戦闘ユニット(いなければ省略可)
++ */
++export function getCityCombatStrength(civId, tiles, garrisonUnit) {
++    const nationalBaseline = Math.max(0, getBestMeleeCombatStrength(civId, tiles) - CITY_COMBAT_STRENGTH_PENALTY);
++    const garrisonStrength = garrisonUnit ? getEffectiveCombatStrength(garrisonUnit) : 0;
++    return Math.max(nationalBaseline, garrisonStrength);
++}
++
++/** 防壁があるときの被ダメージ倍率を、攻撃側の兵種から算出する(未分類は軽減なし=1倍、安全側)。 */
++export function getWallDamageMultiplier(unitClass) {
++    return WALL_DAMAGE_MULTIPLIERS[unitClass] ?? 1;
++}
++
++/**
++ * 戦闘ユニットが都市(都心)を攻撃した場合のダメージ処理。resolveCombatと似ているが、
++ * 防御側が「都市」であるため、戦闘力の算出方法・防壁による軽減・反撃の有無が異なる:
++ * ・攻撃側の攻撃力は通常どおり近接/遠距離を自動選択する(getFirstStrikeStrength)。
++ *   都市側にはクラス相性ボーナス(対騎兵など)は適用されない(ユニット同士の相性であり、
++ *   都市はどのクラスにも属さないため)。
++ * ・防壁(city.wall)があれば、算出したダメージに攻撃側の兵種に応じた倍率
++ *   (getWallDamageMultiplier。近接系15%/遠隔50%/攻城100%)をかけてから適用し、
++ *   まず防壁の残りHP(city.wallHp)を削り、削りきれなかった分だけ都心のHP(city.hp)を削る。
++ *   防壁が無ければ倍率をかけず、ダメージはそのまま都心のHPに直接入る。
++ * ・都市が反撃するのは近接系(melee/antiCavalry/cavalry)ユニットから攻撃された場合のみ
++ *   (遠距離・攻城ユニットからの一方的な攻撃には反撃しない。都市が既に撃破された場合も反撃なし)。
++ * city オブジェクトの hp/wallHp/attackedRecently を直接更新する。
++ * @param {any} attacker 攻撃側の戦闘ユニット
++ * @param {any} city 対象都市のデータ(tile.city)
++ * @param {number} cityCombatStrength getCityCombatStrength() で算出した都市の戦闘力
++ * @returns {{
++ *   damage: number, wallDamage: number, hpDamage: number, cityDestroyed: boolean,
++ *   counterDamage: number, attackerDestroyed: boolean,
++ *   counterSkippedReason: "cityDestroyed" | "notMelee" | null
++ * }}
++ */
++export function resolveCityAttack(attacker, city, cityCombatStrength) {
++    const attackerStrength = getFirstStrikeStrength(attacker);
++    const rawDamage = rollDamage(attackerStrength, cityCombatStrength);
++
++    const hasWall = !!city.wall;
++    const multiplier = hasWall ? getWallDamageMultiplier(attacker?.unitClass) : 1;
++    const damage = Math.max(0, Math.floor(rawDamage * multiplier));
++
++    const wallHpBefore = hasWall ? (city.wallHp ?? WALL_MAX_HP) : 0;
++    const wallDamage = Math.min(damage, wallHpBefore);
++    const hpDamage = damage - wallDamage;
++
++    if (hasWall) city.wallHp = wallHpBefore - wallDamage;
++    city.hp = (city.hp ?? CITY_MAX_HP) - hpDamage;
++    // 💡 修理(cmdRepairWall)・回復判定の両方が参照する「最近攻撃を受けた」フラグ。
++    //    都市所有者の次の手番開始時(processPlayerTurnStart)にリセットされる。
++    city.attackedRecently = true;
++    const cityDestroyed = city.hp <= 0;
++
++    let counterDamage = 0;
++    let attackerDestroyed = false;
++    let counterSkippedReason = null;
++
++    if (cityDestroyed) {
++        counterSkippedReason = "cityDestroyed";
++    } else if (!isMeleeUnitClass(attacker?.unitClass)) {
++        counterSkippedReason = "notMelee";
++    } else {
++        counterDamage = rollDamage(cityCombatStrength, getEffectiveCombatStrength(attacker));
++        attacker.hp = (attacker.hp ?? 0) - counterDamage;
++        attackerDestroyed = attacker.hp <= 0;
++    }
++
++    return { damage, wallDamage, hpDamage, cityDestroyed, counterDamage, attackerDestroyed, counterSkippedReason };
++}
++
++/**
++ * 防壁を持つ都市が、遠距離攻撃で敵ユニットを攻撃した場合のダメージを算出する(反撃なし。
++ * 都市は動けないため、防御側の攻撃範囲を問わず一方的に攻撃が成立する)。
++ * defender オブジェクトの hp を直接更新する。
++ * @param {number} cityRangedStrength getBestRangedCombatStrength() で算出した都市の遠距離戦闘力
++ * @param {any} defender 攻撃対象の戦闘ユニット
++ */
++export function resolveCityRangedAttack(cityRangedStrength, defender) {
++    const damage = rollDamage(cityRangedStrength, getEffectiveCombatStrength(defender));
++    defender.hp = (defender.hp ?? 0) - damage;
++    return { damage, defenderDestroyed: defender.hp <= 0 };
+ }
+\ No newline at end of file
+diff --git a/scripts/commands.js b/scripts/commands.js
+index 91c8df6..1420a7f 100644
+--- a/scripts/commands.js
++++ b/scripts/commands.js
+@@ -2,12 +2,18 @@
+ import { world, system, BlockPermutation, PlayerPermissionLevel, CustomCommandStatus, CustomCommandParamType, CommandPermissionLevel } from "@minecraft/server";
+ import { generateMap, TERRAIN_TYPES, worldToTile, TILE_SIZE, RESOURCE_TYPES, ASSUMED_SIMULATION_RANGE_BLOCKS, isImpassableTerrain, isWaterTerrain } from "./mapGen.js";
+ import { getMapConfig, setMapConfig, getTile, setTile, resetAll, setTiles, getTiles, broadcast, getMatchSettings, getMapGenSettings } from "./state.js";
+-import { joinGame, turnInfoText, isPlayersTurn, endGame, getTurnState, setTurnState, getCityCurrentYields, resolveMissileImpact, getPlayerColor, checkAndAnnounceVictory } from "./turns.js";
+-import { PRODUCTION_DEFS, canStartProduction, startProduction, cancelProduction, addWorkers, consumeWorkerAction, hasAvailableWorkerAction, getProductionIds } from "./production.js";
++import { joinGame, turnInfoText, isPlayersTurn, endGame, getTurnState, setTurnState, getCityCurrentYields, resolveMissileImpact, getPlayerColor, checkAndAnnounceVictory, connectTradeRoutes, isAlliedOrSameCiv } from "./turns.js";
++import { PRODUCTION_DEFS, canStartProduction, startProduction, cancelProduction, tickProduction, addWorkers, consumeWorkerAction, hasAvailableWorkerAction, getProductionIds } from "./production.js";
+ import { getDefinition, getKindLabel, startProgress, getDefinitions } from "./progression.js";
+ import { hasDiplomaticAgreement, signAgreement, isAtWar } from "./diplomacy.js";
+-import { getAttackRange, resolveCombat, tileDistance, canUnitEnterTerrain, canUnitEnterOwnership, countFlankingAllies, getFlankingBonus, canTravelPath } from "./combat.js";
+-import { addVirtualCiv, getControllableCivs, getActiveCivId, setActiveCivId, getActingPlayer, getOnlinePlayerById, getRealPlayer } from "./civs.js";
++import {
++    getAttackRange, resolveCombat, tileDistance, canUnitEnterTerrain, canUnitEnterOwnership,
++    canUnitEnterCityTile, countFlankingAllies, getFlankingBonus, canTravelPath,
++    getAttackableCityTargets, getCityCombatStrength, getBestRangedCombatStrength,
++    resolveCityAttack, resolveCityRangedAttack, isMeleeUnitClass,
++    CITY_MAX_HP, WALL_MAX_HP, CITY_RANGED_ATTACK_RANGE,
++} from "./combat.js";
++import { addVirtualCiv, getControllableCivs, getActiveCivId, setActiveCivId, getActingPlayer, getOnlinePlayerById, getRealPlayer, getCivStorageHandle, resolveCivName } from "./civs.js";
+ import { getFacilityDef, canInstallFacility, installFacility, getFacilityIds } from "./facilities.js";
+ import { resolveOwningCityKey } from "./adjacency.js";
+ import { getDistrictDef, canStartDistrict, startDistrictConstruction, getDistrictBuildingDef, canStartDistrictBuilding, startDistrictBuildingConstruction, getDistrictIds, getDistrictBuildingIds } from "./districts.js";
+@@ -96,12 +102,14 @@ function cmdHelp(player) {
+         "§e/civ:claim §f: 周囲の土地を領有 (コスト: 人口1)",
+         "§e/civ:buyrights §f: 開拓権を獲得 (コスト: 首都人口2)",
+         "§e/civ:settle §f: 都市を建設 (コスト: 開拓権x1)",
+-        "§e/civ:build <worker|warrior|spearman|archer|battleship|horseman|swordsman|catapult|crossbowman|cruiser|missile|tradingPost|granary|obelisk|market|trainingGround|antiAir|capital> §f: 生産を開始",
++        "§e/civ:build <worker|warrior|spearman|pikeman|archer|battleship|horseman|knight|tank|swordsman|musketman|modernInfantry|catapult|cannon|artillery|crossbowman|machineGunner|cruiser|dreadnought|uoooo|missile|tradingPost|granary|obelisk|market|trainingGround|wall|antiAir|capital|reactorRestart> §f: 生産を開始",
+         "§c/civ:cancelbuild §f: 進行中の生産を中止(蓄積分は次に引き継ぎ)",
++        "§6/civ:rushbuy §f: 進行中の生産をゴールドで即時購入(必要ゴールド = 残り必要生産力×3)",
++        "§6/civ:giftgold <国家ID> <金額> §f: 他国家にゴールドを贈与する",
+         "§e/civ:chop §f: 森林を伐採して住宅上限+1",
+-        "§e/civ:install <quarry|blacksmith|harbor> §f: 足元の空き領有マスに施設を設置(労働者の行動回数を1消費)",
++        "§e/civ:install <quarry|blacksmith|harbor|pasture|camp|plantation> §f: 足元の空き領有マスに施設を設置(労働者の行動回数を1消費)",
+         "§e/civ:district <sacredSite|industrialZone|campus> §f: 足元の空き領有マスに区域の建設を開始(帰属都市の生産力を使用)",
+-        "§e/civ:districtbuilding <shrine|library|cathedral> §f: 足元の区域に専用の建造物を建設開始(帰属都市の生産力を使用)",
++        "§e/civ:districtbuilding <shrine|library|cathedral|workshop|factory|coalPowerPlant|oilPowerPlant|nuclearPowerPlant> §f: 足元の区域に専用の建造物を建設開始(帰属都市の生産力を使用)",
+         "§e/civ:foundreligion §f: 宗教を創始する(国家全体の信仰力100以上、かつ聖地が必要)",
+         "§e/civ:renamereligion <名前> §f: 創始した宗教の名前を変更する",
+         "§e/civ:buyreligious <missionary|apostle|inquisitor> §f: 都市の信仰力を使って宗教ユニットを購入(社/大聖堂/審問の開始が必要。購入するたびにコスト+30)",
+@@ -501,6 +509,73 @@ export function cmdCancelProduction(player) {
+     return { ok: true };
+ }
+ 
++// 💡 ゴールドで残りの必要生産力ぶんを即座に購入する(§23)。1生産力あたりこの倍率のゴールドが必要。
++// 💡 ui.jsのメインメニューはボタンラベルの事前表示にも同じ値が要るが、ui.jsはcommands.jsを
++//    (循環import回避のため)トップレベルでimportしない設計になっているので、
++//    RUSH_BUY_GOLD_PER_PRODUCTION_PREVIEWという名前でui.js側に同じ値を複製している。
++//    この定数を変更したら、ui.jsの同名定数(コメント検索で見つかる)も合わせて変更すること。
++const RUSH_BUY_GOLD_PER_PRODUCTION = 3;
++
++/**
++ * 💡 ゴールドによる即時購入コマンド。足元の自都市で進行中の生産(city.production)の残り必要
++ *    生産力ぶんを、通常のターン経過による完成(turns.js の processPlayerTurnStart)と全く同じ
++ *    tickProduction() を直接呼んで即座に完成させる(資源消費・配置失敗時のcancelledなど
++ *    既存ロジックがそのまま効く)。区域(district)の建設には使えない(city.production限定)。
++ */
++export function cmdRushBuyProduction(player) {
++    const config = getMapConfig();
++    if (!config) { reply(player, "§cマップ未生成です。"); return { ok: false }; }
++    if (!isPlayersTurn(player)) { reply(player, "§cあなたのターンではありません。"); return { ok: false }; }
++
++    const { tx, tz } = worldToTile(config, Math.floor(player.location.x), Math.floor(player.location.z));
++    const tile = getTile(tx, tz);
++    if (!tile || !tile.city) { reply(player, "§cここにあなたの都市はありません。"); return { ok: false }; }
++    if (tile.ownerId !== player.id) { reply(player, "§cこの都市の所有権がありません。"); return { ok: false }; }
++    if (!tile.city.production) { reply(player, "§c現在、生産中の物がありません。"); return { ok: false }; }
++
++    const remaining = Math.max(0, tile.city.production.cost - tile.city.production.progress);
++    const goldCost = Math.ceil(remaining * RUSH_BUY_GOLD_PER_PRODUCTION);
++    const gold = player.getDynamicProperty("strategic_gold") ?? 0;
++    if (gold < goldCost) {
++        reply(player, `§cゴールドが足りません。(必要: ${goldCost}、保有: ${gold})`);
++        return { ok: false };
++    }
++
++    const allTiles = getTiles();
++    const def = PRODUCTION_DEFS[tile.city.production.id];
++    const result = tickProduction(tile.city, remaining, { cityKey: `${tx},${tz}`, tiles: allTiles, connectTradeRoutes, isAllied: isAlliedOrSameCiv, player });
++    setTiles(allTiles);
++    if (!result) { reply(player, "§c購入に失敗しました。"); return { ok: false }; }
++
++    player.setDynamicProperty("strategic_gold", gold - goldCost);
++    broadcast(`§6[Gold] ${player.name} が都市【${tile.city.name}】の【${def?.label ?? tile.city.production?.id}】をゴールド${goldCost}で即時購入しました！ (残高: ${gold - goldCost})`);
++    reply(player, result.message);
++    return { ok: true };
++}
++
++/**
++ * 💡 他国家へのゴールドの贈与(§23)。相手の承諾は不要な一方的な取引として最小実装する。
++ */
++export function cmdGiftGold(player, targetCivId, amount) {
++    if (!isPlayersTurn(player)) { reply(player, "§cあなたのターンではありません。"); return { ok: false }; }
++    const goldAmount = Math.floor(Number(amount));
++    if (!Number.isFinite(goldAmount) || goldAmount <= 0) { reply(player, "§c金額は1以上の整数で指定してください。"); return { ok: false }; }
++    if (targetCivId === player.id) { reply(player, "§c自国には贈与できません。"); return { ok: false }; }
++
++    const targetHandle = getCivStorageHandle(targetCivId);
++    if (!targetHandle) { reply(player, "§c対象の国家が見つかりません(オフラインの可能性があります)。"); return { ok: false }; }
++
++    const gold = player.getDynamicProperty("strategic_gold") ?? 0;
++    if (gold < goldAmount) { reply(player, `§cゴールドが足りません。(必要: ${goldAmount}、保有: ${gold})`); return { ok: false }; }
++
++    player.setDynamicProperty("strategic_gold", gold - goldAmount);
++    targetHandle.setDynamicProperty("strategic_gold", (targetHandle.getDynamicProperty("strategic_gold") ?? 0) + goldAmount);
++
++    const targetName = resolveCivName(targetCivId) ?? targetCivId;
++    broadcast(`§6[Gold] ${player.name} が【${targetName}】にゴールド${goldAmount}を贈与しました！`);
++    return { ok: true };
++}
++
+ // 💡 新機能: ミサイル発射コマンド。targetTx/targetTzはマス座標(tx, tz)を指定する。
+ export function cmdLaunchMissile(player, targetTx, targetTz) {
+     const config = getMapConfig();
+@@ -645,7 +720,8 @@ export function cmdSettle(player) {
+         isCapital: isCapital,
+         tradingPost: null,     // 交易所データ用の初期スロット(完成すると { status: "active", routes: [] } になる)
+         production: null,      // 💡 進行中の生産 { id, progress, cost } | null (production.js で管理)
+-        productionCarry: 0     // 💡 中断/完了時に余った生産力(次の生産に引き継ぐ)
++        productionCarry: 0,    // 💡 中断/完了時に余った生産力(次の生産に引き継ぐ)
++        hp: CITY_MAX_HP,        // 💡 都心のHP(§13)。0になるまで敵ユニットは進入できない
+     };
+     if (initWorkers > 0) addWorkers(tile.city, initWorkers);
+     if (isCapital) player.setDynamicProperty("civ:hasFoundedCapital", true);
+@@ -1265,6 +1341,8 @@ export function registerScriptCommands() {
+                 case "buildmissile": cmdStartProduction(player, "missile"); break; // 互換用エイリアス
+                 case "buildtp": cmdStartProduction(player, "tradingPost"); break; // 互換用エイリアス
+                 case "cancelbuild": cmdCancelProduction(player); break;
++                case "rushbuy": cmdRushBuyProduction(player); break;
++                case "giftgold": cmdGiftGold(player, args[0], args[1]); break;
+                 case "research": cmdStartProgress(player, "technology", args[0]); break;
+                 case "civic": cmdStartProgress(player, "civic", args[0]); break;
+                 case "launch": {
+@@ -1411,6 +1489,8 @@ export function registerCustomCommands() {
+ 
+         cmd("cancelbuild", "進行中の生産を中止する(蓄積分は次に引き継ぎ)", {}, (origin) => runCivCommand(origin, (r, player) => cmdCancelProduction(player)));
+ 
++        cmd("rushbuy", "進行中の生産をゴールドで即時購入する", {}, (origin) => runCivCommand(origin, (r, player) => cmdRushBuyProduction(player)));
++
+         cmd("research", "技術の研究を開始する", {
+             mandatoryParameters: [{ name: "civ:technologyId", type: CustomCommandParamType.Enum }],
+         }, (origin, techId) => runCivCommand(origin, (r, player) => cmdStartProgress(player, "technology", techId)));
+@@ -1491,6 +1571,10 @@ export function cmdMoveCombatUnit(player, fromTx, fromTz, toTx, toTz) {
+         reply(player, "§c「関係なし」の相手の領土には移動できません。宣戦布告するか、不可侵条約/同盟を結んでください。");
+         return { ok: false };
+     }
++    if (!canUnitEnterCityTile(unit, target)) {
++        reply(player, `§c【${target.city.name}】はまだ都心のHPが残っているため進入できません。(現在HP: ${Math.max(0, Math.round(target.city.hp ?? CITY_MAX_HP))}/${CITY_MAX_HP})`);
++        return { ok: false };
++    }
+ 
+     const distance = Math.max(Math.abs(toTx - fromTx), Math.abs(toTz - fromTz));
+     const remaining = unit.movementRemaining ?? unit.movement ?? 0;
+@@ -1524,6 +1608,9 @@ export function cmdAttackCombatUnit(player, fromTx, fromTz, toTx, toTz) {
+     const attacker = source?.combatUnit;
+     if (!attacker || attacker.ownerId !== player.id) { reply(player, "§cこのマスに攻撃可能なあなたの戦闘ユニットはいません。"); return { ok: false }; }
+     if (!target) { reply(player, "§c攻撃先がマップ外です。"); return { ok: false }; }
++    // 💡 都市のマスに駐留するユニットは、都市自身が防衛の主体になるため直接攻撃できない
++    //    (§13)。都市そのものを攻撃するには cmdAttackCity を使う。
++    if (target.city) { reply(player, "§cこのマスには都市があります。都市への攻撃は別のコマンド/メニューから行ってください。"); return { ok: false }; }
+ 
+     const defender = target.combatUnit;
+     if (!defender) { reply(player, "§c攻撃先に戦闘ユニットが存在しません。"); return { ok: false }; }
+@@ -1582,6 +1669,74 @@ export function cmdAttackCombatUnit(player, fromTx, fromTz, toTx, toTz) {
+     return { ok: true, result };
+ }
+ 
++/**
++ * 戦闘ユニットで、攻撃距離内にある敵の都市(都心)を攻撃する。都市のマスに戦闘ユニットが
++ * 駐留していても、都市自身が防衛の主体になるため(§13)、cmdAttackCombatUnitとは別のこの
++ * コマンドを使う(駐留ユニット自体は直接の攻撃対象にならない。都市戦闘力の算出に寄与するのみ)。
++ * 攻撃を行うと、そのユニットは今ターンの残り移動力を使い切る。
++ */
++export function cmdAttackCity(player, fromTx, fromTz, cityTx, cityTz) {
++    const config = getMapConfig();
++    if (!config) { reply(player, "§cマップ未生成です。"); return { ok: false }; }
++    if (!isPlayersTurn(player)) { reply(player, "§cあなたのターンではありません。"); return { ok: false }; }
++
++    const source = getTile(fromTx, fromTz);
++    const attacker = source?.combatUnit;
++    if (!attacker || attacker.ownerId !== player.id) { reply(player, "§cこのマスに攻撃可能なあなたの戦闘ユニットはいません。"); return { ok: false }; }
++
++    const allTiles = getTiles();
++    const target = allTiles[`${cityTx},${cityTz}`];
++    if (!target?.city) { reply(player, "§c攻撃先に都市がありません。"); return { ok: false }; }
++    if (target.ownerId === player.id) { reply(player, "§c自分の都市は攻撃できません。"); return { ok: false }; }
++    if (!isAtWar(player.id, target.ownerId)) { reply(player, "§c宣戦布告していない相手の都市は攻撃できません。外交メニューから宣戦布告してください。"); return { ok: false }; }
++
++    const remaining = attacker.movementRemaining ?? attacker.movement ?? 0;
++    if (remaining <= 0) { reply(player, "§c移動力が残っていないため攻撃できません。"); return { ok: false }; }
++
++    const range = getAttackRange(attacker);
++    const distance = tileDistance(fromTx, fromTz, cityTx, cityTz);
++    if (distance < 1 || distance > range) { reply(player, "§cそのマスは攻撃距離外です。"); return { ok: false }; }
++
++    const attackerLabel = attacker.label ?? "戦闘ユニット";
++    const cityName = target.city.name;
++
++    const garrisonUnit = target.combatUnit?.ownerId === target.ownerId ? target.combatUnit : null;
++    const cityStrength = getCityCombatStrength(target.ownerId, allTiles, garrisonUnit);
++    const result = resolveCityAttack(attacker, target.city, cityStrength);
++    attacker.movementRemaining = 0;
++    source.combatUnit = attacker;
++
++    const lines = [];
++    lines.push(`§c[Siege] ${player.name} の${attackerLabel} (${fromTx}, ${fromTz}) が【${cityName}】(${cityTx}, ${cityTz}) を攻撃！`);
++    lines.push(target.city.wall
++        ? `§7防壁軽減後ダメージ: ${result.damage} (シールド: -${result.wallDamage} / 都心HP: -${result.hpDamage})`
++        : `§7ダメージ: ${result.damage}`);
++
++    if (result.cityDestroyed) {
++        lines.push(`§c[Fall]【${cityName}】の都心HPが0になりました！ 敵ユニットが進入・占領できるようになります。`);
++    } else {
++        const wallText = target.city.wall ? ` §7| シールド: ${Math.max(0, Math.round(target.city.wallHp ?? 0))}/${WALL_MAX_HP}` : "";
++        lines.push(`§7  -> 【${cityName}】 残りHP: ${Math.max(0, Math.round(target.city.hp))}/${CITY_MAX_HP}${wallText}`);
++        if (result.counterSkippedReason === "notMelee") {
++            lines.push(`§7遠距離/攻城ユニットのため、都市からの反撃はありません。`);
++        } else {
++            lines.push(`§7都市からの反撃ダメージ: ${result.counterDamage} (都市戦闘力: ${cityStrength})`);
++            if (result.attackerDestroyed) {
++                lines.push(`§c[Defeated] ${attackerLabel}は都市の反撃により撃破されました！`);
++                source.combatUnit = null;
++                refreshUnitLabelAt(fromTx, fromTz);
++            } else {
++                lines.push(`§7  -> ${attackerLabel} 残りHP: ${Math.max(0, Math.round(attacker.hp))}/${attacker.maxHp ?? 100}`);
++            }
++        }
++    }
++
++    setTile(fromTx, fromTz, source);
++    setTile(cityTx, cityTz, target);
++    broadcast(lines.join("\n"));
++    return { ok: true, result };
++}
++
+ /**
+  * 都市に自分の戦闘ユニットが存在し、かつそのユニットの移動力が最大値のまま(今ターン未行動)
+  * であれば、その都市を占領してオーナーを自分に切り替える。
+@@ -1615,6 +1770,13 @@ export function cmdCaptureCity(player, tx, tz) {
+     unit.movementRemaining = 0;
+     tile.combatUnit = unit;
+ 
++    // 💡 占領した都市の都心HP・防壁シールドは満タンに戻す(占領直後にすぐ奪い返されるのを防ぐ、
++    //    新しい統治下での再出発という位置づけ)。防壁そのものは破壊せず引き継ぐ(他の建造物と同じ)。
++    tile.city.hp = CITY_MAX_HP;
++    if (tile.city.wall) tile.city.wallHp = WALL_MAX_HP;
++    tile.city.attackedRecently = false;
++    tile.city.rangedAttackUsedThisTurn = false;
++
+     // 💡 占領した都市はそのまま自分の首都にはならない(通常の都市として扱う)。
+     //    首都を占領しても占領側にそのまま首都権が移ってしまうバグの修正。
+     //    占領側がここを首都にしたい場合は、改めて「遷都」を生産する必要がある。
+@@ -1683,6 +1845,77 @@ export function cmdCaptureCity(player, tx, tz) {
+     return { ok: true };
+ }
+ 
++/**
++ * 防壁(city.wall)を持つ都市が、範囲CITY_RANGED_ATTACK_RANGE内の敵ユニットへ遠距離攻撃する。
++ * 戦闘力は自国最強の遠距離系ユニットの遠距離戦闘力(getBestRangedCombatStrength)と等しい。
++ * 反撃は発生しない(都市は動けないため、防御側の攻撃範囲を問わず一方的に成立する)。
++ * 1都市につき1ターン1回まで(city.rangedAttackUsedThisTurn。processPlayerTurnStartでリセット)。
++ */
++export function cmdCityRangedAttack(player, cityTx, cityTz, targetTx, targetTz) {
++    const config = getMapConfig();
++    if (!config) { reply(player, "§cマップ未生成です。"); return { ok: false }; }
++    if (!isPlayersTurn(player)) { reply(player, "§cあなたのターンではありません。"); return { ok: false }; }
++
++    const allTiles = getTiles();
++    const cityTile = allTiles[`${cityTx},${cityTz}`];
++    if (!cityTile?.city || cityTile.ownerId !== player.id) { reply(player, "§cそのマスにあなたの都市がありません。"); return { ok: false }; }
++    if (!cityTile.city.wall) { reply(player, "§cこの都市には防壁が無いため、遠距離攻撃できません。"); return { ok: false }; }
++    if (cityTile.city.rangedAttackUsedThisTurn) { reply(player, "§cこの都市は今ターン既に遠距離攻撃を行いました。(1ターン1回まで)"); return { ok: false }; }
++
++    const distance = tileDistance(cityTx, cityTz, targetTx, targetTz);
++    if (distance < 1 || distance > CITY_RANGED_ATTACK_RANGE) { reply(player, "§cそのマスは都市の遠距離攻撃範囲外です。"); return { ok: false }; }
++
++    const targetTile = allTiles[`${targetTx},${targetTz}`];
++    const defender = targetTile?.combatUnit;
++    if (!defender) { reply(player, "§c攻撃先に戦闘ユニットが存在しません。"); return { ok: false }; }
++    if (defender.ownerId === player.id) { reply(player, "§c自分のユニットは攻撃できません。"); return { ok: false }; }
++    if (!isAtWar(player.id, defender.ownerId)) { reply(player, "§c宣戦布告していない相手のユニットは攻撃できません。外交メニューから宣戦布告してください。"); return { ok: false }; }
++
++    const cityRangedStrength = getBestRangedCombatStrength(player.id, allTiles);
++    const result = resolveCityRangedAttack(cityRangedStrength, defender);
++    cityTile.city.rangedAttackUsedThisTurn = true;
++
++    const defenderLabel = defender.label ?? "戦闘ユニット";
++    let message = `§c[Siege] ${player.name} の【${cityTile.city.name}】(遠距離戦闘力:${cityRangedStrength})が (${targetTx}, ${targetTz}) の${defenderLabel}に${result.damage}ダメージ！`;
++
++    if (result.defenderDestroyed) {
++        message += ` §c撃破した！`;
++        targetTile.combatUnit = null;
++        refreshUnitLabelAt(targetTx, targetTz);
++    } else {
++        message += ` §7(残りHP: ${Math.max(0, Math.round(defender.hp))}/${defender.maxHp ?? 100})`;
++    }
++
++    setTile(cityTx, cityTz, cityTile);
++    setTile(targetTx, targetTz, targetTile);
++    broadcast(message);
++    return { ok: true };
++}
++
++/**
++ * 防壁の耐久(city.wallHp)を修理する。都市が直近で攻撃を受けていない(city.attackedRecently が
++ * false)場合のみ、帰属都市の労働者の行動回数を1消費して、シールドHPを満タンまで回復する。
++ */
++export function cmdRepairWall(player, tx, tz) {
++    const config = getMapConfig();
++    if (!config) { reply(player, "§cマップ未生成です。"); return { ok: false }; }
++    if (!isPlayersTurn(player)) { reply(player, "§cあなたのターンではありません。"); return { ok: false }; }
++
++    const tile = getTile(tx, tz);
++    if (!tile?.city || tile.ownerId !== player.id) { reply(player, "§cそのマスにあなたの都市がありません。"); return { ok: false }; }
++    if (!tile.city.wall) { reply(player, "§cこの都市には防壁がありません。"); return { ok: false }; }
++    if ((tile.city.wallHp ?? WALL_MAX_HP) >= WALL_MAX_HP) { reply(player, "§c防壁は既に満タンです。"); return { ok: false }; }
++    if (tile.city.attackedRecently) { reply(player, "§c直近のターンで攻撃を受けた都市の防壁は修理できません。"); return { ok: false }; }
++    if (!hasAvailableWorkerAction(tile.city)) { reply(player, `§c[Fail] 労働者が足りません！この作業には帰属都市【${tile.city.name}】の労働者が必要です。`); return { ok: false }; }
++
++    consumeWorkerAction(tile.city);
++    tile.city.wallHp = WALL_MAX_HP;
++    setTile(tx, tz, tile);
++
++    broadcast(`§e[Repair] ${player.name} が【${tile.city.name}】の防壁を修理しました！ (シールドHP: ${WALL_MAX_HP}/${WALL_MAX_HP})`);
++    return { ok: true };
++}
++
+ // 💡 行動力を消費して回復する際、最大HPに対して回復する割合。
+ const HEAL_ACTION_HP_RATIO = 0.3;
+ 
+diff --git a/scripts/districts.js b/scripts/districts.js
+index 6bd1a61..ead727a 100644
+--- a/scripts/districts.js
++++ b/scripts/districts.js
+@@ -63,8 +63,9 @@ export const DISTRICT_DEFS = {
+         icon: "[Industrial]",
+         cost: 60,
+         requiresTechnology: "apprenticeship",
+-        // 💡 工業地帯があるだけで、都市の生産力+3(隣接マスに関係なく毎ターン)。
+-        flatYields: { production: 3 },
++        // 💡 工業地帯があるだけで、都市の生産力+4(隣接マスに関係なく毎ターン)。徒弟制度は
++        //    このツリーで最も高額な技術(300)の1つのため、投資に見合うよう+3から引き上げた。
++        flatYields: { production: 4 },
+         adjacencyBonuses: [
+             { id: "industrialQuarry", label: "採石場からの恩恵", match: matchesFacility("quarry"), yieldPerMatch: { production: 1 } },
+             { id: "industrialMountain", label: "山・山脈からの恩恵", match: matchesTerrainWeighted({ mountain: 1, mountainRange: 2 }), yieldPerMatch: { production: 1 } },
+@@ -179,6 +180,13 @@ export function startDistrictConstruction(city, tile, id, tileKey) {
+  * @property {string} [requiresCivic] 建設に必要な社会制度ID(civic progression)
+  * @property {Record<string, number>} [flatYields] この建造物があるだけで(隣接マスに関係なく)
+  *   都市に毎ターン加算される産出量(例: { faith: 2 })
++ * @property {number} [goldUpkeep] この建造物1つあたりのゴールド維持費(§23)。省略時は
++ *   turns.js の BUILDING_GOLD_UPKEEP(既定1)が使われる(calculateGoldUpkeep参照)。
++ * @property {string} [exclusiveGroup] 同じ値を持つ他の建造物と排他(同時に1つのみ有効)。
++ *   後から別のグループメンバーを選んで建設完了すると、以前のメンバーは自動的に city[id]=false に
++ *   戻り、onReplacedが呼ばれる(§24。発電所3種が該当。tickDistrictConstruction参照)。
++ * @property {(city: any) => void} [onReplaced] exclusiveGroupの別メンバーに置き換えられた際、
++ *   古い方の建造物側で呼ばれる後始末フック(例: 原子炉の老朽化年数カウンタを消す)。
+  * @property {(city: any, tile: any) => void} onComplete 完成時の効果を適用する関数
+  * @property {(tx: number, tz: number) => string} [completeMessage] 完成時のメッセージ生成関数
+  */
+@@ -216,6 +224,85 @@ export const DISTRICT_BUILDING_DEFS = {
+         onComplete: (city) => { city.cathedral = true; },
+         completeMessage: (tx, tz) => `§e[Complete] (${tx}, ${tz})の聖地に大聖堂が完成しました！ (信仰力の産出+4)`,
+     },
++    workshop: {
++        label: "工房",
++        icon: "[Workshop]",
++        cost: 150,
++        forDistrict: "industrialZone",
++        requiresTechnology: "apprenticeship",
++        flatYields: { production: 2 },
++        onComplete: (city) => { city.workshop = true; },
++        completeMessage: (tx, tz) => `§e[Complete] (${tx}, ${tz})の工業地帯に工房が完成しました！ (生産力+2)`,
++    },
++    // 💡 工場・発電所3種の効果(自国の隣接都市への生産力/科学力ボーナス、電力供給、燃料消費、
++    //    CO2蓄積)は flatYields では表現できない特殊効果のため、turns.js の
++    //    applyIndustrialInfrastructure() が fuelResource/powerOutput/co2PerTurn/ownCityBonus/
++    //    matchesOwnIndustrialAdjacency を直接見て処理する(§24。wall/antiAirと同じ考え方)。
++    factory: {
++        label: "工場",
++        icon: "[Factory]",
++        cost: 300,
++        forDistrict: "industrialZone",
++        requiresTechnology: "machinery",
++        goldUpkeep: 2,
++        onComplete: (city) => { city.factory = true; },
++        completeMessage: (tx, tz) => `§e[Complete] (${tx}, ${tz})に工場が完成しました！ (自国の隣接都市の生産力+3、電力供給2ごとにさらに+3)`,
++    },
++    coalPowerPlant: {
++        label: "石炭火力発電所",
++        icon: "[CoalPlant]",
++        cost: 270,
++        forDistrict: "industrialZone",
++        requiresTechnology: "electricity",
++        exclusiveGroup: "powerPlant",
++        fuelResource: "strategic_coal",
++        fuelLabel: "石炭",
++        powerOutput: 4,
++        co2PerTurn: 6,
++        goldUpkeep: 3,
++        // 💡 自都市への生産力ボーナスは「工業地帯自身の隣接ボーナスと同量」という特殊効果
++        //   (industrialZoneのadjacencyBonusesをこのタイル位置でもう一度評価して加算する)。
++        matchesOwnIndustrialAdjacency: true,
++        onComplete: (city) => { city.coalPowerPlant = true; },
++        onReplaced: (city) => { city.coalPowerPlant = false; },
++        completeMessage: (tx, tz) => `§e[Complete] (${tx}, ${tz})に石炭火力発電所が完成しました！ (自国の隣接都市に電力供給、毎ターン石炭1→電力4を発電、CO2大量排出)`,
++    },
++    oilPowerPlant: {
++        label: "石油火力発電所",
++        icon: "[OilPlant]",
++        cost: 300,
++        forDistrict: "industrialZone",
++        requiresTechnology: "electricity",
++        exclusiveGroup: "powerPlant",
++        fuelResource: "strategic_oil",
++        fuelLabel: "石油",
++        powerOutput: 4,
++        co2PerTurn: 3,
++        goldUpkeep: 3,
++        ownCityBonus: { production: 3 },
++        onComplete: (city) => { city.oilPowerPlant = true; },
++        onReplaced: (city) => { city.oilPowerPlant = false; },
++        completeMessage: (tx, tz) => `§e[Complete] (${tx}, ${tz})に石油火力発電所が完成しました！ (自都市の生産力+3、自国の隣接都市に電力供給、毎ターン石油1→電力4を発電、CO2中程度排出)`,
++    },
++    nuclearPowerPlant: {
++        label: "原子力発電所",
++        icon: "[NuclearPlant]",
++        cost: 450,
++        forDistrict: "industrialZone",
++        requiresTechnology: "electricity",
++        exclusiveGroup: "powerPlant",
++        fuelResource: "strategic_uranium",
++        fuelLabel: "ウラン",
++        powerOutput: 16,
++        co2PerTurn: 1,
++        goldUpkeep: 3,
++        ownCityBonus: { production: 5, science: 4 },
++        // 💡 老朽化年数(nuclearPowerPlantAge)は毎ターンturns.js側で+1され、事故の発生率(表示のみ、
++        //    §24)の算出に使われる。プロジェクト「原子炉の再稼働」(production.js)で0にリセットできる。
++        onComplete: (city) => { city.nuclearPowerPlant = true; city.nuclearPowerPlantAge = 0; },
++        onReplaced: (city) => { city.nuclearPowerPlant = false; city.nuclearPowerPlantAge = undefined; },
++        completeMessage: (tx, tz) => `§e[Complete] (${tx}, ${tz})に原子力発電所が完成しました！ (自都市の生産力+5・科学力+4、自国の隣接都市に電力供給、毎ターンウラン1→電力16を発電、CO2少量排出)`,
++    },
+ };
+ 
+ /**
+@@ -313,6 +400,17 @@ export function tickDistrictConstruction(city, productionAmount, tiles, ownerId)
+ 
+     if (construction.progress >= construction.cost) {
+         if (isBuilding) {
++            // 💡 exclusiveGroup(発電所3種)を持つ建造物が完成した場合、同じグループの他の
++            //    メンバーが既に有効ならその建造物は無効化する(1都市につき発電所は1つのみ。§24)。
++            if (def.exclusiveGroup) {
++                for (const otherId in DISTRICT_BUILDING_DEFS) {
++                    if (otherId === construction.id) continue;
++                    const otherDef = DISTRICT_BUILDING_DEFS[otherId];
++                    if (otherDef.exclusiveGroup === def.exclusiveGroup && city[otherId]) {
++                        otherDef.onReplaced?.(city);
++                    }
++                }
++            }
+             def.onComplete?.(city, targetTile);
+         } else {
+             targetTile.district = { id: construction.id, label: def.label, ownerId: targetTile.ownerId, ownerName: targetTile.ownerName };
+diff --git a/scripts/facilities.js b/scripts/facilities.js
+index 9e3f133..40cdea8 100644
+--- a/scripts/facilities.js
++++ b/scripts/facilities.js
+@@ -19,7 +19,7 @@
+ 
+ import { hasCompletedProgress, getDefinition } from "./progression.js";
+ import { matchesTerrainWeighted, sumAssignedTileYields, sumAssignedTileAdjacencyYields } from "./adjacency.js";
+-import { RESOURCE_TYPES, isWaterTerrain } from "./mapGen.js";
++import { RESOURCE_TYPES, TERRAIN_TYPES, isWaterTerrain } from "./mapGen.js";
+ 
+ /**
+  * @typedef {Object} FacilityDef
+@@ -28,9 +28,16 @@ import { RESOURCE_TYPES, isWaterTerrain } from "./mapGen.js";
+  * @property {string} [requiresTechnology] 設置に必要な技術ID(technology progression)
+  * @property {string} [requiresCivic] 設置に必要な社会制度ID(civic progression)
+  * @property {string} [requiresResource] 設置できるマスの資源を限定する(tile.resourceと一致が必要)
++ * @property {string[]} [requiresTerrain] 設置できるマスの地形(tile.type)を限定する(いずれかに
++ *   一致が必要。requiresResourceが資源を限定するのに対し、こちらは地形そのものを限定する。
++ *   例: キャンプは森林・熱帯雨林・寒冷地限定、プランテーションは砂漠・草原限定)
+  * @property {boolean} [allowWater] trueの場合のみ水上マス(川・海・池・湖)に設置できる(省略時は不可)
+  * @property {Record<string, number>} [flatYields] この施設があるだけで(隣接マスに関係なく)
+  *   都市に毎ターン加算される産出量(例: { iron: 2, production: 4 })
++ * @property {{resource: string, yields: Record<string, number>}} [resourceYields] flatYieldsと違い、
++ *   この施設が設置されているマス自身が指定した資源(resource)を持つ場合にのみ、毎ターン加算される
++ *   産出量(例: 牧場は、設置マスに資源「馬」があるときだけ馬+1)。requiresResourceのように設置自体を
++ *   制限するのではなく、「どこにでも置けるが、資源があるマスに置くとボーナスが乗る」施設向け。
+  * @property {Array<any>} [adjacencyBonuses] 隣接マスに応じたボーナスのルール一覧(adjacency.js参照)
+  * @property {(tile: any, tx: number, tz: number) => string} [installMessage] 設置完了時のメッセージ生成関数
+  */
+@@ -62,6 +69,34 @@ export const FACILITY_DEFS = {
+         flatYields: { food: 2, production: 1 },
+         installMessage: (tile, tx, tz) => `§e[Complete] (${tx}, ${tz}) に港を設置しました！(毎ターン食料+2、生産力+1)`,
+     },
++    pasture: {
++        label: "牧場",
++        icon: "[Pasture]",
++        requiresTechnology: "animalHusbandry",
++        // 💡 requiresResourceと違い、設置自体は資源を問わない(どの領有マスにも置ける)が、
++        //    設置マスに資源「馬」がある場合のみ resourceYields で馬+1が追加される(下記installMessage参照)。
++        flatYields: { food: 1 },
++        resourceYields: { resource: "horse", yields: { horse: 1 } },
++        installMessage: (tile, tx, tz) => `§e[Complete] (${tx}, ${tz}) に牧場を設置しました！(毎ターン食料+1${tile.resource === "horse" ? "、資源「馬」により馬+1" : ""})`,
++    },
++    camp: {
++        label: "キャンプ",
++        icon: "[Camp]",
++        requiresTechnology: "currency",
++        // 💡 森林・熱帯雨林・寒冷地(狩猟に適した地形)限定。requiresTerrainの初使用例。
++        requiresTerrain: ["forest", "rainforest", "cold"],
++        flatYields: { gold: 3 },
++        installMessage: (tile, tx, tz) => `§e[Complete] (${tx}, ${tz}) にキャンプを設置しました！(毎ターンゴールド+3)`,
++    },
++    plantation: {
++        label: "プランテーション",
++        icon: "[Plantation]",
++        requiresTechnology: "currency",
++        // 💡 砂漠・草原(農園に適した地形)限定。
++        requiresTerrain: ["desert", "grassland"],
++        flatYields: { gold: 3 },
++        installMessage: (tile, tx, tz) => `§e[Complete] (${tx}, ${tz}) にプランテーションを設置しました！(毎ターンゴールド+3)`,
++    },
+ };
+ 
+ export function getFacilityDef(id) {
+@@ -90,6 +125,10 @@ export function canInstallFacility(tile, id, playerId, player = null) {
+     if (tile.district) return { ok: false, message: `§cこのマスには区域【${tile.district.label ?? tile.district.id}】があるため施設は設置できません。` };
+     if (tile.underDistrictConstruction) return { ok: false, message: "§cこのマスは区域を建設中のため施設は設置できません。" };
+     if (!def.allowWater && isWaterTerrain(tile.type)) return { ok: false, message: `§c【${def.label}】は水上マスには設置できません。` };
++    if (def.requiresTerrain && !def.requiresTerrain.includes(tile.type)) {
++        const terrainLabels = def.requiresTerrain.map(t => TERRAIN_TYPES[t]?.label ?? t).join("・");
++        return { ok: false, message: `§c【${def.label}】は${terrainLabels}にのみ設置できます。` };
++    }
+     if (def.requiresResource && tile.resource !== def.requiresResource) {
+         const resourceLabel = RESOURCE_TYPES[def.requiresResource]?.label ?? def.requiresResource;
+         return { ok: false, message: `§c【${def.label}】は資源【${resourceLabel}】があるマスにのみ設置できます。` };
+@@ -141,4 +180,29 @@ export function getFacilityAdjacencyYields(assignedTiles, tiles) {
+  */
+ export function getFacilityFlatYields(assignedTiles) {
+     return sumAssignedTileYields(assignedTiles, (tile) => tile?.facility, FACILITY_DEFS, "flatYields");
++}
++
++/**
++ * 都市に帰属するマスの一覧から、resourceYieldsを持つ施設が設置されているものを見つけ、
++ * その施設のマス自身が指定資源(resourceYields.resource)を持っている場合にのみ産出量を合算する
++ * (牧場の「馬がある場合だけ馬+1」のような、設置マス自身の資源に条件付くボーナス用。flatYieldsは
++ * 資源の有無を問わず常に加算されるのに対し、こちらは条件を満たさなければ何も加算しない)。
++ * @param {Array<{tx:number, tz:number, tile:any}>} assignedTiles その都市に帰属するマスの一覧
++ * @returns {{ [yieldKey: string]: number }}
++ */
++export function getFacilityResourceYields(assignedTiles) {
++    const totals = {};
++    if (!Array.isArray(assignedTiles)) return totals;
++
++    for (const t of assignedTiles) {
++        const facility = t.tile?.facility;
++        if (!facility) continue;
++        const def = FACILITY_DEFS[facility.id];
++        const rc = def?.resourceYields;
++        if (!rc || t.tile.resource !== rc.resource) continue;
++
++        for (const key in rc.yields) totals[key] = (totals[key] ?? 0) + rc.yields[key];
++    }
++
++    return totals;
+ }
+\ No newline at end of file
+diff --git a/scripts/main.js b/scripts/main.js
+index fcb31ed..816245a 100644
+--- a/scripts/main.js
++++ b/scripts/main.js
+@@ -6,12 +6,12 @@ import { registerScriptCommands, registerCustomCommands } from "./commands.js";
+ import { openMainMenu } from "./ui.js";
+ import { getTurnState, getTiles, getMapConfig, getStateVersion, broadcast } from "./state.js";
+ import { worldToTile, TERRAIN_TYPES, RESOURCE_TYPES } from "./mapGen.js";
+-import { getCityCurrentYields } from "./turns.js";
++import { getCityCurrentYields, getCityGoldBreakdown, formatGoldBreakdownText } from "./turns.js";
+ import { forceEndTurnAuto } from "./bots.js";
+ import { PRODUCTION_DEFS, getWorkerCount } from "./production.js";
+ import { getDistrictDef } from "./districts.js";
+-import { getEffectiveCombatStrength, getEffectiveRangedStrength, isRangedUnit } from "./combat.js";
+-import { getActingPlayer, getActiveCivId, resolveCivName } from "./civs.js";
++import { getEffectiveCombatStrength, getEffectiveRangedStrength, isRangedUnit, getUnitClassLabel, CITY_MAX_HP, WALL_MAX_HP } from "./combat.js";
++import { getActingPlayer, getActiveCivId, resolveCivName, getCivStorageHandle } from "./civs.js";
+ import { hasDiplomaticAgreement } from "./diplomacy.js";
+ import { syncUnitLabels } from "./unitLabels.js";
+ 
+@@ -177,6 +177,12 @@ system.runInterval(() => {
+             const viewerIsParticipant = Array.isArray(turn.playerOrder) && turn.playerOrder.includes(viewerCivId);
+             const isFriendlyOwner = (ownerId) => !viewerIsParticipant || !ownerId || ownerId === viewerCivId || hasDiplomaticAgreement(viewerCivId, ownerId);
+ 
++            // 💡 保有ゴールド(§23)。マスの所有者に関係なく、今操作している国家(ソロテストで
++            //    仮想国家を操作中ならそちら)の残高を常に表示する。
++            const viewerHandle = viewerCivId ? getCivStorageHandle(viewerCivId) : null;
++            const gold = viewerHandle?.getDynamicProperty("strategic_gold") ?? 0;
++            const goldLine = viewerHandle ? `\n§6[Gold]x${gold}${gold < 0 ? " §c(破産中！)" : ""}` : "";
++
+             // 地形ラベルの取得
+             const terrainLabel = TERRAIN_TYPES[tile.type]?.label ?? "未知の地形";
+ 
+@@ -190,8 +196,13 @@ system.runInterval(() => {
+ 
+             // 領有プレイヤー名と都市名の整形(人口は自国・同盟国の都市のみ表示)
+             const ownerText = tile.ownerName ? `§a${tile.ownerName}` : "§7中立";
++            // 💡 都心のHP/防壁シールドは、人口などと違い敵国の都市でも常に表示する
++            //    (攻め落とせるかどうかの判断に直結する軍事情報のため。§13)。
++            const cityHpText = tile.city
++                ? ` §c[HP]${Math.max(0, Math.round(tile.city.hp ?? CITY_MAX_HP))}/${CITY_MAX_HP}${tile.city.wall ? ` §b[Wall]${Math.max(0, Math.round(tile.city.wallHp ?? WALL_MAX_HP))}/${WALL_MAX_HP}` : ""}`
++                : "";
+             const cityText = tile.city
+-                ? (isFriendlyOwner(tile.ownerId) ? ` §e[都市: ${tile.city.name} ([Pop]x${tile.city.population})]` : ` §e[都市: ${tile.city.name}]`)
++                ? (isFriendlyOwner(tile.ownerId) ? ` §e[都市: ${tile.city.name} ([Pop]x${tile.city.population})]${cityHpText}` : ` §e[都市: ${tile.city.name}]${cityHpText}`)
+                 : "";
+             const facilityText = tile.facility ? ` §7[施設: ${tile.facility.label ?? tile.facility.id}]` : "";
+             const districtText = tile.district
+@@ -199,7 +210,7 @@ system.runInterval(() => {
+                 : (tile.underDistrictConstruction ? " §5[区域: 建設中...]" : "");
+             const combatUnit = tile.combatUnit;
+             const combatUnitText = combatUnit
+-                ? `§c[${combatUnit.domain === "naval" ? "Naval" : "Land"}] ${combatUnit.label ?? combatUnit.id} | HP: ${combatUnit.hp ?? 0}/${combatUnit.maxHp ?? 100} | 戦闘力: ${formatCombatStrengthText(combatUnit)} | 移動力: ${combatUnit.movementRemaining ?? combatUnit.movement ?? 0}/${combatUnit.movement ?? 0} | 攻撃距離: ${combatUnit.attackRange ?? combatUnit.movement ?? 0}`
++                ? `§c[${combatUnit.domain === "naval" ? "Naval" : "Land"}] ${combatUnit.label ?? combatUnit.id} §7(${getUnitClassLabel(combatUnit.unitClass)})§r | HP: ${combatUnit.hp ?? 0}/${combatUnit.maxHp ?? 100} | 戦闘力: ${formatCombatStrengthText(combatUnit)} | 移動力: ${combatUnit.movementRemaining ?? combatUnit.movement ?? 0}/${combatUnit.movement ?? 0} | 攻撃距離: ${combatUnit.attackRange ?? combatUnit.movement ?? 0}`
+                 : "§7戦闘ユニット: なし";
+             const religiousUnit = tile.religiousUnit;
+             const religiousUnitText = religiousUnit
+@@ -224,7 +235,12 @@ system.runInterval(() => {
+                     const oilText = yields.oil > 0 ? ` §7| §b[Oil]x${yields.oil}` : "";
+                     const ironText = yields.iron > 0 ? ` §7| §7[Iron]x${yields.iron}` : "";
+                     const faithText = (yields.faith ?? 0) > 0 ? ` §7| §d[Faith]x${yields.faith}` : "";
+-                    currentYieldLine = `\n§f今の産出(都市全体): §a[Food]x${yields.food} §7| §6[Prod]x${yields.production}${oilText}${ironText}${faithText}`;
++                    // 💡 ゴールド産出の内訳(§23)。都心の基礎値だけの都市も多いため、内訳が
++                    //    1件だけ(都心のみ)でもそのまま表示する(何もない訳ではないため)。
++                    const goldText = (yields.gold ?? 0) > 0
++                        ? ` §7| §6[Gold]x${yields.gold} §7(${formatGoldBreakdownText(getCityGoldBreakdown(cityKey, tiles))})`
++                        : "";
++                    currentYieldLine = `\n§f今の産出(都市全体): §a[Food]x${yields.food} §7| §6[Prod]x${yields.production}${oilText}${ironText}${faithText}${goldText}`;
+ 
+                     // 💡 進行中の生産(ユニット/建造物)を汎用的に表示。新しい生産物が増えても自動で対応。
+                     let productionText = "";
+@@ -245,7 +261,11 @@ system.runInterval(() => {
+                         const districtProgressText = Math.floor(c.districtConstruction.progress * 10) / 10;
+                         districtProductionText = ` §7| §5${districtDef?.icon ?? "[Sacred]"}${districtDef?.label ?? c.districtConstruction.id}区域建設中(${districtProgressText}/${c.districtConstruction.cost})`;
+                     }
+-                    cityInfoLine = `\n§6【${c.isCapital ? "首都" : "都市"}: ${c.name}】§f 人口:§a${c.population}§f/§e${c.housing} §f| [Worker]${getWorkerCount(c)}人 §f| [Food]貯留${c.foodStorage ?? 0} §f| §c飢餓${c.starvationTurns ?? 0}/3${productionText}${tpText}${missileText}${faithStorageText}${districtProductionText}`;
++                    // 💡 電力(§24)。受電量が1以上か工場を持つ都市に限って表示する。
++                    const powerText = ((c.powerReceived ?? 0) > 0 || c.factory)
++                        ? ` §7| §b[Power]x${c.powerReceived ?? 0}`
++                        : "";
++                    cityInfoLine = `\n§6【${c.isCapital ? "首都" : "都市"}: ${c.name}】§f 人口:§a${c.population}§f/§e${c.housing} §f| [Worker]${getWorkerCount(c)}人 §f| [Food]貯留${c.foodStorage ?? 0} §f| §c飢餓${c.starvationTurns ?? 0}/3${productionText}${tpText}${missileText}${faithStorageText}${districtProductionText}${powerText}`;
+                 } else {
+                     // 💡 自国・同盟国以外の都市は、偵察による有利化を防ぐため詳細情報を表示しない
+                     //    (存在・所有者・都市名までは領有表示で分かるが、それ以上は隠す)。
+@@ -259,7 +279,8 @@ system.runInterval(() => {
+                 `§f領有: ${ownerText}${cityText}${facilityText}${districtText}\n` +
+                 `§fベース産出: ${yieldText}\n${combatUnitText}${religiousUnitText}` +
+                 currentYieldLine +
+-                cityInfoLine
++                cityInfoLine +
++                goldLine
+             );
+         } else {
+             // 生成されたグリッドの範囲外にプレイヤーがいる場合
+diff --git a/scripts/mapGen.js b/scripts/mapGen.js
+index 635b8cb..9c8d0da 100644
+--- a/scripts/mapGen.js
++++ b/scripts/mapGen.js
+@@ -38,7 +38,8 @@ export const RESOURCE_TYPES = {
+     meteor: { label: "隕石", category: "戦略", allowedTerrains: ["grassland", "desert", "mountain"], block: "minecraft:magma" },
+     magic_crystal: { label: "魔晶石", category: "高級", allowedTerrains: ["desert"], block: "minecraft:crying_obsidian" },
+     moonstone: { label: "月の石", category: "高級", allowedTerrains: ["grassland"], block: "minecraft:end_stone" },
+-    uranium: { label: "ウラン(238)", category: "戦略", allowedTerrains: ["grassland"], block: "minecraft:element_92" }
++    uranium: { label: "ウラン(238)", category: "戦略", allowedTerrains: ["grassland"], block: "minecraft:element_92" },
++    horse: { label: "馬", category: "戦略", allowedTerrains: ["grassland"], block: "minecraft:composter" },
+ };
+ 
+ const RESOURCE_KEYS = Object.keys(RESOURCE_TYPES);
+diff --git a/scripts/production.js b/scripts/production.js
+index 6b76d97..3997c19 100644
+--- a/scripts/production.js
++++ b/scripts/production.js
+@@ -32,6 +32,7 @@
+ import { hasCompletedProgress, getDefinition } from "./progression.js";
+ import { isWaterTerrain } from "./mapGen.js";
+ import { getAdjacentTiles } from "./adjacency.js";
++import { WALL_MAX_HP } from "./combat.js";
+ 
+ /** 労働者1人が持つ行動回数。 */
+ export const WORKER_ACTIONS_PER_UNIT = 3;
+@@ -96,6 +97,14 @@ export function getTotalWorkerActionsRemaining(city) {
+  * @property {string} label 表示名
+  * @property {string} icon 表示アイコン(絵文字)
+  * @property {"unit"|"building"} category カテゴリ(メニュー分類用)
++ * @property {string} [unitClass] 戦闘ユニット(category:"unit")の兵種("melee"/"antiCavalry"/
++ *   "cavalry"/"ranged"/"siege"/"naval")。combat.js の UNIT_CLASS_COUNTERS によるクラス相性
++ *   ボーナス(例: 対騎兵は騎兵相手に戦闘力+10)の判定に使う。この値はメニュー表示用の参照で、
++ *   実際の戦闘計算には onComplete が配置するユニット個体データ側の unitClass を使う(両方に
++ *   同じ値を設定しておくこと)。💡 一部のユニットは完成時に国家の戦略資源在庫を1消費する
++ *   (horseman/knight→馬、swordsman/musketman/cannon→鉄、tank/dreadnought→石油。
++ *   placeProducedCombatUnitConsumingResource参照)。在庫が無ければ配置失敗と同様に
++ *   生産が中止される(onComplete参照)。
+  * @property {number} cost 完成に必要な生産力の合計値
+  * @property {boolean} [uniquePerCity] true の場合、都市に既に存在する場合は再生産不可
+  * @property {(city: any) => boolean} [hasBuilt] uniquePerCity 用: 既に保有済みか判定する関数
+@@ -104,6 +113,8 @@ export function getTotalWorkerActionsRemaining(city) {
+  * @property {string} [requiresCivic] 生産に必要な社会制度ID(civic progression)。requiresTechnology と
+  *   併用した場合、両方を取得済みでなければ生産できない(例: 市場は貨幣経済+商業の両方が必要)。
+  * @property {boolean} [disallowInCapital] true の場合、首都ではこの建造物を生産できない(遷都用)
++ * @property {string} [requiresBuildingFlag] この都市が city[このID] を保有していないと生産できない
++ *   (例: プロジェクト「原子炉の再稼働」は city.nuclearPowerPlant が必要。§24)
+  * @property {Record<string, number>} [flatYields] この建造物(category:"building")があるだけで
+  *   (隣接マスに関係なく)都市に毎ターン加算される産出量(例: { faith: 4 })。
+  *   adjacency.js の getFlagFlatYields() が city[buildingId] を見て自動的に反映するので、
+@@ -185,6 +196,45 @@ function placeProducedNavalUnit(ctx, createUnit) {
+     return { cancelled: true, cancelReason: "noNavalTile" };
+ }
+ 
++/**
++ * placeProducedCombatUnit()(または placeProducedNavalUnit())に、完成時に国家の戦略資源在庫を
++ * 1消費する前提条件を追加する共通ヘルパー(horsemanの馬・swordsmanの鉄・tank/dreadnoughtの
++ * 石油など)。在庫が無ければ他の配置失敗と同じく生産を中止する(cancelReason: "noResource")。
++ * 消費は実際に配置できた場合のみ行う(配置自体が中止された場合は消費しない)。
++ * @param {any} ctx tickProduction から渡されるコンテキスト({ player } を含む)
++ * @param {string} resourceProp 消費するDynamic Property名(例: "strategic_horse")
++ * @param {string} resourceLabel 在庫不足時のメッセージに使う表示名(例: "馬")
++ * @param {(ownerId: string, ownerName: string) => any} createUnit 配置するユニットのデータを作る関数
++ * @param {(ctx: any, createUnit: any) => any} [placeFn] 配置関数(既定は placeProducedCombatUnit。
++ *   海軍ユニットは placeProducedNavalUnit を渡す)
++ * @returns {{ cancelled: boolean, cancelReason?: string, resourceLabel?: string } | undefined}
++ */
++function placeProducedCombatUnitConsumingResource(ctx, resourceProp, resourceLabel, createUnit, placeFn = placeProducedCombatUnit) {
++    const stock = ctx?.player?.getDynamicProperty(resourceProp) ?? 0;
++    if (stock < 1) return { cancelled: true, cancelReason: "noResource", resourceLabel };
++    const result = placeFn(ctx, createUnit);
++    if (result?.cancelled) return result;
++    ctx.player.setDynamicProperty(resourceProp, stock - 1);
++    return result;
++}
++
++/**
++ * placeProducedCombatUnitConsumingResource() のマス配置を伴わない版(ミサイルの在庫加算・
++ * 対空砲のフラグ設定など、city.production完了時にマスへの配置を行わない完成処理向け)。
++ * 在庫が無ければ他の資源消費ユニットと同じく生産を中止する(cancelReason: "noResource")。
++ * @param {any} ctx tickProduction から渡されるコンテキスト({ player } を含む)
++ * @param {string} resourceProp 消費するDynamic Property名(例: "strategic_uranium")
++ * @param {string} resourceLabel 在庫不足時のメッセージに使う表示名(例: "ウラン")
++ * @param {() => void} applyEffect 実際に完成効果を適用する関数(在庫が確認できた場合のみ呼ばれる)
++ */
++function completeConsumingResource(ctx, resourceProp, resourceLabel, applyEffect) {
++    const stock = ctx?.player?.getDynamicProperty(resourceProp) ?? 0;
++    if (stock < 1) return { cancelled: true, cancelReason: "noResource", resourceLabel };
++    applyEffect();
++    ctx.player.setDynamicProperty(resourceProp, stock - 1);
++    return undefined;
++}
++
+ export const PRODUCTION_DEFS = {
+     worker: {
+         label: "労働者",
+@@ -201,20 +251,23 @@ export const PRODUCTION_DEFS = {
+         icon: "[Missile]",
+         category: "unit",
+         cost: 200,
+-        onComplete: (city) => {
++        requiresTechnology: "rocketry",
++        // 💡 ミサイルは完成時に国家の資源「ウラン」在庫を1消費する(在庫が無ければ生産中止。§24)。
++        onComplete: (city, ctx) => completeConsumingResource(ctx, "strategic_uranium", "ウラン", () => {
+             city.missiles = (city.missiles ?? 0) + 1;
+-        },
+-        completeMessage: (city) => `§c[Missile][Complete]【${city.name}】ミサイルの製造が完了しました！ (在庫: ${city.missiles}発)`,
++        }),
++        completeMessage: (city) => `§c[Missile][Complete]【${city.name}】ミサイルの製造が完了しました！ (在庫: ${city.missiles}発、資源「ウラン」-1)`,
+     },
+     warrior: {
+         label: "戦士",
+         icon: "[Warrior]",
+         category: "unit",
+         cost: 30,
++        unitClass: "melee",
+         requiresEmptyCombatTile: true,
+         onComplete: (city, ctx) => placeProducedCombatUnit(ctx, (ownerId, ownerName) => ({
+             // 💡 attackRange: 近接ユニットのため攻撃距離は移動力と同じ(1)。domain: 陸軍ユニット。
+-            id: "warrior", label: "戦士", hp: 100, maxHp: 100, combatStrength: 20,
++            id: "warrior", label: "戦士", hp: 100, maxHp: 100, combatStrength: 20, unitClass: "melee",
+             movement: 1, movementRemaining: 1, attackRange: 1, domain: "land", ownerId, ownerName,
+         })),
+         completeMessage: (city) => `§e[Warrior]【${city.name}】に戦士を配置しました！ (HP: 100/100、戦闘力: 20)`,
+@@ -224,12 +277,13 @@ export const PRODUCTION_DEFS = {
+         icon: "[Archer]",
+         category: "unit",
+         cost: 50,
++        unitClass: "ranged",
+         requiresEmptyCombatTile: true,
+         requiresTechnology: "archery",
+         onComplete: (city, ctx) => placeProducedCombatUnit(ctx, (ownerId, ownerName) => ({
+             // 💡 弓兵は遠距離戦闘ユニット: 遠距離戦闘力20、近距離戦闘力15の2種類の戦闘力を持つ。
+             //    combatStrength は互換表示用に近距離戦闘力と同じ値を入れておく。domain: 陸軍ユニット。
+-            id: "archer", label: "弓兵", hp: 100, maxHp: 100,
++            id: "archer", label: "弓兵", hp: 100, maxHp: 100, unitClass: "ranged",
+             combatStrength: 15, rangedCombatStrength: 20, meleeCombatStrength: 15,
+             movement: 1, movementRemaining: 1, attackRange: 2, domain: "land", ownerId, ownerName,
+         })),
+@@ -247,101 +301,262 @@ export const PRODUCTION_DEFS = {
+         })),
+         completeMessage: (city) => `§e[Warrior]【${city.name}】にうおｗを配置しました！ (HP: 100/100、戦闘力: 20)`,
+     },
++    // 💡 id/内部キーは"battleship"のままだが、表示名は「帆船」にしている(§8参照)。
++    //    前提技術「航海術」は序盤の安い技術(帆走の時代)なので、駆逐艦・巡洋艦のような
++    //    近代の鋼鉄艦の名前を割り当てると時代感が逆転してしまう。造船術(前提: 航海術)で
++    //    解禁される巡洋艦との上位関係も「帆船→巡洋艦」なら一目で分かるため、こちらにした。
+     battleship: {
+-        label: "軍艦",
+-        icon: "[Battleship]",
++        label: "帆船",
++        icon: "[Sailboat]",
+         category: "unit",
+         cost: 60,
++        unitClass: "naval",
++        requiresTechnology: "sailing",
+         // 💡 都市自身のマスではなく、隣接する水上マス(海・川・池・湖)に配置される海軍ユニット。
+         //    隣接する水上マスが無い(内陸の都市)場合は生産完了時に中止される。
+         onComplete: (city, ctx) => placeProducedNavalUnit(ctx, (ownerId, ownerName) => ({
+             // 💡 domain: 海軍ユニット。水上マスにしか進入できない。
+-            id: "battleship", label: "軍艦", hp: 100, maxHp: 100, combatStrength: 25,
++            id: "battleship", label: "帆船", hp: 100, maxHp: 100, combatStrength: 25, unitClass: "naval",
+             movement: 2, movementRemaining: 2, attackRange: 3, domain: "naval", ownerId, ownerName,
+         })),
+-        completeMessage: (city) => `§e[Battleship]【${city.name}】に軍艦を配置しました！ (HP: 100/100、戦闘力: 25)`,
++        completeMessage: (city) => `§e[Sailboat]【${city.name}】に帆船を配置しました！ (HP: 100/100、戦闘力: 25)`,
+     },
+     spearman: {
+         label: "槍兵",
+         icon: "[Spearman]",
+         category: "unit",
+         cost: 45,
++        unitClass: "antiCavalry",
+         requiresEmptyCombatTile: true,
+         requiresTechnology: "bronzeWorking",
+         onComplete: (city, ctx) => placeProducedCombatUnit(ctx, (ownerId, ownerName) => ({
+-            id: "spearman", label: "槍兵", hp: 100, maxHp: 100, combatStrength: 32,
++            // 💡 対騎兵(antiCavalry): 単体の戦闘力は控えめだが、騎兵(cavalry)クラス相手には
++            //    combat.js の UNIT_CLASS_COUNTERS により戦闘力+10される専門兵科。
++            id: "spearman", label: "槍兵", hp: 100, maxHp: 100, combatStrength: 32, unitClass: "antiCavalry",
+             movement: 1, movementRemaining: 1, attackRange: 1, domain: "land", ownerId, ownerName,
+         })),
+-        completeMessage: (city) => `§e[Spearman]【${city.name}】に槍兵を配置しました！ (HP: 100/100、戦闘力: 32)`,
++        completeMessage: (city) => `§e[Spearman]【${city.name}】に槍兵を配置しました！ (HP: 100/100、戦闘力: 32、対騎兵+10)`,
++    },
++    pikeman: {
++        label: "長槍兵",
++        icon: "[Pikeman]",
++        category: "unit",
++        cost: 70,
++        unitClass: "antiCavalry",
++        requiresEmptyCombatTile: true,
++        // 💡 社会制度「封建制度」で解放される、槍兵の上位互換(中世の対騎兵専門兵科)。
++        requiresCivic: "feudalism",
++        onComplete: (city, ctx) => placeProducedCombatUnit(ctx, (ownerId, ownerName) => ({
++            id: "pikeman", label: "長槍兵", hp: 100, maxHp: 100, combatStrength: 42, unitClass: "antiCavalry",
++            movement: 1, movementRemaining: 1, attackRange: 1, domain: "land", ownerId, ownerName,
++        })),
++        completeMessage: (city) => `§e[Pikeman]【${city.name}】に長槍兵を配置しました！ (HP: 100/100、戦闘力: 42、対騎兵+10)`,
+     },
+     horseman: {
+         label: "騎兵",
+         icon: "[Horseman]",
+         category: "unit",
+         cost: 75,
++        unitClass: "cavalry",
+         requiresEmptyCombatTile: true,
+         requiresTechnology: "horsebackRiding",
+-        onComplete: (city, ctx) => placeProducedCombatUnit(ctx, (ownerId, ownerName) => ({
+-            id: "horseman", label: "騎兵", hp: 100, maxHp: 100, combatStrength: 30,
++        // 💡 兵種が騎兵(cavalry)のユニットは、完成時に国家の資源「馬」在庫を1消費する
++        //    (placeProducedCombatUnitConsumingResource参照。在庫が無ければ生産中止)。
++        onComplete: (city, ctx) => placeProducedCombatUnitConsumingResource(ctx, "strategic_horse", "馬", (ownerId, ownerName) => ({
++            id: "horseman", label: "騎兵", hp: 100, maxHp: 100, combatStrength: 30, unitClass: "cavalry",
+             movement: 3, movementRemaining: 3, attackRange: 1, domain: "land", ownerId, ownerName,
+         })),
+-        completeMessage: (city) => `§e[Horseman]【${city.name}】に騎兵を配置しました！ (HP: 100/100、戦闘力: 30、移動力: 3)`,
++        completeMessage: (city) => `§e[Horseman]【${city.name}】に騎兵を配置しました！ (HP: 100/100、戦闘力: 30、移動力: 3、資源「馬」-1)`,
++    },
++    knight: {
++        label: "騎士",
++        icon: "[Knight]",
++        category: "unit",
++        cost: 110,
++        unitClass: "cavalry",
++        requiresEmptyCombatTile: true,
++        // 💡 社会制度「騎士道」で解放される、騎兵の上位互換。騎兵と同じく完成時に資源「馬」を1消費する。
++        requiresCivic: "chivalry",
++        onComplete: (city, ctx) => placeProducedCombatUnitConsumingResource(ctx, "strategic_horse", "馬", (ownerId, ownerName) => ({
++            id: "knight", label: "騎士", hp: 100, maxHp: 100, combatStrength: 45, unitClass: "cavalry",
++            movement: 4, movementRemaining: 4, attackRange: 1, domain: "land", ownerId, ownerName,
++        })),
++        completeMessage: (city) => `§e[Knight]【${city.name}】に騎士を配置しました！ (HP: 100/100、戦闘力: 45、移動力: 4、資源「馬」-1)`,
++    },
++    tank: {
++        label: "戦車",
++        icon: "[Tank]",
++        category: "unit",
++        cost: 300,
++        unitClass: "cavalry",
++        requiresEmptyCombatTile: true,
++        requiresTechnology: "industrialization",
++        // 💡 騎兵・騎士の系譜を継ぐ機動兵科(兵種は変わらずcavalry)。馬ではなく燃料として
++        //    資源「石油」を1消費する(戦車・戦艦が初めての石油消費ユニット)。
++        onComplete: (city, ctx) => placeProducedCombatUnitConsumingResource(ctx, "strategic_oil", "石油", (ownerId, ownerName) => ({
++            id: "tank", label: "戦車", hp: 100, maxHp: 100, combatStrength: 110, unitClass: "cavalry",
++            movement: 5, movementRemaining: 5, attackRange: 1, domain: "land", ownerId, ownerName,
++        })),
++        completeMessage: (city) => `§e[Tank]【${city.name}】に戦車を配置しました！ (HP: 100/100、戦闘力: 110、移動力: 5、資源「石油」-1)`,
+     },
+     swordsman: {
+         label: "剣士",
+         icon: "[Swordsman]",
+         category: "unit",
+         cost: 90,
++        unitClass: "melee",
+         requiresEmptyCombatTile: true,
+         requiresTechnology: "ironWorking",
++        // 💡 剣士は完成時に国家の資源「鉄」在庫を1消費する(在庫が無ければ生産中止)。
++        onComplete: (city, ctx) => placeProducedCombatUnitConsumingResource(ctx, "strategic_iron", "鉄", (ownerId, ownerName) => ({
++            id: "swordsman", label: "剣士", hp: 100, maxHp: 100, combatStrength: 48, unitClass: "melee",
++            movement: 1, movementRemaining: 1, attackRange: 1, domain: "land", ownerId, ownerName,
++        })),
++        completeMessage: (city) => `§e[Swordsman]【${city.name}】に剣士を配置しました！ (HP: 100/100、戦闘力: 48、資源「鉄」-1)`,
++    },
++    musketman: {
++        label: "銃士",
++        icon: "[Musketman]",
++        category: "unit",
++        cost: 140,
++        // 💡 マスケット銃兵はcombat.jsの兵種上は"melee"扱い(現実の間合いではなく「前線の
++        //    主力歩兵」という役割上の分類。剣士の直系の上位互換)。
++        unitClass: "melee",
++        requiresEmptyCombatTile: true,
++        requiresTechnology: "gunpowder",
++        // 💡 剣士と同じく完成時に資源「鉄」を1消費する(銃身・銃剣の原料として)。
++        onComplete: (city, ctx) => placeProducedCombatUnitConsumingResource(ctx, "strategic_iron", "鉄", (ownerId, ownerName) => ({
++            id: "musketman", label: "銃士", hp: 100, maxHp: 100, combatStrength: 65, unitClass: "melee",
++            movement: 1, movementRemaining: 1, attackRange: 1, domain: "land", ownerId, ownerName,
++        })),
++        completeMessage: (city) => `§e[Musketman]【${city.name}】に銃士を配置しました！ (HP: 100/100、戦闘力: 65、資源「鉄」-1)`,
++    },
++    modernInfantry: {
++        label: "近代歩兵",
++        icon: "[ModernInfantry]",
++        category: "unit",
++        cost: 240,
++        unitClass: "melee",
++        requiresEmptyCombatTile: true,
++        requiresTechnology: "electricity",
+         onComplete: (city, ctx) => placeProducedCombatUnit(ctx, (ownerId, ownerName) => ({
+-            id: "swordsman", label: "剣士", hp: 100, maxHp: 100, combatStrength: 48,
++            id: "modernInfantry", label: "近代歩兵", hp: 100, maxHp: 100, combatStrength: 95, unitClass: "melee",
+             movement: 1, movementRemaining: 1, attackRange: 1, domain: "land", ownerId, ownerName,
+         })),
+-        completeMessage: (city) => `§e[Swordsman]【${city.name}】に剣士を配置しました！ (HP: 100/100、戦闘力: 48)`,
++        completeMessage: (city) => `§e[ModernInfantry]【${city.name}】に近代歩兵を配置しました！ (HP: 100/100、戦闘力: 95)`,
+     },
+     catapult: {
+         label: "カタパルト",
+         icon: "[Catapult]",
+         category: "unit",
+-        cost: 100,
++        // 💡 前提技術「工学」は徒弟制度(300)→工学(150)という、このツリーで最も投資の重い
++        //    チェーンの1つ(累積560)。以前はコスト100(剣士とほぼ同額)と釣り合っていなかったため
++        //    引き上げた。
++        cost: 160,
++        unitClass: "siege",
+         requiresEmptyCombatTile: true,
+         requiresTechnology: "engineering",
+         onComplete: (city, ctx) => placeProducedCombatUnit(ctx, (ownerId, ownerName) => ({
+             // 💡 攻城ユニット: 遠距離戦闘力40だが近距離戦闘力(反撃を受けた際の値)は12と低め。
+-            id: "catapult", label: "カタパルト", hp: 100, maxHp: 100,
++            id: "catapult", label: "カタパルト", hp: 100, maxHp: 100, unitClass: "siege",
+             combatStrength: 12, rangedCombatStrength: 40, meleeCombatStrength: 12,
+             movement: 1, movementRemaining: 1, attackRange: 2, domain: "land", ownerId, ownerName,
+         })),
+         completeMessage: (city) => `§e[Catapult]【${city.name}】にカタパルトを配置しました！ (HP: 100/100、遠距離戦闘力: 40、近距離戦闘力: 12)`,
+     },
++    cannon: {
++        label: "大砲",
++        icon: "[Cannon]",
++        category: "unit",
++        cost: 220,
++        unitClass: "siege",
++        requiresEmptyCombatTile: true,
++        requiresTechnology: "metallurgy",
++        // 💡 カタパルトの上位互換。剣士・銃士と同じく完成時に資源「鉄」を1消費する(砲身の原料)。
++        onComplete: (city, ctx) => placeProducedCombatUnitConsumingResource(ctx, "strategic_iron", "鉄", (ownerId, ownerName) => ({
++            id: "cannon", label: "大砲", hp: 100, maxHp: 100, unitClass: "siege",
++            combatStrength: 20, rangedCombatStrength: 70, meleeCombatStrength: 20,
++            movement: 1, movementRemaining: 1, attackRange: 2, domain: "land", ownerId, ownerName,
++        })),
++        completeMessage: (city) => `§e[Cannon]【${city.name}】に大砲を配置しました！ (HP: 100/100、遠距離戦闘力: 70、近距離戦闘力: 20、資源「鉄」-1)`,
++    },
++    artillery: {
++        label: "近代砲兵",
++        icon: "[Artillery]",
++        category: "unit",
++        cost: 320,
++        unitClass: "siege",
++        requiresEmptyCombatTile: true,
++        requiresTechnology: "industrialization",
++        onComplete: (city, ctx) => placeProducedCombatUnit(ctx, (ownerId, ownerName) => ({
++            id: "artillery", label: "近代砲兵", hp: 100, maxHp: 100, unitClass: "siege",
++            combatStrength: 30, rangedCombatStrength: 130, meleeCombatStrength: 30,
++            movement: 1, movementRemaining: 1, attackRange: 2, domain: "land", ownerId, ownerName,
++        })),
++        completeMessage: (city) => `§e[Artillery]【${city.name}】に近代砲兵を配置しました！ (HP: 100/100、遠距離戦闘力: 130、近距離戦闘力: 30)`,
++    },
+     crossbowman: {
+         label: "重装弓兵",
+         icon: "[Crossbowman]",
+         category: "unit",
+-        cost: 110,
++        // 💡 前提技術「機械工学」は徒弟制度(300)→工学(150)→機械工学(220)というツリー最深部
++        //    (累積780)。以前はコスト110(剣士とほぼ同額)と釣り合っていなかったため引き上げた。
++        cost: 170,
++        unitClass: "ranged",
+         requiresEmptyCombatTile: true,
+         requiresTechnology: "machinery",
+         onComplete: (city, ctx) => placeProducedCombatUnit(ctx, (ownerId, ownerName) => ({
+-            id: "crossbowman", label: "重装弓兵", hp: 100, maxHp: 100,
++            id: "crossbowman", label: "重装弓兵", hp: 100, maxHp: 100, unitClass: "ranged",
+             combatStrength: 25, rangedCombatStrength: 38, meleeCombatStrength: 25,
+             movement: 1, movementRemaining: 1, attackRange: 2, domain: "land", ownerId, ownerName,
+         })),
+         completeMessage: (city) => `§e[Crossbowman]【${city.name}】に重装弓兵を配置しました！ (HP: 100/100、遠距離戦闘力: 38、近距離戦闘力: 25)`,
+     },
++    machineGunner: {
++        label: "機関銃兵",
++        icon: "[MachineGunner]",
++        category: "unit",
++        cost: 260,
++        unitClass: "ranged",
++        requiresEmptyCombatTile: true,
++        requiresTechnology: "electricity",
++        onComplete: (city, ctx) => placeProducedCombatUnit(ctx, (ownerId, ownerName) => ({
++            id: "machineGunner", label: "機関銃兵", hp: 100, maxHp: 100, unitClass: "ranged",
++            combatStrength: 45, rangedCombatStrength: 85, meleeCombatStrength: 45,
++            movement: 1, movementRemaining: 1, attackRange: 2, domain: "land", ownerId, ownerName,
++        })),
++        completeMessage: (city) => `§e[MachineGunner]【${city.name}】に機関銃兵を配置しました！ (HP: 100/100、遠距離戦闘力: 85、近距離戦闘力: 45)`,
++    },
+     cruiser: {
+         label: "巡洋艦",
+         icon: "[Cruiser]",
+         category: "unit",
+         cost: 140,
++        unitClass: "naval",
+         requiresTechnology: "shipBuilding",
+-        // 💡 軍艦と同じく、都市に隣接する水上マスへ配置される海軍ユニット。
++        // 💡 帆船(battleship)と同じく、都市に隣接する水上マスへ配置される海軍ユニット。
+         onComplete: (city, ctx) => placeProducedNavalUnit(ctx, (ownerId, ownerName) => ({
+-            id: "cruiser", label: "巡洋艦", hp: 100, maxHp: 100, combatStrength: 50,
++            id: "cruiser", label: "巡洋艦", hp: 100, maxHp: 100, combatStrength: 50, unitClass: "naval",
+             movement: 3, movementRemaining: 3, attackRange: 4, domain: "naval", ownerId, ownerName,
+         })),
+         completeMessage: (city) => `§e[Cruiser]【${city.name}】に巡洋艦を配置しました！ (HP: 100/100、戦闘力: 50)`,
+     },
++    // 💡 id は "dreadnought"(内部キー"battleship"は帆船が既に使っているため別名)。表示名は
++    //    「戦艦」で、帆船(sailboat)→巡洋艦(cruiser)→戦艦(battleship)という海軍の最終ティア。
++    dreadnought: {
++        label: "戦艦",
++        icon: "[Dreadnought]",
++        category: "unit",
++        cost: 280,
++        unitClass: "naval",
++        requiresTechnology: "industrialization",
++        // 💡 戦車と同じく、燃料として資源「石油」を1消費する。
++        onComplete: (city, ctx) => placeProducedCombatUnitConsumingResource(ctx, "strategic_oil", "石油", (ownerId, ownerName) => ({
++            id: "dreadnought", label: "戦艦", hp: 100, maxHp: 100, combatStrength: 90, unitClass: "naval",
++            movement: 3, movementRemaining: 3, attackRange: 5, domain: "naval", ownerId, ownerName,
++        }), placeProducedNavalUnit),
++        completeMessage: (city) => `§e[Dreadnought]【${city.name}】に戦艦を配置しました！ (HP: 100/100、戦闘力: 90、資源「石油」-1)`,
++    },
+     tradingPost: {
+         label: "交易所",
+         icon: "[Trade]",
+@@ -397,13 +612,15 @@ export const PRODUCTION_DEFS = {
+         cost: 200,
+         uniquePerCity: true,
+         hasBuilt: (city) => !!city.antiAir,
++        requiresTechnology: "rocketry",
+         // 💡 効果そのもの(ミサイルの迎撃)はflatYields等では表現できない特殊効果のため、
+         //    turns.js の resolveMissileImpact() が city.antiAir / city.antiAirUsedThisTurn を
+         //    直接見て判定する(§17)。1ターンに1回までという制限は、他の「今ターン使用済み」系
+         //    フラグ(hasProselytizedThisTurn等)と同じく processPlayerTurnStart で毎ターン
+         //    falseにリセットされる。
+-        onComplete: (city) => { city.antiAir = true; },
+-        completeMessage: (city) => `§e[Complete]【${city.name}】に対空砲が完成しました！ (1ターンに1回、この都市と周囲8マスへ着弾するミサイルを迎撃)`,
++        // 💡 ミサイルと同じく、完成時に国家の資源「ウラン」在庫を1消費する(§24)。
++        onComplete: (city, ctx) => completeConsumingResource(ctx, "strategic_uranium", "ウラン", () => { city.antiAir = true; }),
++        completeMessage: (city) => `§e[Complete]【${city.name}】に対空砲が完成しました！ (1ターンに1回、この都市と周囲8マスへ着弾するミサイルを迎撃、資源「ウラン」-1)`,
+     },
+     market: {
+         label: "市場",
+@@ -427,9 +644,26 @@ export const PRODUCTION_DEFS = {
+         uniquePerCity: true,
+         hasBuilt: (city) => !!city.trainingGround,
+         requiresCivic: "militaryTradition",
+-        flatYields: { production: 2 },
++        // 💡 軍制改革(政治哲学20+軍制改革35=累積55)という社会制度投資の重さに対して
++        //    生産力+2は見劣りしていたため+4に引き上げた。
++        flatYields: { production: 4 },
+         onComplete: (city) => { city.trainingGround = true; },
+-        completeMessage: (city) => `§e[Complete]【${city.name}】訓練場が完成しました！ (生産力+2)`,
++        completeMessage: (city) => `§e[Complete]【${city.name}】訓練場が完成しました！ (生産力+4)`,
++    },
++    wall: {
++        label: "防壁",
++        icon: "[Wall]",
++        category: "building",
++        cost: 80,
++        uniquePerCity: true,
++        hasBuilt: (city) => !!city.wall,
++        requiresTechnology: "masonry",
++        // 💡 効果そのもの(遠距離攻撃の解禁、被ダメージ軽減、+100のシールドHP)はflatYields等では
++        //    表現できない特殊効果のため、combat.js の resolveCityAttack/getWallDamageMultiplier や
++        //    commands.js の都市の遠距離攻撃コマンドが city.wall / city.wallHp を直接見て判定する
++        //    (§13参照)。
++        onComplete: (city) => { city.wall = true; city.wallHp = WALL_MAX_HP; },
++        completeMessage: (city) => `§e[Complete]【${city.name}】に防壁が完成しました！ (シールドHP+${WALL_MAX_HP}、遠距離攻撃が可能に、被ダメージ軽減: 近接15%/遠隔50%/攻城100%)`,
+     },
+     capital: {
+         label: "遷都",
+@@ -454,6 +688,19 @@ export const PRODUCTION_DEFS = {
+         },
+         completeMessage: (city) => `§e[Capital]【${city.name}】が新たな首都になりました！(遷都完了)`,
+     },
++    // 💡 区域専用建造物「原子力発電所」(districts.js)を持つ都市限定のプロジェクト。区域専用
++    //    建造物メニューではなく、通常の生産メニュー(建造物カテゴリ)から選べるようにするため、
++    //    ここPRODUCTION_DEFS側に置く(§24)。uniquePerCityは付けない(老朽化年数が溜まるたびに
++    //    何度でも実行できる)。
++    reactorRestart: {
++        label: "原子炉の再稼働",
++        icon: "[Reactor]",
++        category: "building",
++        cost: 150,
++        requiresBuildingFlag: "nuclearPowerPlant",
++        onComplete: (city) => { city.nuclearPowerPlantAge = 0; },
++        completeMessage: (city) => `§e[Complete]【${city.name}】原子炉を再稼働し、老朽化年数をリセットしました！`,
++    },
+ };
+ 
+ /** 生産物IDの一覧を取得 */
+@@ -490,6 +737,9 @@ export function canStartProduction(city, id, tile = null, player = null) {
+     if (def.category === "building" && city.districtConstruction) {
+         return { ok: false, message: "§c区域を建設中はこの都市で新しい建造物を着工できません。" };
+     }
++    if (def.requiresBuildingFlag && !city[def.requiresBuildingFlag]) {
++        return { ok: false, message: `§c【${def.label}】の生産には対応する建造物が必要です。` };
++    }
+     if (def.requiresTechnology) {
+         const hasTech = !!player && hasCompletedProgress(player, "technology", def.requiresTechnology);
+         if (!hasTech) {
+@@ -537,7 +787,9 @@ export function cancelProduction(city) {
+  * 毎ターン呼び出す生産の進行処理。
+  * @param {any} city 対象の都市データ
+  * @param {number} productionAmount このターン、この都市が産出した生産力
+- * @param {any} ctx onComplete に渡す追加情報 ({ cityKey, tiles, connectTradeRoutes } など)
++ * @param {any} ctx onComplete に渡す追加情報 ({ cityKey, tiles, connectTradeRoutes, player } など。
++ *   player は都市の所有者のストレージハンドル。horsemanの馬消費など、国家単位の資源を
++ *   参照/消費するonCompleteが使う)
+  * @returns {{ done: boolean, message: string } | null} 生産中でなければ null
+  */
+ export function tickProduction(city, productionAmount, ctx) {
+@@ -562,6 +814,8 @@ export function tickProduction(city, productionAmount, ctx) {
+                 ? "都市のマスに敵の戦闘ユニットがいる"
+                 : completionResult.cancelReason === "noNavalTile"
+                 ? "隣接する海・川などの水上マスが無い(または空きが無い)"
++                : completionResult.cancelReason === "noResource"
++                ? `資源「${completionResult.resourceLabel ?? "?"}」の在庫が無い`
+                 : "配置できる空きマスが周囲に無い";
+             const message = `§c[Warning]【${city.name}】${def.label}の生産が完了しましたが、${reasonText}ため配置できず中止されました。(進行度は保持されます)`;
+ 
+diff --git a/scripts/progression.js b/scripts/progression.js
+index 97b555f..c8f8318 100644
+--- a/scripts/progression.js
++++ b/scripts/progression.js
+@@ -1,7 +1,7 @@
+ // プレイヤー単位の研究・社会制度の進行を管理する。
+ 
+ export const TECHNOLOGIES = {
+-    animalHusbandry: { label: "畜産", cost: 10, prerequisites: [], effect: "弓術の前提条件になる" },
++    animalHusbandry: { label: "畜産", cost: 10, prerequisites: [], effect: "弓術・騎乗の前提条件になる。施設「牧場」を解放" },
+     mining: { label: "採掘", cost: 10, prerequisites: [], effect: "施設「採石場」を解放。製錬技術の前提条件になる" },
+     // 💡 占星術: 前提条件なし。取得後、都市にオベリスク(信仰力+4)を建設できるようになる。
+     astrology: { label: "占星術", cost: 10, prerequisites: [], effect: "建造物「オベリスク」・区域「聖地」を解放" },
+@@ -33,6 +33,21 @@ export const TECHNOLOGIES = {
+     engineering: { label: "工学", cost: 150, prerequisites: ["apprenticeship"], effect: "ユニット「カタパルト」を解放" },
+     // 💡 機械工学: 前提は工学。取得後、ユニット「重装弓兵」を生産できるようになる。
+     machinery: { label: "機械工学", cost: 220, prerequisites: ["engineering"], effect: "ユニット「重装弓兵」を解放" },
++    // 💡 石工術: 前提は採掘。取得後、都市に建造物「防壁」を建設できるようになる(§13参照)。
++    masonry: { label: "石工術", cost: 80, prerequisites: ["mining"], effect: "建造物「防壁」を解放" },
++    // 💡 火薬: 前提は鉄器。取得後、ユニット「銃士」を生産できるようになる(剣士の上位互換)。
++    gunpowder: { label: "火薬", cost: 200, prerequisites: ["ironWorking"], effect: "ユニット「銃士」を解放" },
++    // 💡 冶金術: 前提は火薬・徒弟制度。取得後、ユニット「大砲」を生産できるようになる(カタパルトの上位互換)。
++    metallurgy: { label: "冶金術", cost: 260, prerequisites: ["gunpowder", "apprenticeship"], effect: "ユニット「大砲」を解放" },
++    // 💡 産業化: 前提は冶金術・機械工学。取得後、ユニット「戦車」「戦艦」を生産できるようになる。
++    industrialization: { label: "産業化", cost: 400, prerequisites: ["metallurgy", "machinery"], effect: "ユニット「戦車」「戦艦」を解放" },
++    // 💡 電力: 前提は産業化。取得後、ユニット「機関銃兵」「近代歩兵」を生産できるようになる。
++    electricity: { label: "電力", cost: 350, prerequisites: ["industrialization"], effect: "ユニット「機関銃兵」「近代歩兵」を解放" },
++    // 💡 ロケット工学: 前提は電力(採掘→…→機械工学→産業化→電力→ロケット工学と続く、
++    //    このツリーで最も深い前提チェーンの先)。取得後、ミサイル・対空砲(いずれもcost 200)を
++    //    生産できるようになる。以前はどちらも前提技術なしで生産できてしまっていたため、
++    //    技術ツリーの最終到達点として追加した。
++    rocketry: { label: "ロケット工学", cost: 300, prerequisites: ["electricity"], effect: "ミサイル・対空砲を解放" },
+ };
+ 
+ export const CIVICS = {
+@@ -48,6 +63,12 @@ export const CIVICS = {
+     theocracy: { label: "神権政治", cost: 35, prerequisites: ["politicalPhilosophy"], effect: "聖地の建造物「大聖堂」を解放" },
+     // 💡 商業: 前提は使節団。取得後、建造物「市場」を生産できるようになる(技術「貨幣経済」も別途必要)。
+     commerce: { label: "商業", cost: 20, prerequisites: ["emissaries"], effect: "建造物「市場」を解放(技術「貨幣経済」も必要)" },
++    // 💡 封建制度: 前提は政治哲学(軍制改革・神権政治と同じ兄弟分岐)。取得後、ユニット
++    //    「長槍兵」を生産できるようになる。社会制度がユニットを直接解放するのはこれが初めて
++    //    (今までrequiresCivicは建造物のみに使われていた)。
++    feudalism: { label: "封建制度", cost: 60, prerequisites: ["politicalPhilosophy"], effect: "ユニット「長槍兵」を解放" },
++    // 💡 騎士道: 前提は封建制度。取得後、ユニット「騎士」を生産できるようになる(騎兵の上位互換)。
++    chivalry: { label: "騎士道", cost: 90, prerequisites: ["feudalism"], effect: "ユニット「騎士」を解放" },
+ };
+ 
+ const CONFIG = {
+diff --git a/scripts/religion.js b/scripts/religion.js
+index 819aa0d..70a266e 100644
+--- a/scripts/religion.js
++++ b/scripts/religion.js
+@@ -268,6 +268,14 @@ export function startInquisition(civHandle) {
+     civHandle.setDynamicProperty("civ:inquisitionStarted", true);
+ }
+ 
++/** 新しいゲーム開始時に呼び、この国家の宗教関連の永続状態(創始・名前・購入回数・審問)を初期化する。 */
++export function resetReligion(civHandle) {
++    civHandle.setDynamicProperty("civ:religionFounded", false);
++    civHandle.setDynamicProperty("civ:religionName", undefined);
++    civHandle.setDynamicProperty("civ:religiousUnitPurchaseCount", undefined);
++    civHandle.setDynamicProperty("civ:inquisitionStarted", false);
++}
++
+ /**
+  * 都市の、指定した国家(exceptCivId)以外の宗教の圧力を一律SUPPRESSION_REDUCTION_RATIOだけ
+  * 削減する(審問官の弾圧)。exceptCivId自身の圧力は変化させない。
+diff --git a/scripts/turns.js b/scripts/turns.js
+index 30af40b..5380f99 100644
+--- a/scripts/turns.js
++++ b/scripts/turns.js
+@@ -3,17 +3,19 @@ import { world, BlockPermutation } from "@minecraft/server";
+ import { getTurnState, setTurnState, resetAll, getTiles, setTiles, getMapConfig, getStateVersion, getMatchSettings, broadcast } from "./state.js";
+ import { PRODUCTION_DEFS, tickProduction } from "./production.js";
+ import { grantProgressPoints, resetProgress, hasCompletedProgress } from "./progression.js";
+-import { resetDiplomacy, getRelation } from "./diplomacy.js";
++import { resetDiplomacy, getRelation, isAtWar } from "./diplomacy.js";
++import { CITY_MAX_HP, CITY_HP_REGEN_PER_TURN } from "./combat.js";
+ import { getCivStorageHandle, resolveCivName, isCivControllable, removeAllBots } from "./civs.js";
+-import { getBuildingAdjacencyYields, getFlagFlatYields } from "./adjacency.js";
+-import { getFacilityAdjacencyYields, getFacilityFlatYields } from "./facilities.js";
+-import { getDistrictAdjacencyYields, getDistrictFlatYields, getDistrictPopulationYields, getDistrictBuildingFlatYields, tickDistrictConstruction, isSacredSiteTile, hasCityDistrict } from "./districts.js";
+-import { hasFoundedReligion, getReligionName, getNationalDominantReligion, applySacredSitePressure } from "./religion.js";
+-import { clearAllUnitLabels } from "./unitLabels.js";
++import { getBuildingAdjacencyYields, getFlagFlatYields, getAdjacentTileEntries, getAdjacencyBonus } from "./adjacency.js";
++import { getFacilityAdjacencyYields, getFacilityFlatYields, getFacilityResourceYields } from "./facilities.js";
++import { getDistrictAdjacencyYields, getDistrictFlatYields, getDistrictPopulationYields, getDistrictBuildingFlatYields, tickDistrictConstruction, isSacredSiteTile, hasCityDistrict, DISTRICT_BUILDING_DEFS, DISTRICT_DEFS } from "./districts.js";
++import { hasFoundedReligion, getReligionName, getNationalDominantReligion, applySacredSitePressure, resetReligion } from "./religion.js";
++import { clearAllUnitLabels, refreshUnitLabelAt } from "./unitLabels.js";
++import { RESOURCE_TYPES } from "./mapGen.js";
+ 
+ export { getTurnState, setTurnState };
+ const TILE_SIZE = 5;
+-// 💡 バランス調整: 都市の全ての産出量(食料・生産力・石油・信仰力・鉄。マス固有の基礎産出量、
++// 💡 バランス調整: 都市の全ての産出量(食料・生産力・石油・信仰力・鉄・馬・ゴールド。マス固有の基礎産出量、
+ //    施設/区域/建造物のボーナス、隣接ボーナス、人口比例ボーナスなど getCityCurrentYields が
+ //    集計するもの全て)に一律の倍率を掛ける。個々のボーナス値を1つずつ書き換える代わりに、
+ //    集計の最終地点でまとめて掛けることで、新しく増えるボーナスにも自動的に反映される。
+@@ -22,14 +24,24 @@ const DEFAULT_YIELD_MULTIPLIER = 2;
+ // 💡 scienceは他のキーと違い、getCityCurrentYieldsではキャンパス(区域)由来の分しか集計しない
+ //    (人口由来の科学力は別枠でprocessPlayerTurnStartがgrantProgressPointsへ直接渡す)。
+ //    そのためfaithと違って人口分の初期値は持たない(0スタート)。
+-const YIELD_KEYS = ["food", "production", "oil", "faith", "iron", "science"];
++const YIELD_KEYS = ["food", "production", "oil", "faith", "iron", "science", "horse", "gold", "coal", "uranium"];
+ // 💡 都市の産出量のうち、都市個別ではなく国家全体の在庫として貯まる戦略資源。
+ //    ここに1エントリ追加するだけで、蓄積・DynamicPropertyへの保存・ターン報告メッセージが
+ //    すべて自動的に対応する(processPlayerTurnStart参照)。
+ const STRATEGIC_RESOURCES = [
+     { key: "oil", prop: "strategic_oil", prefix: "§b[Oil] ", label: "石油" },
+     { key: "iron", prop: "strategic_iron", prefix: "§7[Iron] ", label: "鉄" },
++    { key: "horse", prop: "strategic_horse", prefix: "§6[Horse] ", label: "馬" },
++    { key: "gold", prop: "strategic_gold", prefix: "§6[Gold] ", label: "ゴールド" },
++    { key: "coal", prop: "strategic_coal", prefix: "§8[Coal] ", label: "石炭" },
++    { key: "uranium", prop: "strategic_uranium", prefix: "§a[Uranium] ", label: "ウラン" },
+ ];
++// 💡 ゴールド経済(§23): ユニット/建造物/区域の毎ターン維持費、破産時の強制解散。
++//    維持費は個別の値を持たせず、既存のcost/フラグから機械的に算出する(calculateGoldUpkeep参照)。
++const UNIT_GOLD_UPKEEP_COST_DIVISOR = 25; // ユニット1体の維持費 = max(1, ceil(cost/この値))
++const BUILDING_GOLD_UPKEEP = 1; // 建造物(区域専用建造物含む)1つにつき固定
++const DISTRICT_GOLD_UPKEEP = 1; // 区域(district)のマス1つにつき固定
++const BANKRUPTCY_GOLD_PER_DISBAND = 10; // ゴールドがこの値ぶんマイナスになるごとに1体強制解散
+ let cityYieldCacheVersion = -1;
+ const cityYieldCache = new Map();
+ const cityAssignmentCache = new Map();
+@@ -49,6 +61,151 @@ function syncTurnCaches() {
+ export function getPlayerColor(playerId) { return getTurnState().playerColors?.[playerId] ?? "white"; }
+ function getPlayerNameById(id) { return resolveCivName(id); }
+ 
++/** 都市(tx,tz)が「包囲」されているか(隣接8マスに、戦争状態の敵の戦闘ユニットがいるか)を判定する。
++ *  §13: 包囲中は都心のHPが自然回復しない(processPlayerTurnStart参照)。 */
++function isCityBesieged(tx, tz, playerId, tiles) {
++    for (let dz = -1; dz <= 1; dz++) {
++        for (let dx = -1; dx <= 1; dx++) {
++            if (dx === 0 && dz === 0) continue;
++            const u = tiles[`${tx + dx},${tz + dz}`]?.combatUnit;
++            if (u && u.ownerId !== playerId && isAtWar(playerId, u.ownerId)) return true;
++        }
++    }
++    return false;
++}
++
++/** 国家全体のゴールド維持費(§23)を算出する。ユニットはproduction costに応じて、
++ *  建造物(区域専用建造物含む)・区域は固定額で計算する(施設(facility)は対象外)。 */
++function calculateGoldUpkeep(playerId, tiles) {
++    let upkeep = 0;
++    for (const key in tiles) {
++        const t = tiles[key];
++        if (t.combatUnit?.ownerId === playerId) {
++            const cost = PRODUCTION_DEFS[t.combatUnit.id]?.cost ?? 20;
++            upkeep += Math.max(1, Math.ceil(cost / UNIT_GOLD_UPKEEP_COST_DIVISOR));
++        }
++        if (t.ownerId !== playerId) continue;
++        if (t.district) upkeep += DISTRICT_GOLD_UPKEEP;
++        if (t.city) {
++            for (const id in PRODUCTION_DEFS) {
++                if (PRODUCTION_DEFS[id].category === "building" && t.city[id]) upkeep += BUILDING_GOLD_UPKEEP;
++            }
++            for (const id in DISTRICT_BUILDING_DEFS) {
++                // 💡 区域専用建造物は個別に維持費を上書きできる(工場2/発電所3種3、既定は工房などと同じ1。§24)。
++                if (t.city[id]) upkeep += DISTRICT_BUILDING_DEFS[id].goldUpkeep ?? BUILDING_GOLD_UPKEEP;
++            }
++        }
++    }
++    return upkeep;
++}
++
++/** ゴールドが0未満(破産)なら、-10ごとに1体、コストの安いユニットから強制解散する(§23)。
++ *  tilesを直接書き換えるため、呼び出し元でsetTilesを呼ぶこと。
++ *  @returns {Array<{key:string, unit:any}>} 解散したユニットの一覧(空配列なら解散なし) */
++function applyGoldBankruptcy(playerId, gold, tiles) {
++    if (gold >= 0) return [];
++    const disbandCount = Math.floor(-gold / BANKRUPTCY_GOLD_PER_DISBAND);
++    if (disbandCount <= 0) return [];
++    const candidates = [];
++    for (const key in tiles) {
++        const unit = tiles[key].combatUnit;
++        if (unit?.ownerId === playerId) candidates.push({ key, unit });
++    }
++    candidates.sort((a, b) => (PRODUCTION_DEFS[a.unit.id]?.cost ?? 20) - (PRODUCTION_DEFS[b.unit.id]?.cost ?? 20));
++    const disbanded = candidates.slice(0, disbandCount);
++    for (const c of disbanded) tiles[c.key].combatUnit = null;
++    return disbanded;
++}
++
++/**
++ * 自国の工業地帯(区域)にある工場・発電所の効果(§24)を1プレイヤーぶんまとめて処理する。
++ * 対象は常に自国の都市のみ(隣接していても他国の都市には一切影響しない)。cityProductionIncomes
++ * (このターンの各都市の生産力。tickProduction/tickDistrictConstructionへ渡す直前の値)をその場で
++ * 書き換える。燃料消費・CO2蓄積・原子炉の老朽化年数の加算という副作用も持つため、1ターンにつき
++ * 1回だけ呼び出すこと(getCityCurrentYieldsのような prevue/表示専用の経路では呼ばない)。
++ * 表示用に city.powerReceived(受給電力の合計)・city.powerSources(発電所ごとの内訳、
++ * { plantLabel, fromCityName, amount }の配列)も毎回リセットしてから書き込む(ui.js参照)。
++ * @returns {number} このプレイヤーの発電所(原子力のownCityBonus)による追加科学力の合計
++ */
++function applyIndustrialInfrastructure(playerId, player, tiles, playerCities, cityProductionIncomes, summaryReport) {
++    // 💡 電力受給量は表示用に city.powerReceived/powerSources へ毎ターン保存し直す(§24)。
++    //    まず全都市を0/空配列にリセットしてから、発電所の供給分があれば後段で上書きする
++    //    (industrialTilesが無い/発電所が消えた場合にも古い値が残らないようにするため)。
++    for (const c of playerCities) { c.tile.city.powerReceived = 0; c.tile.city.powerSources = []; }
++
++    const playerCityKeys = new Set(playerCities.map(c => c.key));
++    const industrialTiles = [];
++    for (const key in tiles) {
++        const t = tiles[key];
++        if (t.ownerId === playerId && t.district?.id === "industrialZone" && t.belongsToCityKey) {
++            const [tx, tz] = key.split(",").map(Number);
++            industrialTiles.push({ tx, tz, ownCityKey: t.belongsToCityKey, city: tiles[t.belongsToCityKey]?.city });
++        }
++    }
++    if (!industrialTiles.length) return 0;
++
++    let extraScience = 0;
++    const cityPowerReceived = {};
++    const cityPowerSources = {};
++
++    // 💡 フェーズ1: 発電所(燃料消費・CO2蓄積・自都市ボーナス・隣接自国都市への電力供給)。
++    //    工場のボーナス計算(フェーズ2)が電力量を参照するため、先に全ての発電所を処理しておく。
++    for (const it of industrialTiles) {
++        const city = it.city;
++        if (!city) continue;
++        // 💡 老朽化年数は発電の成否に関わらず、原子力発電所が存在するだけで毎ターン進む。
++        if (city.nuclearPowerPlant) city.nuclearPowerPlantAge = (city.nuclearPowerPlantAge ?? 0) + 1;
++
++        const plantId = ["coalPowerPlant", "oilPowerPlant", "nuclearPowerPlant"].find(id => city[id]);
++        if (!plantId) continue;
++        const def = DISTRICT_BUILDING_DEFS[plantId];
++
++        const stock = player?.getDynamicProperty(def.fuelResource) ?? 0;
++        if (stock < 1) {
++            summaryReport.push(`§7[Power]【${city.name}】の${def.label}は燃料「${def.fuelLabel}」が不足しているため、今ターンは発電されませんでした。`);
++            continue;
++        }
++        player.setDynamicProperty(def.fuelResource, stock - 1);
++        player.setDynamicProperty("strategic_co2", (player.getDynamicProperty("strategic_co2") ?? 0) + (def.co2PerTurn ?? 0));
++
++        if (def.ownCityBonus?.production) cityProductionIncomes[it.ownCityKey] = (cityProductionIncomes[it.ownCityKey] ?? 0) + def.ownCityBonus.production;
++        if (def.ownCityBonus?.science) extraScience += def.ownCityBonus.science;
++        // 💡 石炭火力発電所限定: 自都市への生産力ボーナスは「工業地帯自身の隣接ボーナスと同量」
++        //    (industrialZoneのadjacencyBonusesを、この発電所と同じタイル位置でもう一度評価する)。
++        if (def.matchesOwnIndustrialAdjacency) {
++            const bonus = getAdjacencyBonus(it.tx, it.tz, tiles, DISTRICT_DEFS.industrialZone.adjacencyBonuses);
++            if (bonus.production) cityProductionIncomes[it.ownCityKey] = (cityProductionIncomes[it.ownCityKey] ?? 0) + bonus.production;
++        }
++
++        for (const neighbor of getAdjacentTileEntries(it.tx, it.tz, tiles)) {
++            const neighborKey = `${neighbor.tx},${neighbor.tz}`;
++            if (!playerCityKeys.has(neighborKey)) continue;
++            cityPowerReceived[neighborKey] = (cityPowerReceived[neighborKey] ?? 0) + def.powerOutput;
++            (cityPowerSources[neighborKey] ??= []).push({ plantLabel: def.label, fromCityName: city.name, amount: def.powerOutput });
++        }
++    }
++
++    for (const c of playerCities) {
++        c.tile.city.powerReceived = cityPowerReceived[c.key] ?? 0;
++        c.tile.city.powerSources = cityPowerSources[c.key] ?? [];
++    }
++
++    // 💡 フェーズ2: 工場。隣接する自国都市の生産力+3、工場の所属都市が受け取っている電力2ごとに
++    //    さらに+3(所属都市自身が工場に隣接していれば、そこにも同じルールでボーナスが乗る)。
++    for (const it of industrialTiles) {
++        if (!it.city?.factory) continue;
++        const power = cityPowerReceived[it.ownCityKey] ?? 0;
++        const bonus = 3 + 3 * Math.floor(power / 2);
++        for (const neighbor of getAdjacentTileEntries(it.tx, it.tz, tiles)) {
++            const neighborKey = `${neighbor.tx},${neighbor.tz}`;
++            if (!playerCityKeys.has(neighborKey)) continue;
++            cityProductionIncomes[neighborKey] = (cityProductionIncomes[neighborKey] ?? 0) + bonus;
++        }
++    }
++
++    return extraScience;
++}
++
+ function countCheatingBlocks(dimension, tiles, tx, tz, config) {
+     const tile = tiles[`${tx},${tz}`]; let extraFood = 0, extraProd = 0;
+     if (tile?.resource === "wheat" || tile?.resource === "fish") extraFood++;
+@@ -79,12 +236,14 @@ function getAssignedTilesForPlayer(playerId, tiles) {
+ 
+ export function getCityCurrentYields(cityKey, tiles) {
+     syncTurnCaches();
+-    const cityTile=tiles[cityKey]; if(!cityTile?.city)return{food:0,production:1,oil:0,faith:0,iron:0,science:0};
++    const cityTile=tiles[cityKey]; if(!cityTile?.city)return{food:0,production:1,oil:0,faith:0,iron:0,science:0,horse:0,gold:0,coal:0,uranium:0};
+     const cached=cityYieldCache.get(cityKey); if(cached)return cached;
+     const assignedTiles=getAssignedTilesForPlayer(cityTile.ownerId,tiles).get(cityKey)??[];
+     const maxWorkers=Math.min(cityTile.city.population,assignedTiles.length);
+-    let food=0,production=0,oil=0,iron=0,science=0,faith=cityTile.city.population;
+-    for(let i=0;i<maxWorkers;i++){food+=assignedTiles[i].tile.foodYield??0;production+=assignedTiles[i].tile.productionYield??0;if(assignedTiles[i].tile.resource==="oil")oil++;}
++    let food=0,production=0,oil=0,iron=0,science=0,gold=3,coal=0,uranium=0,faith=cityTile.city.population; // 💡 都心は毎ターン基礎ゴールド+3(§23。キャンプ/プランテーションとは別枠)
++    // 💡 石油と同じく、石炭・ウランも専用施設なしで「資源のあるマスが労働されていれば毎ターン自動収入」
++    //    (§24。発電所の燃料、ウランはミサイル/対空砲の生産にも消費される)。
++    for(let i=0;i<maxWorkers;i++){const wt=assignedTiles[i].tile;food+=wt.foodYield??0;production+=wt.productionYield??0;if(wt.resource==="oil")oil++;if(wt.resource==="coal")coal++;if(wt.resource==="uranium")uranium++;if(RESOURCE_TYPES[wt.resource]?.category==="高級")gold+=3;}
+     const config=getMapConfig(),dimension=world.getDimension("overworld");
+     for(const t of assignedTiles){const c=countCheatingBlocks(dimension,tiles,t.tx,t.tz,config);food+=c.extraFood;production+=c.extraProd;}
+     const ownerHandle=getCivStorageHandle(cityTile.ownerId);
+@@ -99,14 +258,52 @@ export function getCityCurrentYields(cityKey, tiles) {
+         getBuildingAdjacencyYields(cityTx,cityTz,tiles,cityTile.city,PRODUCTION_DEFS),
+         getFacilityAdjacencyYields(assignedTiles,tiles),
+         getFacilityFlatYields(assignedTiles),
++        getFacilityResourceYields(assignedTiles),
+         getDistrictAdjacencyYields(assignedTiles,tiles),
+         getDistrictFlatYields(assignedTiles),
+         getDistrictPopulationYields(assignedTiles,cityTile.city.population),
+     ];
+-    const totals={food,production,oil,faith,iron,science};
++    const totals={food,production,oil,faith,iron,science,horse:0,gold,coal,uranium};
+     for(const src of sources)for(const key of YIELD_KEYS)totals[key]+=src[key]??0;
+     const multiplier=getMatchSettings().yieldMultiplier??DEFAULT_YIELD_MULTIPLIER;
+-    const result={food:totals.food*multiplier,production:Math.max(1,totals.production)*multiplier,oil:totals.oil*multiplier,faith:totals.faith*multiplier,iron:totals.iron*multiplier,science:totals.science*multiplier};cityYieldCache.set(cityKey,result);return result;
++    const result={food:totals.food*multiplier,production:Math.max(1,totals.production)*multiplier,oil:totals.oil*multiplier,faith:totals.faith*multiplier,iron:totals.iron*multiplier,science:totals.science*multiplier,horse:totals.horse*multiplier,gold:totals.gold*multiplier,coal:totals.coal*multiplier,uranium:totals.uranium*multiplier};cityYieldCache.set(cityKey,result);return result;
++}
++
++/**
++ * 表示用: 指定した都市のゴールド産出量(§23)の内訳を返す。getCityCurrentYieldsのgold算出
++ * ロジックのうち「都心の基礎+3」「高級資源のあるマス(労働時)+3ずつ」「施設(キャンプ/
++ * プランテーション等)のflatYields.gold」を個別に再計算して返す。合計は必ず
++ * getCityCurrentYields(cityKey,tiles).gold と一致させ、まだ内訳化していない将来のゴールド
++ * 産出源(建造物/区域など)が追加された場合も other に差分として現れるようにする。
++ * @returns {{ base: number, luxuryCount: number, luxuryGold: number, facilityGold: number, other: number, total: number }}
++ */
++export function getCityGoldBreakdown(cityKey, tiles) {
++    const total = getCityCurrentYields(cityKey, tiles).gold;
++    const cityTile = tiles[cityKey];
++    if (!cityTile?.city) return { base: 0, luxuryCount: 0, luxuryGold: 0, facilityGold: 0, other: 0, total: 0 };
++
++    const assignedTiles = getAssignedTilesForPlayer(cityTile.ownerId, tiles).get(cityKey) ?? [];
++    const maxWorkers = Math.min(cityTile.city.population, assignedTiles.length);
++    let luxuryCount = 0;
++    for (let i = 0; i < maxWorkers; i++) {
++        if (RESOURCE_TYPES[assignedTiles[i].tile.resource]?.category === "高級") luxuryCount++;
++    }
++
++    const multiplier = getMatchSettings().yieldMultiplier ?? DEFAULT_YIELD_MULTIPLIER;
++    const base = 3 * multiplier;
++    const luxuryGold = luxuryCount * 3 * multiplier;
++    const facilityGold = (getFacilityFlatYields(assignedTiles).gold ?? 0) * multiplier;
++    const other = total - base - luxuryGold - facilityGold;
++    return { base, luxuryCount, luxuryGold, facilityGold, other, total };
++}
++
++/** getCityGoldBreakdown()の結果を「都心+3、高級資源x2+6」のような表示用テキストに整形する。 */
++export function formatGoldBreakdownText(b) {
++    const parts = [`都心+${b.base}`];
++    if (b.luxuryGold > 0) parts.push(`高級資源x${b.luxuryCount}+${b.luxuryGold}`);
++    if (b.facilityGold > 0) parts.push(`施設+${b.facilityGold}`);
++    if (b.other > 0) parts.push(`他+${b.other}`);
++    return parts.join("、");
+ }
+ 
+ export function connectTradeRoutes(ownerKey,city,tiles){const multiplier=getMatchSettings().yieldMultiplier??DEFAULT_YIELD_MULTIPLIER;const [ox,oz]=ownerKey.split(",").map(Number);let minDist=Infinity,nearest=[];for(const key in tiles){if(key===ownerKey)continue;const t=tiles[key];if(!t.city)continue;const [tx,tz]=key.split(",").map(Number),dist=Math.abs(ox-tx)+Math.abs(oz-tz);if(dist<minDist){minDist=dist;nearest=[key];}else if(dist===minDist)nearest.push(key);}city.tradingPost.routes=[];for(const targetKey of nearest){const targetCity=tiles[targetKey].city;let baseTurns=minDist,bonus=2*multiplier;if(targetCity.tradingPost?.status==="active"){if(baseTurns===1)bonus=4*multiplier;else baseTurns=Math.max(1,Math.floor(baseTurns/2));}
+@@ -129,7 +326,10 @@ export function destroyCity(tiles,cityKey,config,dimension){const target=tiles[c
+ function getAliveCivIds(turn,tiles){const alive=new Set();for(const key in tiles){const t=tiles[key];if(t.city&&t.ownerId)alive.add(t.ownerId);}return(Array.isArray(turn?.playerOrder)?turn.playerOrder:[]).filter(id=>alive.has(id));}
+ function hasEverFoundedCapital(civId){const h=getCivStorageHandle(civId);return!!h&&h.getDynamicProperty("civ:hasFoundedCapital")===true;}
+ function awardVictoryPoints(civIds){for(const id of civIds){const h=getCivStorageHandle(id);if(!h)continue;h.setDynamicProperty("civ:victoryPoints",(h.getDynamicProperty("civ:victoryPoints")??0)+1);}}
+-function isAlliedOrSameCiv(a,b){if(!a||!b)return false;if(a===b)return true;const h=getCivStorageHandle(a);return!!h&&getRelation(h,b)==="alliance";}
++// 💡 commands.js のゴールドによる即時購入(cmdRushBuyProduction)がtickProduction呼び出しの
++//    ctxを組み立てる際、通常のターン経過による完成(processPlayerTurnStart内)と全く同じ
++//    isAllied判定を再利用できるようexportしている。
++export function isAlliedOrSameCiv(a,b){if(!a||!b)return false;if(a===b)return true;const h=getCivStorageHandle(a);return!!h&&getRelation(h,b)==="alliance";}
+ function areAllMutuallyAllied(ids){for(let i=0;i<ids.length;i++){const h=getCivStorageHandle(ids[i]);if(!h)return false;for(let j=0;j<ids.length;j++)if(i!==j&&getRelation(h,ids[j])!=="alliance")return false;}return true;}
+ function checkReligiousVictory(aliveIds,tiles){const by={};for(const id of aliveIds)by[id]=[];for(const key in tiles){const t=tiles[key];if(t.city&&by[t.ownerId])by[t.ownerId].push({key,tile:t});}const religions={};for(const id of aliveIds)religions[id]=getNationalDominantReligion(by[id]);for(const id of aliveIds){const h=getCivStorageHandle(id);if(h&&hasFoundedReligion(h)&&aliveIds.every(x=>religions[x]===id))return id;}return null;}
+ 
+@@ -142,24 +342,27 @@ function findInterceptingAntiAirCity(tiles,targetTx,targetTz){for(const key in t
+ 
+ export function resolveMissileImpact(config,targetTx,targetTz){const tiles=getTiles();const interceptor=findInterceptingAntiAirCity(tiles,targetTx,targetTz);if(interceptor){interceptor.city.antiAirUsedThisTurn=true;setTiles(tiles);return`§b[AntiAir]【${interceptor.city.name}】の対空砲が (${targetTx}, ${targetTz}) へのミサイルを迎撃しました！`;}const dimension=world.getDimension("overworld"),centerX=config.originX+targetTx*TILE_SIZE+2,centerZ=config.originZ+targetTz*TILE_SIZE+2,centerY=config.ySurface+2;try{dimension.spawnParticle("minecraft:huge_explosion_emitter",{x:centerX,y:centerY,z:centerZ});}catch(e){}try{dimension.playSound("random.explode",{x:centerX,y:centerY,z:centerZ},{volume:4,pitch:0.8});}catch(e){}const targetKey=`${targetTx},${targetTz}`,targetTile=tiles[targetKey];if(!targetTile?.city)return`§7[Missile] (${targetTx}, ${targetTz}) に着弾しましたが、そこに都市はありませんでした。`;const cityName=targetTile.city.name,ownerName=targetTile.ownerName??"不明";destroyCity(tiles,targetKey,config,dimension);setTiles(tiles);checkAndAnnounceVictory(tiles);return`§c[Impact] 【${cityName}】(${ownerName})がミサイル攻撃により破壊されました！`;}
+ 
+-function processPlayerTurnStart(playerId){const config=getMapConfig();if(!config)return;const tiles=getTiles();if(checkAndAnnounceVictory(tiles))return;const playerCities=[];let movementRefreshed=false;for(const key in tiles){const t=tiles[key],unit=t.combatUnit;if(unit?.ownerId===playerId){unit.movementRemaining=unit.movement??0;movementRefreshed=true;}const religiousUnit=t.religiousUnit;if(religiousUnit?.ownerId===playerId){religiousUnit.movementRemaining=religiousUnit.movement??0;religiousUnit.hasProselytizedThisTurn=false;religiousUnit.hasAttackedThisTurn=false;movementRefreshed=true;}if(t.ownerId===playerId&&t.city){t.city.missileLaunchedThisTurn=false;t.city.antiAirUsedThisTurn=false;playerCities.push({key,tile:t});}}if(!playerCities.length){if(movementRefreshed)setTiles(tiles);return;}
++function processPlayerTurnStart(playerId){const config=getMapConfig();if(!config)return;const tiles=getTiles();if(checkAndAnnounceVictory(tiles))return;const player=getCivStorageHandle(playerId);const playerCities=[];let movementRefreshed=false;for(const key in tiles){const t=tiles[key],unit=t.combatUnit;if(unit?.ownerId===playerId){unit.movementRemaining=unit.movement??0;movementRefreshed=true;}const religiousUnit=t.religiousUnit;if(religiousUnit?.ownerId===playerId){religiousUnit.movementRemaining=religiousUnit.movement??0;religiousUnit.hasProselytizedThisTurn=false;religiousUnit.hasAttackedThisTurn=false;movementRefreshed=true;}if(t.ownerId===playerId&&t.city){t.city.missileLaunchedThisTurn=false;t.city.antiAirUsedThisTurn=false;t.city.rangedAttackUsedThisTurn=false;const[ctx,ctz]=key.split(",").map(Number);if(!isCityBesieged(ctx,ctz,playerId,tiles)&&(t.city.hp??CITY_MAX_HP)<CITY_MAX_HP)t.city.hp=Math.min(CITY_MAX_HP,(t.city.hp??CITY_MAX_HP)+CITY_HP_REGEN_PER_TURN);t.city.attackedRecently=false;playerCities.push({key,tile:t});}}if(!playerCities.length){if(movementRefreshed)setTiles(tiles);return;}
+     const summaryReport=[],dimension=world.getDimension("overworld"),cityFoodIncomes={},cityProductionIncomes={},cityFaithIncomes={};const strategicIncomes={};for(const r of STRATEGIC_RESOURCES)strategicIncomes[r.key]=0;
+     // 💡 キャンパス(区域)由来の科学力は、都市の産出量パイプライン(getCityCurrentYields)経由で
+     //    計算されるが、他のyieldと違って都市には蓄積されず、人口由来の科学力(totalPop)と
+     //    合算して国家全体の技術ポイントとしてgrantProgressPointsへ直接渡す(下記参照)。
+     let totalDistrictScience=0;
+     for(const c of playerCities){const y=getCityCurrentYields(c.key,tiles);cityFoodIncomes[c.key]=y.food;cityProductionIncomes[c.key]=y.production;cityFaithIncomes[c.key]=y.faith??0;totalDistrictScience+=y.science??0;for(const r of STRATEGIC_RESOURCES)strategicIncomes[r.key]+=y[r.key]??0;c.tile.city.currentTurnProduction=y.production;}
++    // 💡 工業地帯の工場・発電所(§24)。cityProductionIncomesをその場で書き換え、燃料消費/CO2蓄積/
++    //    原子炉の老朽化も1ターンに1回だけここで処理する(自国の都市にのみ影響)。
++    totalDistrictScience+=applyIndustrialInfrastructure(playerId,player,tiles,playerCities,cityProductionIncomes,summaryReport);
+     // 💡 交易路の科学力ボーナス(接続先の都市にキャンパスがある場合、connectTradeRoutesが
+     //    route.scienceBonusを設定する)も、通常の食料ボーナスと同じ経路で両都市に加算対象になる。
+     let totalTradeScience=0;
+     for(const key in tiles){const t=tiles[key];if(t.city?.tradingPost?.status==="active"&&t.city.tradingPost.routes)for(const route of t.city.tradingPost.routes){if(t.ownerId===playerId){cityFoodIncomes[key]=(cityFoodIncomes[key]??0)+route.bonus;totalTradeScience+=route.scienceBonus??0;}if(tiles[route.targetKey]?.ownerId===playerId){cityFoodIncomes[route.targetKey]=(cityFoodIncomes[route.targetKey]??0)+route.bonus;totalTradeScience+=route.scienceBonus??0;}}}
+-    for(const c of playerCities){const city=c.tile.city;if(!city.production)continue;const r=tickProduction(city,cityProductionIncomes[c.key]??0,{cityKey:c.key,tiles,connectTradeRoutes,isAllied:isAlliedOrSameCiv});if(r)summaryReport.push(r.message);}
++    for(const c of playerCities){const city=c.tile.city;if(!city.production)continue;const r=tickProduction(city,cityProductionIncomes[c.key]??0,{cityKey:c.key,tiles,connectTradeRoutes,isAllied:isAlliedOrSameCiv,player});if(r)summaryReport.push(r.message);}
+     for(const c of playerCities){const city=c.tile.city;if(!city.districtConstruction)continue;const r=tickDistrictConstruction(city,cityProductionIncomes[c.key]??0,tiles,c.tile.ownerId);if(r)summaryReport.push(r.message);}
+     for(const c of playerCities){const tile=tiles[c.key],city=tile.city,income=cityFoodIncomes[c.key]??0,faithIncome=cityFaithIncomes[c.key]??0;if(faithIncome){city.faithStorage=(city.faithStorage??0)+faithIncome;summaryReport.push(`§d[Faith]【${city.name}】信仰力+${faithIncome}(累計: ${city.faithStorage})`);}const def=city.production?PRODUCTION_DEFS[city.production.id]:null,consumption=city.population+(def?.extraUpkeep??0);city.foodStorage=(city.foodStorage??0)+income-consumption;let grow=false,blocked=false;if(city.foodStorage<0){city.starvationTurns=(city.starvationTurns??0)+1;city.foodStorage=0;if(city.starvationTurns>=3){city.population--;city.starvationTurns=0;if(city.population<=0){destroyCity(tiles,c.key,config,dimension);summaryReport.push(`§c[Fail]【${city.name}】が食料不足により崩壊しました！`);continue;}summaryReport.push(`§c[Warning]【${city.name}】食料飢餓により人口が ${city.population} に減少！`);}else summaryReport.push(`§c[Warning]【${city.name}】食料不足！(あと ${3-city.starvationTurns} ターンで人口減少)`);}else{city.starvationTurns=0;const threshold=10+(city.population-1)*2;if(city.foodStorage>=threshold){if(city.population<city.housing){city.population++;city.foodStorage-=threshold;grow=true;}else{city.foodStorage=threshold-1;blocked=true;}}let msg=`§7[${city.name}]§f 選択マスからの収穫:+${income} [Food] | 消費:-${consumption} [Food] | 貯留: ${city.foodStorage}/${threshold}`;if(grow)msg+=` [Complete]§a人口が ${city.population} に増加！`;else if(blocked)msg+=` [Warning]§e住宅制限(上限:${city.housing})のため成長停止！`;summaryReport.push(msg);}tiles[c.key]=tile;}
+-    setTiles(tiles);if(checkAndAnnounceVictory(tiles))return;const player=getCivStorageHandle(playerId);if(player){if(hasFoundedReligion(player))for(const key in tiles){const t=tiles[key];if(!isSacredSiteTile(t,playerId))continue;const cityTile=t.belongsToCityKey?tiles[t.belongsToCityKey]:null;if(cityTile?.city)applySacredSitePressure(cityTile.city,playerId);}let totalPop=0;for(const c of playerCities)totalPop+=c.tile.city.population;const tr=grantProgressPoints(player,"technology",totalPop+totalDistrictScience+totalTradeScience),cr=grantProgressPoints(player,"civic",totalPop);if(tr)summaryReport.unshift(tr);if(cr)summaryReport.unshift(cr);for(const r of STRATEGIC_RESOURCES){const income=strategicIncomes[r.key];if(income>0){const stock=(player.getDynamicProperty(r.prop)??0)+income;player.setDynamicProperty(r.prop,stock);summaryReport.unshift(`${r.prefix}${r.label}収入: +${income} 個を獲得！ (現在の在庫: ${stock} 個)`);}}if(getMatchSettings().logsEnabled){player.sendMessage("§6=== 💡 都市のターン報告 ===");summaryReport.forEach(m=>player.sendMessage(m));player.sendMessage("§6========================");}}}
++    setTiles(tiles);if(checkAndAnnounceVictory(tiles))return;if(player){if(hasFoundedReligion(player))for(const key in tiles){const t=tiles[key];if(!isSacredSiteTile(t,playerId))continue;const cityTile=t.belongsToCityKey?tiles[t.belongsToCityKey]:null;if(cityTile?.city)applySacredSitePressure(cityTile.city,playerId);}let totalPop=0;for(const c of playerCities)totalPop+=c.tile.city.population;const tr=grantProgressPoints(player,"technology",totalPop+totalDistrictScience+totalTradeScience),cr=grantProgressPoints(player,"civic",totalPop);if(tr)summaryReport.unshift(tr);if(cr)summaryReport.unshift(cr);for(const r of STRATEGIC_RESOURCES){const income=strategicIncomes[r.key];if(income>0){const stock=(player.getDynamicProperty(r.prop)??0)+income;player.setDynamicProperty(r.prop,stock);summaryReport.unshift(`${r.prefix}${r.label}収入: +${income} 個を獲得！ (現在の在庫: ${stock} 個)`);}}const goldUpkeep=calculateGoldUpkeep(playerId,tiles);const goldAfterUpkeep=(player.getDynamicProperty("strategic_gold")??0)-goldUpkeep;if(goldUpkeep>0){player.setDynamicProperty("strategic_gold",goldAfterUpkeep);summaryReport.push(`§6[Gold] 維持費: -${goldUpkeep}(残高: ${goldAfterUpkeep})`);}const disbandedUnits=applyGoldBankruptcy(playerId,goldAfterUpkeep,tiles);if(disbandedUnits.length){setTiles(tiles);for(const d of disbandedUnits){const[dtx,dtz]=d.key.split(",").map(Number);refreshUnitLabelAt(dtx,dtz);summaryReport.push(`§4[Bankruptcy]【${d.unit.label??d.unit.id}】が財政破綻(残高: ${goldAfterUpkeep})により強制解散されました！`);}}if(getMatchSettings().logsEnabled){player.sendMessage("§6=== 💡 都市のターン報告 ===");summaryReport.forEach(m=>player.sendMessage(m));player.sendMessage("§6========================");}}}
+ 
+ export function joinGame(player){const turn=getTurnState();if(turn.started)return{ok:false,message:"§cゲーム進行中です。"};if(turn.playerOrder.includes(player.id))return{ok:false,message:"§c参加済みです。"};turn.playerOrder.push(player.id);setTurnState(turn);return{ok:true,message:`§a${player.name} がゲームに参加しました！`};}
+-export function startGame(){const turn=getTurnState();if(turn.started)return{ok:false,message:"§c既に開始されています。"};if(!turn.playerOrder.length)return{ok:false,message:"§c参加者がいません。"};turn.started=true;turn.currentIndex=0;turn.turnNumber=1;turn.playerRights={};turn.playerColors={};turn.playerOrder.forEach((id,i)=>turn.playerColors[id]=PLAYER_COLORS[i%PLAYER_COLORS.length]);for(const id of turn.playerOrder){const h=getCivStorageHandle(id);if(!h)continue;resetProgress(h,"technology");resetProgress(h,"civic");resetDiplomacy(h);h.setDynamicProperty("civ:hasFoundedCapital",false);}setTurnState(turn);const t=getTurnState(),found=advanceToNextControllablePlayer(t);setTurnState(t);const id=t.playerOrder[t.currentIndex];processPlayerTurnStart(id);const name=getPlayerNameById(id)??"不明(オフライン)";broadcast(found?`§e=== ゲームが開始されました！ 手番: §a${name}§e ===`:`§e=== ゲームが開始されました！ §c参加者全員がオフラインのため待機中 ===`);return{ok:true,message:"ゲーム開始"};}
++export function startGame(){const turn=getTurnState();if(turn.started)return{ok:false,message:"§c既に開始されています。"};if(!turn.playerOrder.length)return{ok:false,message:"§c参加者がいません。"};turn.started=true;turn.currentIndex=0;turn.turnNumber=1;turn.playerRights={};turn.playerColors={};turn.playerOrder.forEach((id,i)=>turn.playerColors[id]=PLAYER_COLORS[i%PLAYER_COLORS.length]);for(const id of turn.playerOrder){const h=getCivStorageHandle(id);if(!h)continue;resetProgress(h,"technology");resetProgress(h,"civic");resetDiplomacy(h);resetReligion(h);h.setDynamicProperty("civ:hasFoundedCapital",false);for(const r of STRATEGIC_RESOURCES)h.setDynamicProperty(r.prop,undefined);h.setDynamicProperty("strategic_co2",undefined);}setTurnState(turn);const t=getTurnState(),found=advanceToNextControllablePlayer(t);setTurnState(t);const id=t.playerOrder[t.currentIndex];processPlayerTurnStart(id);const name=getPlayerNameById(id)??"不明(オフライン)";broadcast(found?`§e=== ゲームが開始されました！ 手番: §a${name}§e ===`:`§e=== ゲームが開始されました！ §c参加者全員がオフラインのため待機中 ===`);return{ok:true,message:"ゲーム開始"};}
+ function advanceToNextControllablePlayer(turn){const total=turn.playerOrder.length;if(!total)return false;for(let i=0;i<total;i++){const id=turn.playerOrder[turn.currentIndex];if(isCivControllable(id))return true;turn.currentIndex=(turn.currentIndex+1)%total;if(turn.currentIndex===0)turn.turnNumber++;}return false;}
+ export function endTurn(player){const turn=getTurnState();if(!turn.started)return{ok:false,message:"§cゲーム未開始です。"};if(player.id!==turn.playerOrder[turn.currentIndex])return{ok:false,message:"§c手番ではありません。"};turn.currentIndex=(turn.currentIndex+1)%turn.playerOrder.length;if(turn.currentIndex===0)turn.turnNumber++;const found=advanceToNextControllablePlayer(turn);setTurnState(turn);const id=turn.playerOrder[turn.currentIndex];processPlayerTurnStart(id);const name=getPlayerNameById(id)??"不明(オフライン)";broadcast(found?`§e>>> ターン ${turn.turnNumber}: §a${name}§e のターン <<<`:`§e>>> ターン ${turn.turnNumber}: §c参加者全員がオフラインのため待機中(復帰次第 §a${name}§c から再開) <<<`);return{ok:true,message:"ターン終了"};}
+ export function forceEndTurn(){const turn=getTurnState();if(!turn.started)return{ok:false,message:"§cゲーム未開始です。"};if(!turn.playerOrder.length)return{ok:false,message:"§c参加者がいません。"};turn.currentIndex=(turn.currentIndex+1)%turn.playerOrder.length;if(turn.currentIndex===0)turn.turnNumber++;const found=advanceToNextControllablePlayer(turn);setTurnState(turn);const id=turn.playerOrder[turn.currentIndex];processPlayerTurnStart(id);const name=getPlayerNameById(id)??"不明(オフライン)";broadcast(found?`§e>>> (ターンを強制的にスキップ) ターン ${turn.turnNumber}: §a${name}§e のターン <<<`:`§e>>> (ターンを強制的にスキップ) ターン ${turn.turnNumber}: §c参加者全員がオフラインのため待機中 <<<`);return{ok:true,message:"ターンを強制終了しました。"};}
+diff --git a/scripts/ui.js b/scripts/ui.js
+index f680b9a..da4f29b 100644
+--- a/scripts/ui.js
++++ b/scripts/ui.js
+@@ -3,7 +3,7 @@ import { ActionFormData, ModalFormData, MessageFormData } from "@minecraft/serve
+ import { ChestFormData } from "./chestForms.js";
+ import { getMapConfig, getTile, getTiles, setTiles, getMatchSettings, setMatchSettings, getMapGenSettings, setMapGenSettings, resetMapGenSettings, broadcast } from "./state.js";
+ import { worldToTile, TERRAIN_TYPES, RESOURCE_TYPES } from "./mapGen.js"
+-import { turnInfoText, isPlayersTurn, joinGame, endGame, getTurnState, setTurnState, calculateCityFoodIncomes, getCityCurrentYields, debugForceVictory, connectTradeRoutes, getPlayerColor } from "./turns.js";
++import { turnInfoText, isPlayersTurn, joinGame, endGame, getTurnState, setTurnState, calculateCityFoodIncomes, getCityCurrentYields, getCityGoldBreakdown, formatGoldBreakdownText, debugForceVictory, connectTradeRoutes, getPlayerColor } from "./turns.js";
+ import { PRODUCTION_DEFS, canStartProduction, getTotalWorkerActionsRemaining, WORKER_ACTIONS_PER_UNIT, getWorkerCount } from "./production.js";
+ import { getFacilityIds, getFacilityDef, canInstallFacility } from "./facilities.js";
+ import { getDistrictIds, getDistrictDef, canStartDistrict, getDistrictBuildingIds, getDistrictBuildingDef, canStartDistrictBuilding, isSacredSiteTile, hasCityDistrict } from "./districts.js";
+@@ -12,9 +12,13 @@ import {
+     canFoundReligion, getTotalCivFaith, getNationalDominantReligion,
+     getCityFollowers, getCityDominantReligion, getReligiousUnitCost, hasStartedInquisition,
+ } from "./religion.js";
+-import { getDefinitions, getKindLabel, getPointsLabel, getProgressState, hasCompletedProgress, getDefinition } from "./progression.js";
++import { getDefinitions, getKindLabel, getPointsLabel, getProgressState, saveProgressState, hasCompletedProgress, getDefinition } from "./progression.js";
+ import { getRelation, sendRequest, getRequestsFor, acceptRequest, rejectRequest, breakRelation, declareWar, isAtWar, hasDiplomaticAgreement } from "./diplomacy.js";
+-import { getAttackRange, getAttackableTargets, getEffectiveCombatStrength, isRangedUnit, getEffectiveRangedStrength, canUnitEnterTile, canTravelPath } from "./combat.js";
++import {
++    getAttackRange, getAttackableTargets, getAttackableCityTargets, getEffectiveCombatStrength,
++    isRangedUnit, getEffectiveRangedStrength, canUnitEnterTile, canTravelPath, getUnitClassLabel,
++    CITY_MAX_HP, WALL_MAX_HP, CITY_RANGED_ATTACK_RANGE, getBestRangedCombatStrength, UNIT_CLASS_LABELS,
++} from "./combat.js";
+ import { resolveOwningCityKey, getAdjacentTileEntries } from "./adjacency.js";
+ import { getRealPlayer, getControllableCivs, getActiveCivId, setActiveCivId, addVirtualCiv, removeVirtualCiv, getCivStorageHandle, resolveCivName, getVirtualCivById } from "./civs.js";
+ import { refreshUnitLabelAt } from "./unitLabels.js";
+@@ -84,30 +88,49 @@ const MAIN_MENU_ACTION_ICONS = {
+     close: "minecraft:barrier",
+ };
+ 
++// 💡 チェストUIの1行あたりのマス数(9×6マスの「大チェスト」前提。ChestFormData("large")参照)。
++//    メインメニューの行分けはこの幅を基準に「次の行の先頭」を計算する。
++const MAIN_MENU_ROW_WIDTH = 9;
++
+ /**
+  * メインメニューをチェストUI(development_resource_packs/testapia_ui、§18参照)風に表示する。
+- * buttons配列のインデックスとチェストのスロット番号を1:1に対応させるため、選ばれたスロット
+- * 番号がそのまま buttons のインデックスとして使える。ChestFormDataにはActionFormDataの
+- * ようなbody欄が無いため、スロットに余裕があれば最後の1マスに「現在の状況」枠を置いて
+- * body[](ターン情報・都市情報など)をそこへ載せる(選んでも buttons の範囲外なので何も
+- * 起きず、メニューが閉じるだけ)。このリソースパックがワールド側で有効になっていない場合、
+- * マーカー文字列が付いた普通のフォームとして表示されてしまう(見た目が崩れるだけで、
+- * 動作自体は壊れない)。
+- * @returns {Promise<number|undefined>} 選ばれたスロット番号(=buttonsのインデックス)。
++ * buttons配列は各要素に任意で `group`(例: "game"/"op"/"system")を持たせられ、直前のボタンと
++ * groupが変わるたびに、詰まっていた行の途中であっても次の行の先頭マスまでスロットを送る
++ * ("試合に関係する操作"と"OP専用の操作"などが見た目上も行で分かれるようにするため)。
++ * groupを省略した要素は既定で"game"扱い。この行送りによりスロット番号とbuttonsの
++ * インデックスがずれるため、選ばれたスロット番号→buttonsインデックスの対応表を別途持つ。
++ * ChestFormDataにはActionFormDataのようなbody欄が無いため、最後のマスが空いていれば
++ * 「現在の状況」枠を置いてbody[](ターン情報・都市情報など)をそこへ載せる(選んでも
++ * buttonsの範囲外なので何も起きず、メニューが閉じるだけ)。このリソースパックがワールド側で
++ * 有効になっていない場合、マーカー文字列が付いた普通のフォームとして表示されてしまう
++ * (見た目が崩れるだけで、動作自体は壊れない)。
++ * @returns {Promise<number|undefined>} 選ばれたボタンの buttons 配列インデックス。
+  *   キャンセルされた場合は undefined。
+  */
+ async function showMainMenuChest(realPlayer, body, buttons) {
+     const chest = new ChestFormData("large").title("Civ Tactics");
+     const capacity = chest.slotCount;
+-    for (let i = 0; i < buttons.length && i < capacity; i++) {
++    const slotToButtonIndex = [];
++    let slot = 0;
++    let prevGroup;
++    for (let i = 0; i < buttons.length; i++) {
++        const group = buttons[i].group ?? "game";
++        if (prevGroup !== undefined && group !== prevGroup && slot % MAIN_MENU_ROW_WIDTH !== 0) {
++            slot = Math.ceil(slot / MAIN_MENU_ROW_WIDTH) * MAIN_MENU_ROW_WIDTH;
++        }
++        prevGroup = group;
++        if (slot >= capacity) break;
+         const icon = MAIN_MENU_ACTION_ICONS[buttons[i].action] ?? MAIN_MENU_DEFAULT_ICON;
+-        chest.button(i, buttons[i].text, null, icon);
++        chest.button(slot, buttons[i].text, null, icon);
++        slotToButtonIndex[slot] = i;
++        slot++;
+     }
+-    if (buttons.length < capacity) {
++    if (slotToButtonIndex[capacity - 1] === undefined) {
+         chest.button(capacity - 1, "§e現在の状況", body, "minecraft:writable_book");
+     }
+     const res = await chest.show(realPlayer);
+-    return res.canceled ? undefined : res.selection;
++    if (res.canceled) return undefined;
++    return slotToButtonIndex[res.selection];
+ }
+ 
+ // 💡 マップビューア(§18参照)。チェストUI(9×6マス)のうち、下段1行(9マス)は
+@@ -152,7 +175,12 @@ function describeMapViewTile(tx, tz, tile) {
+         `§7地形: ${terrainLabel}`,
+         `§6[Food]x${tile.foodYield ?? 0} §e[Prod]x${tile.productionYield ?? 0}`,
+     ];
+-    if (tile.resource) lore.push(`§6資源: ${RESOURCE_TYPES[tile.resource]?.label ?? tile.resource}`);
++    if (tile.resource) {
++        const resourceLabel = RESOURCE_TYPES[tile.resource]?.label ?? tile.resource;
++        // 💡 高級資源(§23)は労働時に毎ターンゴールド+3になるため、マス情報にも表示しておく。
++        const goldNote = RESOURCE_TYPES[tile.resource]?.category === "高級" ? " §6[Gold]x3" : "";
++        lore.push(`§6資源: ${resourceLabel}${goldNote}`);
++    }
+     if (tile.ownerId) lore.push(`§b所有: ${resolveCivName(tile.ownerId) ?? "?"}`);
+     if (tile.combatUnit) {
+         const u = tile.combatUnit;
+@@ -165,6 +193,7 @@ function describeMapViewTile(tx, tz, tile) {
+ 
+     if (tile.city) {
+         const color = tile.ownerId ? getPlayerColor(tile.ownerId) : "white";
++        lore.push(`§c[HP] ${Math.max(0, Math.round(tile.city.hp ?? CITY_MAX_HP))}/${CITY_MAX_HP}${tile.city.wall ? ` §b[Wall] ${Math.max(0, Math.round(tile.city.wallHp ?? WALL_MAX_HP))}/${WALL_MAX_HP}` : ""}`);
+         return {
+             icon: `minecraft:${color}_banner`,
+             name: `§e[City] ${tile.city.name ?? "都市"}${tile.city.isCapital ? " §6(首都)" : ""}`,
+@@ -277,6 +306,13 @@ export async function openMainMenu(player) {
+     body.push(`§b保有中の石油: ${oil} 個`);
+     const iron = player.getDynamicProperty("strategic_iron") ?? 0;
+     body.push(`§7保有中の鉄: ${iron} 個`);
++    const horse = player.getDynamicProperty("strategic_horse") ?? 0;
++    body.push(`§6保有中の馬: ${horse} 個`);
++    const gold = player.getDynamicProperty("strategic_gold") ?? 0;
++    body.push(`§6保有中のゴールド: ${gold}${gold < 0 ? " §c(破産中！毎ターン-10ごとに1体強制解散)" : ""}`);
++    const coal = player.getDynamicProperty("strategic_coal") ?? 0;
++    const uranium = player.getDynamicProperty("strategic_uranium") ?? 0;
++    body.push(`§8保有中の石炭: ${coal} 個 §f| §a保有中のウラン: ${uranium} 個`);
+ 
+     // 💡 戦闘勝利ポイント(他ゲームでいうレート的なもの。ゲームを跨いで持続する)
+     const victoryPoints = player.getDynamicProperty("civ:victoryPoints") ?? 0;
+@@ -312,6 +348,8 @@ export async function openMainMenu(player) {
+             let resLabel = "なし";
+             if (currentTile.resource && RESOURCE_TYPES[currentTile.resource]) {
+                 resLabel = `§e${RESOURCE_TYPES[currentTile.resource].label}§b`;
++                // 💡 高級資源(§23)は労働時に毎ターンゴールド+3になるため、マス情報にも表示しておく。
++                if (RESOURCE_TYPES[currentTile.resource].category === "高級") resLabel += " §6[Gold]x3§b";
+             }
+ 
+             body.push(`\n§b現在地: ${tileLabel} | 資源: ${resLabel}`);
+@@ -364,8 +402,14 @@ export async function openMainMenu(player) {
+                     || currentTile.ownerId === player.id
+                     || hasDiplomaticAgreement(player.id, currentTile.ownerId);
+ 
++                // 💡 都心のHP/防壁シールドは「攻め落とせるかどうか」の判断に直結する軍事情報のため、
++                //    人口・生産などとは違い、敵国の都市でも常に表示する(§13)。
++                const cityHpText = `§c[HP] ${Math.max(0, Math.round(city.hp ?? CITY_MAX_HP))}/${CITY_MAX_HP}` +
++                    (city.wall ? ` §f| §b[Wall] ${Math.max(0, Math.round(city.wallHp ?? WALL_MAX_HP))}/${WALL_MAX_HP}` : " §7(防壁なし)");
++
+                 if (!isFriendlyCity) {
+                     body.push(`\n§6【${city.isCapital ? "首都" : "地方都市"}: ${city.name}】 §7(他国の都市のため詳細情報は非表示)`);
++                    body.push(`§f  - ${cityHpText}`);
+                 } else {
+                 const threshold = 10 + (city.population - 1) * 2;
+                 const totalIncome = incomes[`${tx},${tz}`] ?? 0;
+@@ -373,9 +417,23 @@ export async function openMainMenu(player) {
+                 const currentYields = getCityCurrentYields(`${tx},${tz}`, allTiles);
+ 
+                 body.push(`\n§6【${city.isCapital ? "首都" : "地方都市"}: ${city.name}】`);
++                body.push(`§f  - ${cityHpText}`);
+                 body.push(`§f  - 人口: §a${city.population} §f/ 住宅上限: §e${city.housing} §f| [Worker] 労働者: §b${getWorkerCount(city)} 人 §7(残り行動:${getTotalWorkerActionsRemaining(city)})`);
+                 body.push(`§f  - [Yield] 現市民の選択総出力: §6[Food]x${currentYields.food} §f/ §e[Prod]x${currentYields.production} §f/ §d[Faith]x${currentYields.faith ?? 0} §f/ §7[Iron]x${currentYields.iron ?? 0}${currentYields.science ? ` §f/ §b[Science]x${currentYields.science}` : ""}`);
+ 
++                // 💡 ゴールド産出の内訳(§23)。
++                if ((currentYields.gold ?? 0) > 0) {
++                    const goldBreakdown = getCityGoldBreakdown(`${tx},${tz}`, allTiles);
++                    body.push(`§6  - [Gold] 今の産出: ${currentYields.gold} §7(${formatGoldBreakdownText(goldBreakdown)})`);
++                }
++
++                // 💡 電力(§24)。発電所からの受給量がある、またはこの都市が工場を持つ場合のみ表示する
++                //    (工業地帯と無関係な都市の情報欄を電力0の行で埋めないため)。
++                if ((city.powerReceived ?? 0) > 0 || city.factory) {
++                    const sources = (city.powerSources ?? []).map(s => `${s.plantLabel}@${s.fromCityName} +${s.amount}`).join("、");
++                    body.push(`§b  - [Power] 受電量: ${city.powerReceived ?? 0}${sources ? ` §7(内訳: ${sources})` : " §7(電力供給なし)"}`);
++                }
++
+                 // 💡 進行中の生産(ユニット/建造物)を汎用的に表示。新しい生産物を増やしても自動で対応する。
+                 if (city.production) {
+                     const def = PRODUCTION_DEFS[city.production.id];
+@@ -493,6 +551,15 @@ export async function openMainMenu(player) {
+         if ((currentTile.city.missiles ?? 0) > 0) {
+             buttons.push({ text: `§c[Missile] ミサイルを発射する (在庫:${currentTile.city.missiles})`, action: "launchmissile" });
+         }
++
++        // 💡 §23参照。同じ値をcommands.jsのRUSH_BUY_GOLD_PER_PRODUCTIONとして持つ
++        //   (ui.jsはcommands.jsをトップレベルでimportしない設計のため複製)。
++        const RUSH_BUY_GOLD_PER_PRODUCTION_PREVIEW = 3;
++        if (currentTile.city.production) {
++            const remaining = Math.max(0, currentTile.city.production.cost - currentTile.city.production.progress);
++            const goldCost = Math.ceil(remaining * RUSH_BUY_GOLD_PER_PRODUCTION_PREVIEW);
++            buttons.push({ text: `§6[Gold] ゴールドで即時完成 (必要:${goldCost})`, action: "rushbuy" });
++        }
+     }
+ 
+     if (currentTile && currentTile.ownerId === player.id && (currentTile.type === "forest" || currentTile.type === "rainforest") && !currentTile.isChopped) {
+@@ -510,6 +577,14 @@ export async function openMainMenu(player) {
+     if (currentTile && currentTile.city && currentTile.ownerId === player.id && hasFoundedReligion(player)) {
+         buttons.push({ text: "§d[Faith] 宗教ユニットを購入する", action: "buyreligious" });
+     }
++    if (currentTile && currentTile.city && currentTile.ownerId === player.id && currentTile.city.wall) {
++        if (!currentTile.city.rangedAttackUsedThisTurn) {
++            buttons.push({ text: "§c[Siege] 都市の遠距離攻撃", action: "citychargedattack" });
++        }
++        if ((currentTile.city.wallHp ?? WALL_MAX_HP) < WALL_MAX_HP && !currentTile.city.attackedRecently) {
++            buttons.push({ text: "§a[Repair] 防壁を修理する (労働者の行動回数を1消費)", action: "repairwall" });
++        }
++    }
+     if (currentTile?.combatUnit?.ownerId === player.id) {
+         buttons.push({ text: "§f ユニットの移動", action: "moveunit" });
+         buttons.push({ text: "§c[Combat] ユニットの攻撃", action: "attackunit" });
+@@ -550,22 +625,23 @@ export async function openMainMenu(player) {
+         }
+     }
+     if (turn.started) { buttons.push({ text: "ターンを終了する", action: "endturn" }); }
+-    if (isOp && turn.started) buttons.push({ text: "§6【管理者】手番を強制スキップ", action: "forceendturn" });
+-    if (isOp) buttons.push({ text: "§c【管理者】ゲームをリセット", action: "endgame" });
+-    if (isOp) buttons.push({ text: "§e[Settings] 試合の設定(産出倍率・外交の有無)", action: "matchsettings" });
+-    if (isOp) buttons.push({ text: "§e[Settings] マップ生成の設定(バイオーム・資源)", action: "mapgensettings" });
+-    if (isOp && turn.started) buttons.push({ text: "§c[Debug]【デバッグ】指定した国家を即座に勝利させる", action: "debugvictory" });
+-    if (isOp && currentTile) buttons.push({ text: "§c[Debug]【デバッグ】このマスを編集する", action: "debugtile" });
+-    if (isOp && turn.started) buttons.push({ text: "§b[Intel]【デバッグ】全国家の情報を閲覧する", action: "debugallcivs" });
+-    if (isOp) buttons.push({ text: "§d[Civs] 国家管理(ソロテスト用)", action: "civmanage" });
+-    if (isOp && config) buttons.push({ text: "§b[Test] マップを見る(チェストUI)", action: "mapview" });
++    if (isOp && turn.started) buttons.push({ text: "§6【管理者】手番を強制スキップ", action: "forceendturn", group: "op" });
++    if (isOp) buttons.push({ text: "§c【管理者】ゲームをリセット", action: "endgame", group: "op" });
++    if (isOp) buttons.push({ text: "§e[Settings] 試合の設定(産出倍率・外交の有無)", action: "matchsettings", group: "op" });
++    if (isOp) buttons.push({ text: "§e[Settings] マップ生成の設定(バイオーム・資源)", action: "mapgensettings", group: "op" });
++    if (isOp && turn.started) buttons.push({ text: "§c[Debug]【デバッグ】指定した国家を即座に勝利させる", action: "debugvictory", group: "op" });
++    if (isOp && currentTile) buttons.push({ text: "§c[Debug]【デバッグ】このマスを編集する", action: "debugtile", group: "op" });
++    if (isOp && turn.started) buttons.push({ text: "§b[Intel]【デバッグ】全国家の情報を閲覧する", action: "debugallcivs", group: "op" });
++    if (isOp) buttons.push({ text: "§d[Civs] 国家管理(ソロテスト用)", action: "civmanage", group: "op" });
++    if (isOp && config) buttons.push({ text: "§b[Test] マップを見る(チェストUI)", action: "mapview", group: "op" });
+     const realPlayer = getRealPlayer(player);
+     const menuStyle = getMenuStyle(realPlayer);
+     buttons.push({
+         text: menuStyle === "chest" ? "§b[UI] 通常のメニューに切り替える" : "§b[UI] チェストUIに切り替える",
+         action: "togglemenustyle",
++        group: "system",
+     });
+-    buttons.push({ text: "閉じる", action: "close" });
++    buttons.push({ text: "閉じる", action: "close", group: "system" });
+ 
+     let selection;
+     if (menuStyle === "chest") {
+@@ -627,6 +703,12 @@ export async function openMainMenu(player) {
+         case "healunit":
+             if (currentTile?.combatUnit?.ownerId === player.id) (await import("./commands.js")).cmdHealCombatUnit(player, tx, tz);
+             break;
++        case "citychargedattack":
++            if (currentTile?.city && currentTile.ownerId === player.id) await openCityRangedAttackMenu(player, tx, tz);
++            break;
++        case "repairwall":
++            if (currentTile?.city && currentTile.ownerId === player.id) (await import("./commands.js")).cmdRepairWall(player, tx, tz);
++            break;
+ 
+         // 💡 新機能: 生産メニュー(ユニット/建造物)を開く
+         case "production":
+@@ -640,6 +722,8 @@ export async function openMainMenu(player) {
+             await openMissileLaunchMenu(player, tx, tz);
+             break;
+ 
++        case "rushbuy": (await import("./commands.js")).cmdRushBuyProduction(player); break;
++
+         
+         // 💡 新機能: 名前変更アクションの処理（ModalFormをポップアップさせてコマンドへ送る）
+         case "renamecity":
+@@ -1155,9 +1239,15 @@ async function openDebugCivDetailMenu(realPlayer, civId) {
+     // 資源・開拓権
+     const oil = handle.getDynamicProperty?.("strategic_oil") ?? 0;
+     const iron = handle.getDynamicProperty?.("strategic_iron") ?? 0;
++    const horse = handle.getDynamicProperty?.("strategic_horse") ?? 0;
++    const gold = handle.getDynamicProperty?.("strategic_gold") ?? 0;
++    const coal = handle.getDynamicProperty?.("strategic_coal") ?? 0;
++    const uranium = handle.getDynamicProperty?.("strategic_uranium") ?? 0;
++    const co2 = handle.getDynamicProperty?.("strategic_co2") ?? 0;
+     const victoryPoints = handle.getDynamicProperty?.("civ:victoryPoints") ?? 0;
+     const rights = turn?.playerRights?.[civId] ?? 0;
+-    lines.push(`§b[Resource] 石油: ${oil} §f| 鉄: ${iron} §f| 開拓権: ${rights} §f| §6勝利ポイント: ${victoryPoints}`);
++    lines.push(`§b[Resource] 石油: ${oil} §f| 鉄: ${iron} §f| 馬: ${horse} §f| §6ゴールド: ${gold} §f| §8石炭: ${coal} §f| §aウラン: ${uranium} §f| 開拓権: ${rights} §f| §6勝利ポイント: ${victoryPoints}`);
++    lines.push(`§7[CO2] 累計排出量: ${co2}(現時点では未使用の値です)`);
+ 
+     // 研究・社会制度
+     const techState = getProgressState(handle, "technology");
+@@ -1199,7 +1289,15 @@ async function openDebugCivDetailMenu(realPlayer, civId) {
+                 ? `${getDistrictDef(city.districtConstruction.id)?.label ?? city.districtConstruction.id} (${Math.floor(city.districtConstruction.progress)}/${city.districtConstruction.cost})`
+                 : "なし";
+             lines.push(`§f  ${city.isCapital ? "[首都]" : "[都市]"} ${city.name} (${key}) §7- 人口:${city.population}/住宅:${city.housing}`);
+-            lines.push(`§7    産出: [Food]${yields.food} [Prod]${yields.production} [Faith]${yields.faith ?? 0} [Iron]${yields.iron ?? 0} [Science]${yields.science ?? 0} §7| 生産中: ${prodText} §7| 区域建設中: ${districtText}`);
++            lines.push(`§7    産出: [Food]${yields.food} [Prod]${yields.production} [Faith]${yields.faith ?? 0} [Iron]${yields.iron ?? 0} [Science]${yields.science ?? 0} [Gold]${yields.gold ?? 0} §7| 生産中: ${prodText} §7| 区域建設中: ${districtText}`);
++            if ((yields.gold ?? 0) > 0) {
++                lines.push(`§7    ゴールド内訳: ${formatGoldBreakdownText(getCityGoldBreakdown(key, tiles))}`);
++            }
++            // 💡 電力(§24)。発電所からの受給がある、またはこの都市が工場を持つ場合のみ表示。
++            if ((city.powerReceived ?? 0) > 0 || city.factory) {
++                const sources = (city.powerSources ?? []).map(s => `${s.plantLabel}@${s.fromCityName} +${s.amount}`).join("、");
++                lines.push(`§7    電力受給: ${city.powerReceived ?? 0}${sources ? ` (${sources})` : " (供給なし)"}`);
++            }
+ 
+             // 💡 この都市の宗教的圧力の内訳(通常のメニューの都市詳細と同じ表示。§18参照)。
+             const pressures = city.religiousPressure ?? {};
+@@ -1274,7 +1372,7 @@ async function openDebugTileMenu(realPlayer, tx, tz) {
+ 
+     const body = [
+         `§7座標: (${tx}, ${tz})`,
+-        `§7地形: ${TERRAIN_TYPES[tile.type]?.label ?? tile.type} §7| 資源: ${tile.resource ? (RESOURCE_TYPES[tile.resource]?.label ?? tile.resource) : "なし"}`,
++        `§7地形: ${TERRAIN_TYPES[tile.type]?.label ?? tile.type} §7| 資源: ${tile.resource ? (RESOURCE_TYPES[tile.resource]?.label ?? tile.resource) : "なし"}${RESOURCE_TYPES[tile.resource]?.category === "高級" ? " §6[Gold]x3§7(労働時)" : ""}`,
+         `§7基礎産出量: [Food]x${tile.foodYield ?? 0} [Prod]x${tile.productionYield ?? 0}`,
+         `§7所有者: ${tile.ownerName ?? "未所有"}`,
+         `§7都市: ${tile.city ? tile.city.name : "なし"} §7| 施設: ${tile.facility?.label ?? "なし"} §7| 区域: ${tile.district?.label ?? (tile.underDistrictConstruction ? "建設中" : "なし")}`,
+@@ -1286,6 +1384,7 @@ async function openDebugTileMenu(realPlayer, tx, tz) {
+         { text: "§f[Owner] 所有者を編集", action: "owner" },
+     ];
+     if (tile.city) buttons.push({ text: "§6[City] 都市を編集", action: "city" });
++    if (tile.ownerId) buttons.push({ text: "§a[Science] 研究/社会制度を編集", action: "progress" });
+     buttons.push({ text: "§7[Facility] 施設を編集", action: "facility" });
+     buttons.push({ text: "§5[District] 区域を編集", action: "district" });
+     buttons.push({ text: "§c[Combat] 戦闘ユニットを編集", action: "combatunit" });
+@@ -1303,6 +1402,7 @@ async function openDebugTileMenu(realPlayer, tx, tz) {
+         case "terrain": await openDebugTerrainMenu(realPlayer, tx, tz); break;
+         case "owner": await openDebugOwnerMenu(realPlayer, tx, tz); break;
+         case "city": await openDebugCityMenu(realPlayer, tx, tz); break;
++        case "progress": await openDebugProgressCategoryMenu(realPlayer, tx, tz); break;
+         case "facility": await openDebugFacilityMenu(realPlayer, tx, tz); break;
+         case "district": await openDebugDistrictMenu(realPlayer, tx, tz); break;
+         case "combatunit": await openDebugCombatUnitMenu(realPlayer, tx, tz); break;
+@@ -1312,6 +1412,61 @@ async function openDebugTileMenu(realPlayer, tx, tz) {
+     }
+ }
+ 
++/** デバッグ: 足元のマスの所有国家について、技術ツリー/文化ツリーのどちらを編集するか選ぶ。 */
++async function openDebugProgressCategoryMenu(realPlayer, tx, tz) {
++    const tile = getTile(tx, tz);
++    if (!tile?.ownerId) { await openDebugTileMenu(realPlayer, tx, tz); return; }
++
++    const form = new ActionFormData()
++        .title("§c[Debug] 研究/社会制度を編集")
++        .body(`§7対象国家: §f${resolveCivName(tile.ownerId) ?? tile.ownerId}`);
++    form.button("§a[Science] 技術ツリー");
++    form.button("§d[Culture] 社会制度ツリー");
++    form.button("戻る");
++    const res = await form.show(realPlayer);
++    if (res.canceled || res.selection === undefined || res.selection === 2) { await openDebugTileMenu(realPlayer, tx, tz); return; }
++
++    await openDebugProgressMenu(realPlayer, tx, tz, tile.ownerId, res.selection === 0 ? "technology" : "civic");
++}
++
++/**
++ * デバッグ: 指定した国家の技術ツリー/文化ツリーの、指定した1項目を直接タップで
++ * 取得済み⇔未取得に切り替える(前提条件・コストは一切無視する)。取得中(activeId)の
++ * 項目を取得済みにした場合は、activeId/progressをクリアする(繰越ポイントcarryは維持)。
++ */
++async function openDebugProgressMenu(realPlayer, tx, tz, ownerId, kind) {
++    const handle = getCivStorageHandle(ownerId);
++    if (!handle) { realPlayer.sendMessage("§cこの国家の情報を取得できませんでした。(オフラインの人間プレイヤーの可能性があります)"); await openDebugTileMenu(realPlayer, tx, tz); return; }
++
++    const state = getProgressState(handle, kind);
++    const defs = getDefinitions(kind);
++    const items = Object.keys(defs).map((id) => {
++        const done = state.completed.includes(id);
++        const active = state.activeId === id;
++        const tag = done ? "§a[Done]" : active ? "§e[進行中]" : "§7[未取得]";
++        return { text: `${tag} ${defs[id].label}`, action: id };
++    });
++
++    await showPaginatedMenu(
++        realPlayer, `[Debug] ${getKindLabel(kind)}ツリーを直接編集`,
++        `§7対象国家: §f${resolveCivName(ownerId) ?? ownerId}\n§7タップで取得済み⇔未取得を切り替えます(前提条件は無視されます)。`,
++        items,
++        async (id) => {
++            const nowDone = state.completed.includes(id);
++            if (nowDone) {
++                state.completed = state.completed.filter((x) => x !== id);
++            } else {
++                state.completed.push(id);
++                if (state.activeId === id) { state.activeId = null; state.progress = 0; }
++            }
++            saveProgressState(handle, kind, state);
++            realPlayer.sendMessage(`§a【${defs[id].label}】を${nowDone ? "未取得に戻しました" : "取得済みにしました"}。`);
++            await openDebugProgressMenu(realPlayer, tx, tz, ownerId, kind);
++        },
++        async () => await openDebugProgressCategoryMenu(realPlayer, tx, tz),
++    );
++}
++
+ /** デバッグ: 地形タイプ・資源・マス固有の基礎産出量(foodYield/productionYield)・伐採状態を直接編集する。 */
+ async function openDebugTerrainMenu(realPlayer, tx, tz) {
+     const tiles = getTiles();
+@@ -1519,7 +1674,7 @@ async function openDebugCombatUnitMenu(realPlayer, tx, tz) {
+     actionButtons.push({ text: "戻る", act: "back" });
+ 
+     const form = new ActionFormData().title("[Combat] 戦闘ユニットを編集")
+-        .body(`§7現在: ${unit ? `${unit.label} (HP:${Math.round(unit.hp ?? 0)}/${unit.maxHp ?? 100} 戦闘力:${unit.combatStrength ?? 0} 所有:${unit.ownerName})` : "なし"}`);
++        .body(`§7現在: ${unit ? `${unit.label} (兵種:${unit.unitClass ? getUnitClassLabel(unit.unitClass) : "未分類"} HP:${Math.round(unit.hp ?? 0)}/${unit.maxHp ?? 100} 戦闘力:${unit.combatStrength ?? 0} 所有:${unit.ownerName})` : "なし"}`);
+     for (const b of actionButtons) form.button(b.text);
+     const res = await form.show(realPlayer);
+     if (res.canceled || res.selection === undefined) { await openDebugTileMenu(realPlayer, tx, tz); return; }
+@@ -1540,15 +1695,23 @@ async function openDebugCombatUnitMenu(realPlayer, tx, tz) {
+     const ownerCivId = unit?.ownerId ?? tile.ownerId ?? civIds[0] ?? null;
+     const ownerNames = civIds.map(id => resolveCivName(id) ?? id);
+     const domainOptions = ["land", "naval"];
++    // 💡 兵種(unitClass)は combat.js の UNIT_CLASS_COUNTERS(対騎兵は騎兵に+10 等)・都市の
++    //    近接系判定(isMeleeUnitClass)・防壁の被ダメージ倍率などの判定に使われる(§13参照)。
++    //    先頭に「未分類」を挟み、デバッグ配置ユニットを兵種無しのままにもできるようにする。
++    const classIds = ["", ...Object.keys(UNIT_CLASS_LABELS)];
++    const classLabels = classIds.map(id => id ? getUnitClassLabel(id) : "(未分類)");
+ 
+     const modal = new ModalFormData()
+         .title("[Combat] 戦闘ユニットを配置/編集")
+         .textField("ラベル", "例: 戦士", { defaultValue: unit?.label ?? "戦士" })
+         .dropdown("所属国家", ownerNames.length ? ownerNames : ["(参加国家なし)"], { defaultValueIndex: Math.max(0, civIds.indexOf(ownerCivId)) })
+         .dropdown("兵科", ["陸軍", "海軍"], { defaultValueIndex: unit?.domain === "naval" ? 1 : 0 })
++        .dropdown("兵種 (unitClass)", classLabels, { defaultValueIndex: Math.max(0, classIds.indexOf(unit?.unitClass ?? "")) })
+         .textField("HP", "例: 100", { defaultValue: String(unit?.hp ?? 100) })
+         .textField("最大HP (maxHp)", "例: 100", { defaultValue: String(unit?.maxHp ?? 100) })
+         .textField("戦闘力 (combatStrength)", "例: 20", { defaultValue: String(unit?.combatStrength ?? 20) })
++        .textField("遠距離戦闘力 (rangedCombatStrength、空欄なら近距離専用ユニット扱い)", "例: 20", { defaultValue: unit?.rangedCombatStrength !== undefined ? String(unit.rangedCombatStrength) : "" })
++        .textField("近距離戦闘力 (meleeCombatStrength、空欄なら戦闘力と同じ)", "例: 15", { defaultValue: unit?.meleeCombatStrength !== undefined ? String(unit.meleeCombatStrength) : "" })
+         .textField("移動力 (movement)", "例: 1", { defaultValue: String(unit?.movement ?? 1) })
+         .textField("残り移動力 (movementRemaining)", "例: 1", { defaultValue: String(unit?.movementRemaining ?? unit?.movement ?? 1) })
+         .textField("攻撃距離 (attackRange)", "例: 1", { defaultValue: String(unit?.attackRange ?? 1) });
+@@ -1556,7 +1719,7 @@ async function openDebugCombatUnitMenu(realPlayer, tx, tz) {
+     const modalRes = await modal.show(realPlayer);
+     if (modalRes.canceled) { await openDebugTileMenu(realPlayer, tx, tz); return; }
+ 
+-    const [label, ownerIndex, domainIndex, hpStr, maxHpStr, strStr, moveStr, moveRemStr, rangeStr] = modalRes.formValues;
++    const [label, ownerIndex, domainIndex, classIndex, hpStr, maxHpStr, strStr, rangedStr, meleeStr, moveStr, moveRemStr, rangeStr] = modalRes.formValues;
+     const newOwnerId = civIds.length ? (civIds[ownerIndex] ?? ownerCivId) : ownerCivId;
+ 
+     tile.combatUnit = {
+@@ -1566,9 +1729,12 @@ async function openDebugCombatUnitMenu(realPlayer, tx, tz) {
+         ownerId: newOwnerId,
+         ownerName: resolveCivName(newOwnerId) ?? newOwnerId,
+         domain: domainOptions[domainIndex] ?? "land",
++        unitClass: classIds[classIndex] || undefined,
+         hp: Number(hpStr) || 0,
+         maxHp: Number(maxHpStr) || 100,
+         combatStrength: Number(strStr) || 0,
++        rangedCombatStrength: rangedStr?.trim() ? Number(rangedStr) : undefined,
++        meleeCombatStrength: meleeStr?.trim() ? Number(meleeStr) : undefined,
+         movement: Number(moveStr) || 0,
+         movementRemaining: Number(moveRemStr) || 0,
+         attackRange: Number(rangeStr) || 1,
+@@ -1755,12 +1921,15 @@ async function openProductionCategoryMenu(player, tx, tz, category) {
+                     body.push(`§7[Locked] ${def.icon} ${def.label}: 社会制度【${civicDef?.label ?? def.requiresCivic}】が必要`);
+                 } else if (def.disallowInCapital && city.isCapital) {
+                     body.push(`§7${def.icon} ${def.label}: この都市は既に首都です`);
++                } else if (def.requiresBuildingFlag && !city[def.requiresBuildingFlag]) {
++                    body.push(`§7${def.icon} ${def.label}: 対応する建造物が必要`);
+                 }
+                 continue;
+             }
+ 
+             const estTurns = production > 0 ? Math.ceil(def.cost / production) : "--";
+-            buttons.push({ text: `${def.icon} ${def.label}を生産する (必要生産力:${def.cost}、予測:約${estTurns}T)`, action: `start:${id}` });
++            const classTag = def.unitClass ? `§7[${getUnitClassLabel(def.unitClass)}]§r ` : "";
++            buttons.push({ text: `${classTag}${def.icon} ${def.label}を生産する (必要生産力:${def.cost}、予測:約${estTurns}T)`, action: `start:${id}` });
+         }
+     }
+ 
+@@ -2131,6 +2300,8 @@ function openCivDiplomacyDetail(player, targetCiv, allCivs) {
+     } else {
+         buttons.push({ text: "§4[War] 宣戦布告する", action: "declareWar" });
+     }
++    // 💡 §23参照。関係の種類を問わず(戦争中でも)一方的に贈与できる、相手の承諾を要さない取引。
++    buttons.push({ text: "§6[Gold] ゴールドを贈る", action: "giftgold" });
+     if (buttons.length === 0) buttons.push({ text: "閉じる", action: "close" });
+ 
+     const form = new ActionFormData()
+@@ -2146,6 +2317,7 @@ function openCivDiplomacyDetail(player, targetCiv, allCivs) {
+         if (selected === "proposeAlliance") sendDiplomaticProposal(player, targetCiv, "alliance");
+         if (selected === "break") confirmBreakRelation(player, targetCiv);
+         if (selected === "declareWar") confirmDeclareWar(player, targetCiv);
++        if (selected === "giftgold") promptGiftGold(player, targetCiv);
+     });
+ }
+ 
+@@ -2204,6 +2376,22 @@ function confirmDeclareWar(player, targetCiv) {
+         });
+ }
+ 
++/**
++ * 💡 §23参照。他国家へのゴールドの贈与。相手の承諾を要さない一方的な取引で、金額をModalFormで
++ *    入力させてから commands.js の cmdGiftGold を呼ぶ(関係の種類・戦争中かどうかを問わず可能)。
++ */
++async function promptGiftGold(player, targetCiv) {
++    const realPlayer = getRealPlayer(player);
++    const gold = player.getDynamicProperty("strategic_gold") ?? 0;
++    const modal = new ModalFormData()
++        .title(`[Gold] ${targetCiv.name} へゴールドを贈る`)
++        .textField(`金額 (保有: ${gold})`, "例: 50", { defaultValue: "50" });
++    const res = await modal.show(realPlayer);
++    if (res.canceled) return;
++    const [amountStr] = res.formValues;
++    (await import("./commands.js")).cmdGiftGold(player, targetCiv.id, amountStr);
++}
++
+ /** 1ページあたりの選択肢の最大数。ボタンが多すぎるとフォームを開く際に重くなる(数秒固まる)ため制限する。 */
+ const MENU_PAGE_SIZE = 10;
+ 
+@@ -2330,7 +2518,7 @@ async function openCombatUnitAttackMenu(player, fromTx, fromTz) {
+     const range = getAttackRange(unit);
+     const items = [];
+     const body = [
+-        `${unit.label ?? "戦闘ユニット"}  HP: ${unit.hp ?? 0}/${unit.maxHp ?? 100}  戦闘力: ${getEffectiveCombatStrength(unit)}(基本${unit.combatStrength ?? 0})`,
++        `${unit.label ?? "戦闘ユニット"} §7(${getUnitClassLabel(unit.unitClass)})§r  HP: ${unit.hp ?? 0}/${unit.maxHp ?? 100}  戦闘力: ${getEffectiveCombatStrength(unit)}(基本${unit.combatStrength ?? 0})`,
+         `攻撃距離: ${range} | 残り移動力: ${remaining}`,
+     ];
+     const config = getMapConfig();
+@@ -2339,20 +2527,29 @@ async function openCombatUnitAttackMenu(player, fromTx, fromTz) {
+     if (remaining > 0) {
+         // 💡 攻撃できるのは宣戦布告済み(戦争状態)の相手のみ。hasAgreementFnは「除外する」述語なので、
+         //    戦争状態でない相手を除外する形で渡す。
+-        const attackTargets = getAttackableTargets(fromTx, fromTz, player.id, unit, tiles, config, (a, b) => !isAtWar(a, b));
++        const hasAgreementFn = (a, b) => !isAtWar(a, b);
++        const attackTargets = getAttackableTargets(fromTx, fromTz, player.id, unit, tiles, config, hasAgreementFn);
+         for (const t of attackTargets) {
+             const enemyUnit = t.unit;
+-            const cityText = t.tile.city ? ` | 都市: ${t.tile.city.name}` : "";
+             items.push({
+-                text: `[Combat] (${t.tx}, ${t.tz}) | ${enemyUnit.label ?? enemyUnit.id} HP:${Math.max(0, Math.round(enemyUnit.hp ?? 0))}/${enemyUnit.maxHp ?? 100} 戦闘力:${getEffectiveCombatStrength(enemyUnit)}${cityText}`,
+-                action: { tx: t.tx, tz: t.tz },
++                text: `[Combat] (${t.tx}, ${t.tz}) | ${enemyUnit.label ?? enemyUnit.id}(${getUnitClassLabel(enemyUnit.unitClass)}) HP:${Math.max(0, Math.round(enemyUnit.hp ?? 0))}/${enemyUnit.maxHp ?? 100} 戦闘力:${getEffectiveCombatStrength(enemyUnit)}`,
++                action: { type: "unit", tx: t.tx, tz: t.tz },
++            });
++        }
++        // 💡 都市(都心)は駐留ユニットとは別枠の攻撃対象(§13)。HP・防壁シールドを表示する。
++        const cityTargets = getAttackableCityTargets(fromTx, fromTz, player.id, unit, tiles, config, hasAgreementFn);
++        for (const t of cityTargets) {
++            const wallText = t.city.wall ? ` §b[Wall]${Math.max(0, Math.round(t.city.wallHp ?? WALL_MAX_HP))}/${WALL_MAX_HP}` : "";
++            items.push({
++                text: `[Siege] (${t.tx}, ${t.tz}) | 都市【${t.city.name}】 HP:${Math.max(0, Math.round(t.city.hp ?? CITY_MAX_HP))}/${CITY_MAX_HP}${wallText}`,
++                action: { type: "city", tx: t.tx, tz: t.tz },
+             });
+         }
+     } else {
+         body.push("§7移動力が残っていないため攻撃できません。次の自分のターン開始時に回復します。");
+     }
+ 
+-    if (items.length === 0 && remaining > 0) body.push("§7攻撃可能な対象(攻撃距離内の敵ユニット)がありません。");
++    if (items.length === 0 && remaining > 0) body.push("§7攻撃可能な対象(攻撃距離内の敵ユニット・都市)がありません。");
+ 
+     await showPaginatedMenu(
+         getRealPlayer(player),
+@@ -2360,12 +2557,51 @@ async function openCombatUnitAttackMenu(player, fromTx, fromTz) {
+         body.join("\n"),
+         items,
+         async (action) => {
+-            (await import("./commands.js")).cmdAttackCombatUnit(player, fromTx, fromTz, action.tx, action.tz);
++            const commands = await import("./commands.js");
++            if (action.type === "city") commands.cmdAttackCity(player, fromTx, fromTz, action.tx, action.tz);
++            else commands.cmdAttackCombatUnit(player, fromTx, fromTz, action.tx, action.tz);
+         },
+         async () => { await openMainMenu(player); },
+     );
+ }
+ 
++/** [Siege] 防壁を持つ都市の遠距離攻撃メニュー。範囲内(CITY_RANGED_ATTACK_RANGE)の敵ユニットを一覧表示する。 */
++async function openCityRangedAttackMenu(player, cityTx, cityTz) {
++    const tile = getTile(cityTx, cityTz);
++    const city = tile?.city;
++    if (!city || tile.ownerId !== player.id || !city.wall) { await openMainMenu(player); return; }
++
++    const config = getMapConfig();
++    const tiles = getTiles();
++    const cityRangedStrength = getBestRangedCombatStrength(player.id, tiles);
++    const body = [`【${city.name}】の遠距離攻撃 (戦闘力:${cityRangedStrength}、範囲:${CITY_RANGED_ATTACK_RANGE})`];
++    const items = [];
++
++    if (city.rangedAttackUsedThisTurn) {
++        body.push("§7この都市は今ターン既に遠距離攻撃を行いました。(1ターン1回まで)");
++    } else {
++        // 💡 都市の遠距離攻撃は「移動力」を持たないため、攻撃範囲だけを持つ疑似ユニットを
++        //    getAttackableTargets に渡して、既存の範囲探索ロジックをそのまま再利用する。
++        const pseudoUnit = { attackRange: CITY_RANGED_ATTACK_RANGE };
++        const targets = getAttackableTargets(cityTx, cityTz, player.id, pseudoUnit, tiles, config, (a, b) => !isAtWar(a, b));
++        for (const t of targets) {
++            const enemyUnit = t.unit;
++            items.push({
++                text: `[Combat] (${t.tx}, ${t.tz}) | ${enemyUnit.label ?? enemyUnit.id}(${getUnitClassLabel(enemyUnit.unitClass)}) HP:${Math.max(0, Math.round(enemyUnit.hp ?? 0))}/${enemyUnit.maxHp ?? 100} 戦闘力:${getEffectiveCombatStrength(enemyUnit)}`,
++                action: { tx: t.tx, tz: t.tz },
++            });
++        }
++        body.push("§7攻撃対象を選んでください(反撃はありません)。");
++        if (items.length === 0) body.push("§7範囲内に敵ユニットがいません。");
++    }
++
++    await showPaginatedMenu(
++        getRealPlayer(player), "[Siege] 都市の遠距離攻撃", body.join("\n"), items,
++        async (action) => { (await import("./commands.js")).cmdCityRangedAttack(player, cityTx, cityTz, action.tx, action.tz); },
++        async () => { await openMainMenu(player); },
++    );
++}
++
+ /**
+  * ⚔ 自分が所有する戦闘ユニットの一覧を表示する。
+  * マップ上のどこにいても、ここから直接そのユニットの移動・攻撃メニューを開ける
+@@ -2532,6 +2768,12 @@ async function openDistrictBuildingMenu(player, tx, tz) {
+     const city = cityKey ? allTiles[cityKey]?.city : null;
+ 
+     const body = [`(${tx}, ${tz}) の【${tile.district.label ?? tile.district.id}】に建設する建造物を選んでください。`, "§7建設には帰属都市の生産力を複数ターンかけて使います。"];
++    // 💡 原子力発電所の老朽化リスク(表示のみ、§24)。実際に事故が発生する処理は無い。
++    if (city?.nuclearPowerPlant) {
++        const age = city.nuclearPowerPlantAge ?? 0;
++        const risk = Math.min(100, age * 2);
++        body.push(`§c[Reactor] 原子力発電所 稼働年数:${age}ターン(事故発生率:約${risk}%、プロジェクト「原子炉の再稼働」でリセット可)`);
++    }
+     const items = [];
+ 
+     for (const id of getDistrictBuildingIds()) {
+@@ -2549,7 +2791,12 @@ async function openDistrictBuildingMenu(player, tx, tz) {
+             }
+             continue;
+         }
+-        items.push({ text: `${def.icon} ${def.label} (コスト:${def.cost})`, action: id });
++        // 💡 発電所3種はexclusiveGroupで排他(§24)。既に別の発電所が有効な状態でもここには
++        //    候補として出るため、選ぶと置き換わることが分かるよう注記する。
++        const replaceNote = def.exclusiveGroup && getDistrictBuildingIds().some(
++            (otherId) => otherId !== id && getDistrictBuildingDef(otherId).exclusiveGroup === def.exclusiveGroup && city?.[otherId]
++        ) ? " §c(既存の発電所と置き換え)" : "";
++        items.push({ text: `${def.icon} ${def.label} (コスト:${def.cost})${replaceNote}`, action: id });
+     }
+     if (items.length === 0) body.push("§7現在建設できる建造物がありません。");
+ 
+diff --git a/scripts/unitLabels.js b/scripts/unitLabels.js
+index 9f5f24a..2cb4fc7 100644
+--- a/scripts/unitLabels.js
++++ b/scripts/unitLabels.js
+@@ -29,6 +29,7 @@
+ 
+ import { world, system, TextPrimitive } from "@minecraft/server";
+ import { getMapConfig, getTiles, getStateVersion } from "./state.js";
++import { getUnitClassLabel } from "./combat.js";
+ 
+ const TILE_SIZE = 5;
+ const LABEL_HEIGHT_OFFSET = 2.2;
+@@ -54,7 +55,7 @@ function buildCombatUnitText(unit) {
+     const domainTag = unit.domain === "naval" ? "§b[Naval]" : "§a[Land]";
+     const hp = Math.max(0, Math.round(unit.hp ?? 0));
+     const maxHp = unit.maxHp ?? 100;
+-    return `${domainTag} §f${unit.label ?? unit.id ?? "ユニット"}\n§7${unit.ownerName ?? "不明"} §cHP:${hp}/${maxHp}`;
++    return `${domainTag} §f${unit.label ?? unit.id ?? "ユニット"} §7(${getUnitClassLabel(unit.unitClass)})\n§7${unit.ownerName ?? "不明"} §cHP:${hp}/${maxHp}`;
+ }
+ 
+ function buildReligiousUnitText(unit) {

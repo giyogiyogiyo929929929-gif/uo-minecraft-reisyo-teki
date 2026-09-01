@@ -4,18 +4,31 @@
 // 【関係の状態遷移】
 //   none(関係なし) --宣戦布告(declareWar)--> war(戦争)
 //   none --提案/承認(sendRequest+acceptRequest)--> pact(不可侵条約) --同上--> alliance(同盟)
-//   war/pact/alliance --解消(breakRelation)--> none
+//   war --提案/承認(sendRequest(type:"peace")+acceptRequest)--> none (=講和)
+//   pact/alliance --解消(breakRelation、相手の承諾不要)--> none
 //   pact/alliance --宣戦布告(declareWar)--> war (=同盟や不可侵条約を破っての開戦)
-// 戦争中は新たな不可侵条約・同盟を提案できない(sendRequestが拒否する。まずbreakRelationで
-// 講和してから提案し直す)。
-// 試合の設定(state.js の getMatchSettings().peaceEnabled)が無効な場合、breakRelationは
-// 戦争状態(war)の解消(=講和)のみ拒否する(不可侵条約・同盟の解消は常に可能。この設定は
-// あくまで「一度始まった戦争を終わらせられるか」だけを制御する)。
+// 戦争中は新たな不可侵条約・同盟を提案できない(sendRequestが拒否する。まず講和を提案して
+// 承認されてから提案し直す)。講和(戦争状態の終了)は不可侵条約・同盟の解消(breakRelation、
+// 一方的に成立)とは異なり、「送っただけで即成立」だと都合が良すぎるため、他の外交提案と
+// 同じ申請→承認の流れにしている(breakRelationは戦争状態を扱わない。§9参照)。
+// 試合の設定(state.js の getMatchSettings().peaceEnabled)が無効な場合、講和の提案・承認は
+// どちらも拒否される(不可侵条約・同盟の解消は常に可能。この設定はあくまで「一度始まった
+// 戦争を終わらせられるか」だけを制御する)。
 
 import { getCivStorageHandle } from "./civs.js"
 import { getMatchSettings } from "./state.js"
 
 const DIPLOMACY_KEY = "civ:diplomacy";
+
+// 💡 外交提案/関係種別の表示名。以前はcombat.jsのUNIT_CLASS_LABELSと同じことを、
+//    こことui.js側の複数箇所で個別のternary chainとして書いており、一部(openCivDiplomacyDetail)
+//    はpeaceケースの追加漏れが起きていた。1箇所にまとめて全呼び出し元から参照する。
+export const RELATION_REQUEST_TYPE_LABELS = { pact: "不可侵条約", alliance: "同盟", peace: "講和" };
+
+/** 外交提案/関係種別(pact/alliance/peace)の表示名を取得する(未知の値ならそのまま返す)。 */
+export function getRelationTypeLabel(type) {
+    return RELATION_REQUEST_TYPE_LABELS[type] ?? type ?? "不明";
+}
 
 /**
  * プレイヤー/文明の外交データを取得
@@ -136,13 +149,29 @@ export function getRequestsFor(handle) {
     return state.requests ?? [];
 }
 
-/** 外交提案（申請）を送信 */
+/**
+ * 外交提案（申請）を送信。type は "pact"(不可侵条約) / "alliance"(同盟) / "peace"(講和)。
+ * 💡 peaceは他の2つと前提条件が逆(戦争状態でなければ提案できない、diplomacyEnabledではなく
+ *    peaceEnabledを見る)なので、ここで分岐する。以前はbreakRelationで戦争状態を一方的に
+ *    (相手の承諾無しに)即終了できたが、「送ったら即講和」は都合が良すぎるため、他の外交提案
+ *    (不可侵条約・同盟)と同じ申請→承認の流れに統一した。
+ */
 export function sendRequest(fromHandle, toHandle, type) {
-    if (!getMatchSettings().diplomacyEnabled) {
-        return { ok: false, message: "§cこの試合では不可侵条約・同盟が無効に設定されています。" };
-    }
-    if (getRelation(fromHandle, toHandle?.id) === "war") {
-        return { ok: false, message: "§c戦争状態の相手には提案できません。先に講和(関係の解消)してください。" };
+    const relation = getRelation(fromHandle, toHandle?.id);
+    if (type === "peace") {
+        if (relation !== "war") {
+            return { ok: false, message: "§c戦争状態の相手にしか講和を提案できません。" };
+        }
+        if (!getMatchSettings().peaceEnabled) {
+            return { ok: false, message: "§cこの試合では講和(戦争状態の解消)が無効に設定されています。" };
+        }
+    } else {
+        if (!getMatchSettings().diplomacyEnabled) {
+            return { ok: false, message: "§cこの試合では不可侵条約・同盟が無効に設定されています。" };
+        }
+        if (relation === "war") {
+            return { ok: false, message: "§c戦争状態の相手には提案できません。先に講和を提案してください。" };
+        }
     }
 
     const toState = getState(toHandle);
@@ -166,7 +195,8 @@ export function sendRequest(fromHandle, toHandle, type) {
     toState.requests = requests;
     saveState(toHandle, toState);
 
-    return { ok: true, message: "§a外交提案を送信しました。相手の承諾をお待ちください。" };
+    const typeLabel = getRelationTypeLabel(type);
+    return { ok: true, message: `§a【${typeLabel}】の提案を送信しました。相手の承諾をお待ちください。` };
 }
 
 /** 外交提案を承認 */
@@ -174,11 +204,30 @@ export function acceptRequest(myHandle, fromHandle, requestId) {
     const myState = getState(myHandle);
     const req = (myState.requests ?? []).find(r => r.id === requestId);
     if (!req) return { ok: false, message: "§c該当する申請が見つかりません。" };
+
+    const targetId = fromHandle.id;
+
+    // 💡 講和(peace)は戦争状態(wars配列)を解消するだけで、不可侵条約・同盟とは別枠の扱い
+    //    (diplomacyEnabledではなくpeaceEnabledで許可判定する)。
+    if (req.type === "peace") {
+        if (!getMatchSettings().peaceEnabled) {
+            return { ok: false, message: "§cこの試合では講和(戦争状態の解消)が無効に設定されています。(提案は拒否するか、設定を有効にしてから承認してください)" };
+        }
+
+        myState.wars = (myState.wars ?? []).filter(id => id !== targetId);
+        myState.requests = (myState.requests ?? []).filter(r => r.id !== requestId);
+        saveState(myHandle, myState);
+
+        const targetState = getState(fromHandle);
+        targetState.wars = (targetState.wars ?? []).filter(id => id !== myHandle.id);
+        saveState(fromHandle, targetState);
+
+        return { ok: true, message: `§a【${req.fromName}】と講和しました(戦争状態を終了)。` };
+    }
+
     if (!getMatchSettings().diplomacyEnabled) {
         return { ok: false, message: "§cこの試合では不可侵条約・同盟が無効に設定されています。(提案は拒否するか、設定を有効にしてから承認してください)" };
     }
-
-    const targetId = fromHandle.id;
 
     myState.nonAggression = myState.nonAggression ?? [];
     myState.alliances = myState.alliances ?? [];
@@ -203,7 +252,7 @@ export function acceptRequest(myHandle, fromHandle, requestId) {
     }
     saveState(fromHandle, targetState);
 
-    const typeLabel = req.type === "pact" ? "不可侵条約" : "同盟";
+    const typeLabel = getRelationTypeLabel(req.type);
     return { ok: true, message: `§a【${req.fromName}】との【${typeLabel}】を締結しました！` };
 }
 
@@ -216,11 +265,15 @@ export function rejectRequest(myHandle, requestId) {
     myState.requests = (myState.requests ?? []).filter(r => r.id !== requestId);
     saveState(myHandle, myState);
 
-    const typeLabel = req.type === "pact" ? "不可侵条約" : "同盟";
+    const typeLabel = getRelationTypeLabel(req.type);
     return { ok: true, message: `§7【${req.fromName}】からの【${typeLabel}】の提案を拒否しました。` };
 }
 
-/** 外交関係(不可侵条約・同盟・戦争)の解消。戦争状態の解消は「講和」を意味する。 */
+/**
+ * 不可侵条約・同盟の一方的な解消・破棄(相手の承諾は不要)。戦争状態(war)はここでは扱わない
+ * ── 講和(戦争状態の終了)は一方的に成立させず、sendRequest(type: "peace")→acceptRequestの
+ * 申請・承認制にしている(送っただけで即講和が成立するのは都合が良すぎるため)。
+ */
 export function breakRelation(myHandle, targetHandle) {
     const myState = getState(myHandle);
     const targetState = getState(targetHandle);
@@ -232,24 +285,19 @@ export function breakRelation(myHandle, targetHandle) {
     if (currentRel === "none") {
         return { ok: false, message: "§c解消する外交関係が存在しません。" };
     }
-    if (currentRel === "war" && !getMatchSettings().peaceEnabled) {
-        return { ok: false, message: "§cこの試合では講和(戦争状態の解消)が無効に設定されています。" };
+    if (currentRel === "war") {
+        return { ok: false, message: "§c戦争状態は一方的に終了できません。相手に講和を提案し、承諾を待ってください。" };
     }
 
     myState.nonAggression = (myState.nonAggression ?? []).filter(id => id !== targetId);
     myState.alliances = (myState.alliances ?? []).filter(id => id !== targetId);
-    myState.wars = (myState.wars ?? []).filter(id => id !== targetId);
     saveState(myHandle, myState);
 
     targetState.nonAggression = (targetState.nonAggression ?? []).filter(id => id !== myId);
     targetState.alliances = (targetState.alliances ?? []).filter(id => id !== myId);
-    targetState.wars = (targetState.wars ?? []).filter(id => id !== myId);
     saveState(targetHandle, targetState);
 
-    if (currentRel === "war") {
-        return { ok: true, message: `§a【${targetHandle.name}】と講和しました(戦争状態を終了)。` };
-    }
-    const typeLabel = currentRel === "pact" ? "不可侵条約" : "同盟";
+    const typeLabel = getRelationTypeLabel(currentRel);
     return { ok: true, message: `§c【${targetHandle.name}】との【${typeLabel}】を解消・破棄しました。` };
 }
 

@@ -14,13 +14,16 @@
 //   両方をまとめて判定する。個別の理由でエラーメッセージを出し分けたい呼び出し元
 //   (commands.js の cmdMoveCombatUnit)は、2つのサブ関数を直接使う。
 //
-// 【移動経路の検証(飛び越え禁止)】
-// ・移動力2以上のユニット(軍艦など)が、最終着地マスだけを見て「入れるかどうか」を
+// 【移動経路の検証(経路探索)】
+// ・移動力2以上のユニット(帆船など)が、最終着地マスだけを見て「入れるかどうか」を
 //   判定すると、間に挟まる陸地(海軍ユニットの場合)や他国の「関係なし」領土、他ユニットを
-//   飛び越えて移動できてしまう(bots.js の Bot だけでなく commands.js の cmdMoveCombatUnit
-//   経由でプレイヤーの手動移動も同様)。canTravelPath が、8方向の直進(縦・横・斜め)上の
-//   通過点をすべて検証し、途中に障害物があれば経路自体を不可とする(直進で説明できない
-//   移動(dx・dzの絶対値が一致しない斜め以外の移動)もそもそも経路が定義できないため不可)。
+//   飛び越えて移動できてしまう(commands.js の cmdMoveCombatUnit 経由でプレイヤーの手動移動も
+//   同様)。getReachablePositions が、8方向いずれかへの1マス移動を移動力1消費として扱う
+//   幅優先探索(BFS)で、現在の残り移動力の範囲内で実際に経路がつながる全マスを列挙する
+//   (以前は8方向の直進(縦・横・斜め)上にあるマスにしか移動できなかったが、迂回を挟んだ
+//   曲がった経路でも、その経路の長さぶんの移動力を消費すれば到達できるように変更した)。
+//   到達コスト(=最短距離)は常に方眼距離(chebyshev距離: max(|dx|,|dz|))と一致する
+//   (斜め移動が縦横移動と同じ移動力1で済むため。障害物で迂回が必要な場合はその分コストが増える)。
 //
 // 【ルール】
 // ・攻撃距離は、そのユニットの移動力(movement)と同じ範囲を使う(attackRange を明示的に
@@ -72,7 +75,7 @@
 // 反映側のコードは変更不要(adjacency.js の隣接ボーナスと同じ設計思想)。
 
 import { isWaterTerrain, isImpassableTerrain } from "./mapGen.js";
-import { canEnterTerritory } from "./diplomacy.js";
+import { canEnterTerritory, isAtWar } from "./diplomacy.js";
 
 const DAMAGE_MIN = 24;
 const DAMAGE_MAX = 36;
@@ -100,15 +103,31 @@ export const CITY_RANGED_ATTACK_RANGE = 3;
 export const WALL_MAX_HP = 100;
 // 💡 防壁があるときの被ダメージ倍率。攻城(siege)ユニットだけは防壁の軽減効果をすり抜ける
 //    (Civilization VIの「攻城兵器は城壁の防御を無視する」という考え方を踏襲)。
-const WALL_DAMAGE_MULTIPLIERS = { melee: 0.15, antiCavalry: 0.15, cavalry: 0.15, ranged: 0.5, siege: 1 };
+//    (バグ修正) navalが未指定だと未知の兵種扱いの既定値(1、軽減なし)に落ちてしまっていた。
+//    海軍は接近戦ではなく艦砲射撃という位置づけのため、陸上の遠距離兵種と同じ軽減率にする。
+const WALL_DAMAGE_MULTIPLIERS = { melee: 0.15, antiCavalry: 0.15, cavalry: 0.15, ranged: 0.5, naval: 0.5, air: 0.75, siege: 1 };
 // 💡 「近接ユニット」として扱う兵種の集合。都市戦闘力の算出基準(近接系ユニットの中で最強)・
 //    都市への反撃の可否(近接系からの攻撃にのみ都市は反撃する)・防壁の被ダメージ倍率の
 //    いずれもこの集合を基準にする。
 const MELEE_LIKE_CLASSES = new Set(["melee", "antiCavalry", "cavalry"]);
+// 💡 bots.jsが自軍の近接/遠距離ユニット数を数える(生産の多様性判断)ためのヘルパー。
+//    以前はbots.js側でユニットIDを列挙したハードコードのSetで分類しており、新しいユニットを
+//    追加するたびにここのunitClassとは別にそちらも手で更新する必要があった。
+const RANGED_LIKE_CLASSES = new Set(["ranged", "siege"]);
 
 /** unitClass が近接系(melee/antiCavalry/cavalry)かどうか。 */
 export function isMeleeUnitClass(unitClass) {
     return MELEE_LIKE_CLASSES.has(unitClass);
+}
+
+/** unitClass が遠距離系(ranged/siege)かどうか。 */
+export function isRangedUnitClass(unitClass) {
+    return RANGED_LIKE_CLASSES.has(unitClass);
+}
+
+/** unitClass が海軍(naval)かどうか。bots.js が艦艇数を数える(生産多様性判断)ためのヘルパー。 */
+export function isNavalUnitClass(unitClass) {
+    return unitClass === "naval";
 }
 
 /** 兵種(unitClass)の表示名。UIやHUDでの表示に使う(未分類のユニットは呼び出し元でフォールバックする)。 */
@@ -119,6 +138,7 @@ export const UNIT_CLASS_LABELS = {
     ranged: "遠隔",
     siege: "攻城",
     naval: "海軍",
+    air: "空軍",
 };
 
 /** 兵種の表示名を取得する(未知の値ならそのまま返す)。 */
@@ -160,6 +180,11 @@ export function isNavalUnit(unit) {
     return unit?.domain === "naval";
 }
 
+/** このユニットが空軍ユニット(domain: "air")かどうか。 */
+export function isAirUnit(unit) {
+    return unit?.domain === "air";
+}
+
 /** このユニットが陸軍ユニットかどうか(domainが未指定の場合も陸軍として扱う)。 */
 export function isLandUnit(unit) {
     return !isNavalUnit(unit);
@@ -168,11 +193,13 @@ export function isLandUnit(unit) {
 /**
  * 指定した戦闘ユニットが、地形の観点だけで指定したタイルへ進入できるかどうかを判定する
  * (所有者・外交関係は見ない。地形適性のみ)。
+ * ・空軍ユニット(domain: "air")は山脈・水上を含む全地形に進入できる(地形の制約を受けない)。
  * ・山脈マス(impassable)は陸軍・海軍を問わず進入不可。
  * ・陸軍ユニットは水上マス(isWater)に進入不可、海軍ユニットは水上マス以外に進入不可。
  */
 export function canUnitEnterTerrain(unit, tile) {
     if (!tile) return false;
+    if (isAirUnit(unit)) return true; // 空軍は山脈・水上を含む全地形に進入できる
     if (isImpassableTerrain(tile.type)) return false;
     const water = isWaterTerrain(tile.type);
     return isNavalUnit(unit) ? water : !water;
@@ -189,13 +216,31 @@ export function canUnitEnterOwnership(unit, tile) {
 }
 
 /**
- * 指定したタイルが他国の都市(都心)で、かつそのHPがまだ0を超えている場合、そのユニットは
+ * 指定したタイルが戦争相手の都市(都心)で、かつそのHPがまだ0を超えている場合、そのユニットは
  * 進入できない(都心はHPを0にしない限り突破できない防衛拠点として機能する。§13参照)。
- * 自国の都市には常に進入できる。
+ * 自国の都市、および戦争状態にない相手(同盟・不可侵条約)の都市には常に進入できる
+ * (バグ修正: 以前は所有者が自分と違うだけでHPゲートがかかり、同盟国の健在な都市にも
+ * 味方ユニットを駐留・通過させられなかった)。
  */
 export function canUnitEnterCityTile(unit, tile) {
     if (!tile?.city || tile.ownerId === unit?.ownerId) return true;
+    if (!isAtWar(unit?.ownerId, tile.ownerId)) return true;
     return (tile.city.hp ?? CITY_MAX_HP) <= 0;
+}
+
+/**
+ * 指定したタイルが「陥落した戦争相手の都市(HP<=0)」かどうかを厳密に判定する。
+ * canUnitEnterCityTile とは意図的に別の関数にしている: canUnitEnterCityTile は
+ * 「このタイルへ進入できるか」を判定するだけで、同盟国・不可侵条約相手の健在な都市にも
+ * (進入は許可する意図で)trueを返す。一方こちらは「都市が実際に陥落し、駐留ユニットごと
+ * 占領してよい状態か」だけを見る。
+ * バグ修正: 以前 cmdMoveCombatUnit はこの区別をせず canUnitEnterCityTile の結果をそのまま
+ * 「陥落判定」に流用していたため、健在な同盟国/不可侵条約相手の都市(HPが残っていても
+ * 進入自体は許可される)にまで「駐留ユニットが陥落と共に敗北した」処理が誤爆し、
+ * 味方の駐留ユニットが無条件に消される問題があった。
+ */
+export function isFallenEnemyCityTile(unit, tile) {
+    return !!tile?.city && tile.ownerId !== unit?.ownerId && isAtWar(unit?.ownerId, tile.ownerId) && (tile.city.hp ?? CITY_MAX_HP) <= 0;
 }
 
 /**
@@ -207,30 +252,88 @@ export function canUnitEnterTile(unit, tile) {
 }
 
 /**
- * fromTx,fromTz から toTx,toTz までの移動経路が、このユニットにとって進入可能かどうかを
- * 判定する(最終着地マス自体の判定は呼び出し元が別途行う想定。ここでは主に「間に挟まる
- * 通過点」を検証する)。
- * ・移動は8方向の直進(縦・横・斜め)のみを想定しており、直進で説明できない移動
- *   (dx・dzの絶対値が一致せず、どちらも0でもない)は経路が定義できないため不可とする。
- * ・通過点(距離1〜distance-1のマス。最終マスは含まない)は、地形・外交関係・他ユニットの
- *   占有の観点ですべて進入可能である必要がある。
- * 移動力2以上のユニット(軍艦など)が、間に挟まる陸地(海軍ユニットの場合)や他国の
- * 「関係なし」領土、他ユニットを飛び越えて移動してしまうのを防ぐための経路検証。
+ * 移動候補として、このユニットがこのタイルに「着地(移動を終える)」できるかどうかを判定する。
+ * canUnitEnterTile(地形・外交・都心HP)に加えて、駐留ユニットの有無もここでまとめて見る
+ * (陥落した敵都市=isFallenEnemyCityTileならタイルに駐留ユニットが残っていても着地・占領できる。
+ * それ以外で駐留ユニットがいるマスは塞がっている扱い)。
+ * ui.js・bots.jsの移動候補列挙は、以前それぞれ「!tile.combatUnit || isFallenEnemyCityTile(...)」
+ * のような組み合わせを個別に手書きしていた。これはcmdMoveCombatUnit(commands.js)を
+ * isFallenEnemyCityTileへ切り替えた際に一度直したのと同種の組み合わせであり、呼び出し側ごとに
+ * バラバラに書くと将来また片方を書き忘れて同じバグ(健在な味方都市への進入で駐留ユニットが
+ * 消える/陥落した都市に進入できない)を再発させかねないため、単一の入口としてここにまとめる。
+ * commands.jsのcmdMoveCombatUnitは失敗理由ごとに個別のメッセージを返す必要があるため、
+ * 従来通り各判定を個別に呼ぶ(このヘルパーは使わない)。
  */
-export function canTravelPath(unit, fromTx, fromTz, toTx, toTz, tiles) {
-    const dx = toTx - fromTx;
-    const dz = toTz - fromTz;
-    const distance = Math.max(Math.abs(dx), Math.abs(dz));
-    if (distance <= 1) return true;
-    if (dx !== 0 && dz !== 0 && Math.abs(dx) !== Math.abs(dz)) return false;
+export function canUnitLandOnTile(unit, tile) {
+    if (!tile) return false;
+    if (tile.combatUnit && !isFallenEnemyCityTile(unit, tile)) return false;
+    return canUnitEnterTile(unit, tile);
+}
 
-    const stepX = Math.sign(dx);
-    const stepZ = Math.sign(dz);
-    for (let step = 1; step < distance; step++) {
-        const t = tiles[`${fromTx + stepX * step},${fromTz + stepZ * step}`];
-        if (!t || t.combatUnit || !canUnitEnterTile(unit, t)) return false;
+/** fromTx,fromTz から見た8方向(縦横斜め)への1マス移動ぶんの差分。 */
+const MOVE_DIRECTIONS_8 = [
+    [1, 0], [-1, 0], [0, 1], [0, -1],
+    [1, 1], [1, -1], [-1, 1], [-1, -1],
+];
+
+/**
+ * fromTx,fromTz から、このユニットが今の移動力(maxDistance)の範囲で実際に経路がつながる
+ * 全マスを幅優先探索(BFS)で列挙する。8方向いずれかへの1マス移動を移動力1消費として扱う
+ * (斜め移動も縦横移動と同じコストなので、障害物が無ければ最短到達コストは常に方眼距離
+ * (chebyshev距離)と一致する)。
+ * ・通過点(最終着地マス以外)は canUnitEnterTile を満たし、かつ他ユニットが乗っていない
+ *   マスである必要がある(他ユニットのいるマスは飛び越えられず、探索はそこで打ち切られる)。
+ * ・最終着地マスの判定は canUnitLandOnTile と同じ条件(陥落した敵都市になら駐留ユニットが
+ *   残っていても着地・占領できる、という通過点より緩い例外を含む)をその場でインライン評価する
+ *   (canUnitEnterTileの判定結果をcanEnter(t)として使い回し、二重に判定し直さないため)。
+ * 戻り値: Map<"tx,tz", 消費移動力> (fromTx,fromTz 自身は含まない)。
+ * 💡 (性能改善) canUnitEnterTile が内部で呼ぶ外交関係の判定(canUnitEnterOwnership →
+ *    canEnterTerritory → getRelation)は、diplomacy.js側にキャッシュが無く呼ぶたびにDynamic
+ *    Propertyの読み取り+JSON.parseが走る。探索範囲が数十〜百マス規模に広がったことで
+ *    同じ所有者のマスを何度も判定する機会が増えたため、1回の探索内では所有者(tile.ownerId)
+ *    ごとの判定結果をローカルにキャッシュして使い回す(地形・都心HPの判定は軽いため素通し)。
+ */
+export function getReachablePositions(unit, fromTx, fromTz, tiles, config, maxDistance) {
+    const result = new Map();
+    if (!config || !(maxDistance > 0)) return result;
+
+    const ownershipCache = new Map();
+    const canEnter = (t) => {
+        if (!canUnitEnterTerrain(unit, t)) return false;
+        if (t.ownerId && t.ownerId !== unit?.ownerId) {
+            let allowed = ownershipCache.get(t.ownerId);
+            if (allowed === undefined) {
+                allowed = canEnterTerritory(unit?.ownerId, t.ownerId);
+                ownershipCache.set(t.ownerId, allowed);
+            }
+            if (!allowed) return false;
+        }
+        return canUnitEnterCityTile(unit, t);
+    };
+
+    const bestDist = new Map();
+    bestDist.set(`${fromTx},${fromTz}`, 0);
+    const queue = [[fromTx, fromTz, 0]];
+    for (let head = 0; head < queue.length; head++) {
+        const [tx, tz, dist] = queue[head];
+        if (dist >= maxDistance) continue;
+        for (const [dx, dz] of MOVE_DIRECTIONS_8) {
+            const ntx = tx + dx;
+            const ntz = tz + dz;
+            if (ntx < 0 || ntz < 0 || ntx >= config.width || ntz >= config.height) continue;
+            const key = `${ntx},${ntz}`;
+            const ndist = dist + 1;
+            const prevBest = bestDist.get(key);
+            if (prevBest !== undefined && prevBest <= ndist) continue;
+
+            const t = tiles[key];
+            if (!t || !canEnter(t)) continue;
+            bestDist.set(key, ndist);
+            if (!t.combatUnit || isFallenEnemyCityTile(unit, t)) result.set(key, ndist); // canUnitLandOnTileと同じ着地条件
+            if (!t.combatUnit) queue.push([ntx, ntz, ndist]); // 他ユニットのいるマスはここで探索終了(通過不可)
+        }
     }
-    return true;
+    return result;
 }
 
 /**
@@ -258,7 +361,7 @@ function getBaseRangedStrength(unit) {
  * ダメージによる戦闘力低下ペナルティを算出する。
  * HPが10減るごとに-1、最大-9まで。
  */
-function getStrengthPenalty(unit) {
+export function getStrengthPenalty(unit) {
     const maxHp = unit?.maxHp ?? 100;
     const hp = unit?.hp ?? maxHp;
     const damageTaken = Math.max(0, maxHp - hp);
@@ -329,8 +432,10 @@ export function canGuaranteeKill(attacker, defender, flankingBonus = 0) {
  * hasAgreementFn(playerId, otherOwnerId) が true を返した相手のユニットは対象から除外する。
  * 呼び出し元は「戦争状態でない(=攻撃できない)相手」を除外する述語(例:
  * `(a, b) => !isAtWar(a, b)`)を渡す(commands.js の cmdAttackCombatUnit と同じ判定基準)。
- * 💡 都市のマスに駐留するユニットは対象に含めない。都市自身が防衛の主体になる(§13)ため、
- *    直接の攻撃対象は都市そのもの(getAttackableCityTargets)になる。
+ * 💡 都市が健在なマスに駐留するユニットは対象に含めない。都市自身が防衛の主体になる(§13)ため、
+ *    直接の攻撃対象は都市そのもの(getAttackableCityTargets)になる。ただし都心のHPが既に0
+ *    (陥落済み)の場合は、そのマスの駐留ユニットはもう都市に守られていないただのユニットなので、
+ *    通常通りこちらの直接攻撃対象に含める(isFallenEnemyCityTile)。
  * @returns {{ tx: number, tz: number, tile: any, unit: any }[]}
  */
 export function getAttackableTargets(fromTx, fromTz, playerId, unit, tiles, config, hasAgreementFn) {
@@ -348,7 +453,7 @@ export function getAttackableTargets(fromTx, fromTz, playerId, unit, tiles, conf
             if (tx < 0 || tz < 0 || tx >= config.width || tz >= config.height) continue;
 
             const tile = tiles[`${tx},${tz}`];
-            if (tile?.city) continue;
+            if (tile?.city && !isFallenEnemyCityTile(unit, tile)) continue;
             const enemyUnit = tile?.combatUnit;
             if (!enemyUnit || enemyUnit.ownerId === playerId) continue;
             if (hasAgreementFn?.(playerId, enemyUnit.ownerId)) continue;
@@ -362,7 +467,9 @@ export function getAttackableTargets(fromTx, fromTz, playerId, unit, tiles, conf
 /**
  * 指定した戦闘ユニットが今攻撃できる、敵の都市(都心)が存在するマスの一覧を返す。
  * 駐留ユニットの有無に関わらず都市自体を対象として返す(getAttackableTargetsと同じ
- * hasAgreementFnの使い方)。
+ * hasAgreementFnの使い方)。既に陥落済み(HP<=0)の都市は、これ以上ダメージを与える意味が
+ * 無い(バグ修正: 以前は含まれ続け、Botが占領のため移動する代わりに無意味な攻撃を
+ * 繰り返し続けてしまっていた)ため除外する。
  * @returns {{ tx: number, tz: number, tile: any, city: any }[]}
  */
 export function getAttackableCityTargets(fromTx, fromTz, playerId, unit, tiles, config, hasAgreementFn) {
@@ -381,6 +488,7 @@ export function getAttackableCityTargets(fromTx, fromTz, playerId, unit, tiles, 
 
             const tile = tiles[`${tx},${tz}`];
             if (!tile?.city || !tile.ownerId || tile.ownerId === playerId) continue;
+            if ((tile.city.hp ?? CITY_MAX_HP) <= 0) continue;
             if (hasAgreementFn?.(playerId, tile.ownerId)) continue;
 
             targets.push({ tx, tz, tile, city: tile.city });
@@ -393,7 +501,7 @@ export function getAttackableCityTargets(fromTx, fromTz, playerId, unit, tiles, 
  * 24〜36のランダム基礎ダメージに、戦闘力の差による指数補正をかけて算出する。
  * 💡 小数点以下は切り捨てる。
  */
-function rollDamage(attackerStrength, defenderStrength) {
+export function rollDamage(attackerStrength, defenderStrength) {
     const base = DAMAGE_MIN + Math.random() * (DAMAGE_MAX - DAMAGE_MIN);
     const diff = (attackerStrength ?? 0) - (defenderStrength ?? 0);
     return Math.floor(base * Math.exp(diff * DAMAGE_EXPONENT_SCALE));
@@ -534,17 +642,27 @@ export function getWallDamageMultiplier(unitClass) {
  *   防壁が無ければ倍率をかけず、ダメージはそのまま都心のHPに直接入る。
  * ・都市が反撃するのは近接系(melee/antiCavalry/cavalry)ユニットから攻撃された場合のみ
  *   (遠距離・攻城ユニットからの一方的な攻撃には反撃しない。都市が既に撃破された場合も反撃なし)。
- * city オブジェクトの hp/wallHp/attackedRecently を直接更新する。
+ * ・駐留ユニット(garrisonUnit)がいる場合、城壁を抜けて都心HPに届いた分のダメージ(hpDamage)を
+ *   都心HPと駐留ユニットのHPの両方に並列で適用する(どちらか片方を守るための取捨選択ではなく、
+ *   同じダメージが同時に両方を蝕むイメージ。城壁は都心・駐留ユニットどちらも一緒に守る)。
+ *   駐留ユニットのHPが0になった場合、都市が陥落していなくても駐留ユニットだけ撃破される
+ *   (呼び出し元でタイルのcombatUnitをnullにする必要がある)。反撃の戦闘力(cityCombatStrength)は
+ *   呼び出し元が攻撃前に算出した値をそのまま使うため、この攻撃で駐留ユニットが倒れても
+ *   同じターンの反撃には影響しない(簡略化のための割り切り)。
+ * city オブジェクトの hp/wallHp/attackedRecently を直接更新する。garrisonUnitを渡した場合は
+ * そのhpも直接更新する。
  * @param {any} attacker 攻撃側の戦闘ユニット
  * @param {any} city 対象都市のデータ(tile.city)
  * @param {number} cityCombatStrength getCityCombatStrength() で算出した都市の戦闘力
+ * @param {any} [garrisonUnit] 都市のマスに駐留中の戦闘ユニット(いなければ省略可)
  * @returns {{
  *   damage: number, wallDamage: number, hpDamage: number, cityDestroyed: boolean,
+ *   garrisonDestroyed: boolean,
  *   counterDamage: number, attackerDestroyed: boolean,
  *   counterSkippedReason: "cityDestroyed" | "notMelee" | null
  * }}
  */
-export function resolveCityAttack(attacker, city, cityCombatStrength) {
+export function resolveCityAttack(attacker, city, cityCombatStrength, garrisonUnit) {
     const attackerStrength = getFirstStrikeStrength(attacker);
     const rawDamage = rollDamage(attackerStrength, cityCombatStrength);
 
@@ -563,6 +681,12 @@ export function resolveCityAttack(attacker, city, cityCombatStrength) {
     city.attackedRecently = true;
     const cityDestroyed = city.hp <= 0;
 
+    let garrisonDestroyed = false;
+    if (garrisonUnit) {
+        garrisonUnit.hp = (garrisonUnit.hp ?? 0) - hpDamage;
+        garrisonDestroyed = garrisonUnit.hp <= 0;
+    }
+
     let counterDamage = 0;
     let attackerDestroyed = false;
     let counterSkippedReason = null;
@@ -577,7 +701,7 @@ export function resolveCityAttack(attacker, city, cityCombatStrength) {
         attackerDestroyed = attacker.hp <= 0;
     }
 
-    return { damage, wallDamage, hpDamage, cityDestroyed, counterDamage, attackerDestroyed, counterSkippedReason };
+    return { damage, wallDamage, hpDamage, cityDestroyed, garrisonDestroyed, counterDamage, attackerDestroyed, counterSkippedReason };
 }
 
 /**
@@ -591,4 +715,20 @@ export function resolveCityRangedAttack(cityRangedStrength, defender) {
     const damage = rollDamage(cityRangedStrength, getEffectiveCombatStrength(defender));
     defender.hp = (defender.hp ?? 0) - damage;
     return { damage, defenderDestroyed: defender.hp <= 0 };
+}
+
+/**
+ * 哨戒中の航空ユニット(戦闘機・支援防御機)が、敵の空爆を迎撃した際のダメージ処理(airbase.js の
+ * findInterceptingPatrolUnit と対になる)。対空砲(antiAir)による確実な迎撃・撃墜とは異なり、
+ * 迎撃側の迎撃戦闘力(interceptCombatStrength)で一方的にダメージを与えるだけで、迎撃側自身は
+ * ダメージを受けない。攻撃側を撃墜できた場合のみ空爆が不発になる(呼び出し元が判定する)。
+ * @param {any} interceptor 迎撃する航空ユニット(hp, interceptCombatStrength を持つ)
+ * @param {any} attacker 空爆を行った航空ユニット(hpを直接更新する)
+ * @param {number} [bonus=0] 支援偵察機による迎撃戦闘力の補助ボーナス(airbase.js参照)
+ */
+export function resolveAirPatrolInterception(interceptor, attacker, bonus = 0) {
+    const interceptorStrength = Math.max(0, (interceptor.interceptCombatStrength ?? 0) - getStrengthPenalty(interceptor) + bonus);
+    const damage = rollDamage(interceptorStrength, getEffectiveCombatStrength(attacker));
+    attacker.hp = (attacker.hp ?? 0) - damage;
+    return { damage, attackerDestroyed: attacker.hp <= 0 };
 }

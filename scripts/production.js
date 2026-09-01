@@ -33,9 +33,16 @@ import { hasCompletedProgress, getDefinition } from "./progression.js";
 import { isWaterTerrain } from "./mapGen.js";
 import { getAdjacentTiles } from "./adjacency.js";
 import { WALL_MAX_HP } from "./combat.js";
+import { getWonderClaims, releaseWonder } from "./state.js";
+import { getAirbaseCapacity, getBasedAirUnits, addBasedAirUnit } from "./airbase.js";
 
 /** 労働者1人が持つ行動回数。 */
 export const WORKER_ACTIONS_PER_UNIT = 3;
+
+// 💡 ゴールドでの即時購入(ラッシュバイ、§23)1生産力あたりの必要ゴールド。commands.js(実際の
+//    購入処理)とui.js(ボタンのプレビュー表示)の両方がこの1箇所を参照する(以前は同じ値を
+//    別名の定数として2ファイルにそれぞれ直書きしており、ズレる恐れがあった)。
+export const RUSH_BUY_GOLD_PER_PRODUCTION = 3;
 
 /**
  * 都市の労働者データを正規化して返す。
@@ -101,7 +108,15 @@ export function getTotalWorkerActionsRemaining(city) {
  *   "cavalry"/"ranged"/"siege"/"naval")。combat.js の UNIT_CLASS_COUNTERS によるクラス相性
  *   ボーナス(例: 対騎兵は騎兵相手に戦闘力+10)の判定に使う。この値はメニュー表示用の参照で、
  *   実際の戦闘計算には onComplete が配置するユニット個体データ側の unitClass を使う(両方に
- *   同じ値を設定しておくこと)。
+ *   同じ値を設定しておくこと)。💡 一部のユニットは完成時に国家の戦略資源在庫を1消費する
+ *   (horseman/knight→馬、swordsman/musketman/cannon→鉄、tank/dreadnought→石油。
+ *   placeProducedCombatUnitConsumingResource参照)。在庫が無ければ配置失敗と同様に
+ *   生産が中止される(onComplete参照)。
+ * @property {string} [consumesResource] onComplete が完成時に1消費する国家の戦略資源のDynamic
+ *   Property名(例: "strategic_horse")。onComplete側の実際の消費処理
+ *   (placeProducedCombatUnitConsumingResource/completeConsumingResource)とは独立して、
+ *   bots.js が「在庫が無い間はそもそも着工しない」ガードの判定にこの値を直接参照する
+ *   (在庫の有無をbots.js側で別途手動管理しないための単一の情報源。§8/§24)。
  * @property {number} cost 完成に必要な生産力の合計値
  * @property {boolean} [uniquePerCity] true の場合、都市に既に存在する場合は再生産不可
  * @property {(city: any) => boolean} [hasBuilt] uniquePerCity 用: 既に保有済みか判定する関数
@@ -109,7 +124,14 @@ export function getTotalWorkerActionsRemaining(city) {
  * @property {string} [requiresTechnology] 生産に必要な技術ID(technology progression)
  * @property {string} [requiresCivic] 生産に必要な社会制度ID(civic progression)。requiresTechnology と
  *   併用した場合、両方を取得済みでなければ生産できない(例: 市場は貨幣経済+商業の両方が必要)。
+ * @property {boolean} [requiresEmptyCombatTile] true の場合、都市のマスに既に戦闘ユニットが
+ *   いると着工できない(陸軍/海軍ユニット向け。canStartProduction参照)
+ * @property {boolean} [requiresAirbaseCapacity] true の場合、都市の航空基地(airbase.js、
+ *   §航空戦)に空き枠が無いと着工できない(航空ユニット向け。canStartProductionにcityKey/tiles
+ *   が渡された場合のみ事前チェックされる。最終的な強制はonComplete側のplaceProducedAirUnitが行う)
  * @property {boolean} [disallowInCapital] true の場合、首都ではこの建造物を生産できない(遷都用)
+ * @property {string} [requiresBuildingFlag] この都市が city[このID] を保有していないと生産できない
+ *   (例: プロジェクト「原子炉の再稼働」は city.nuclearPowerPlant が必要。§24)
  * @property {Record<string, number>} [flatYields] この建造物(category:"building")があるだけで
  *   (隣接マスに関係なく)都市に毎ターン加算される産出量(例: { faith: 4 })。
  *   adjacency.js の getFlagFlatYields() が city[buildingId] を見て自動的に反映するので、
@@ -191,6 +213,77 @@ function placeProducedNavalUnit(ctx, createUnit) {
     return { cancelled: true, cancelReason: "noNavalTile" };
 }
 
+/**
+ * 航空ユニット生産の完了処理。陸軍/海軍と違ってマスには配置せず、この都市の航空基地
+ * (city.airbase.units、airbase.js参照)に空き枠があればそこへ加える。都心は常に1枠、
+ * 飛行場(区域専用建造物)・滑走路(施設)があればさらに枠が増える(getAirbaseCapacity)。
+ * 空き枠が無ければ生産を中止する(進行度は保持される)。
+ * @param {any} ctx tickProduction から渡されるコンテキスト({ cityKey, tiles } など)
+ * @param {(ownerId: string, ownerName: string) => any} createUnit 配置するユニットのデータを作る関数
+ * @returns {{ cancelled: boolean, cancelReason?: "noAirbaseCapacity" } | undefined}
+ */
+function placeProducedAirUnit(ctx, createUnit) {
+    const tile = ctx?.tiles?.[ctx?.cityKey];
+    if (!tile?.city) return { cancelled: true, cancelReason: "noAirbaseCapacity" };
+
+    const capacity = getAirbaseCapacity(tile.city, ctx.cityKey, ctx.tiles);
+    if (getBasedAirUnits(tile.city).length >= capacity) {
+        return { cancelled: true, cancelReason: "noAirbaseCapacity" };
+    }
+
+    addBasedAirUnit(tile.city, createUnit(tile.ownerId, tile.ownerName));
+    return undefined;
+}
+
+/**
+ * placeProducedCombatUnit()(または placeProducedNavalUnit())に、完成時に国家の戦略資源在庫を
+ * 1消費する前提条件を追加する共通ヘルパー(horsemanの馬・swordsmanの鉄・tank/dreadnoughtの
+ * 石油など)。在庫が無ければ他の配置失敗と同じく生産を中止する(cancelReason: "noResource")。
+ * 消費は実際に配置できた場合のみ行う(配置自体が中止された場合は消費しない)。
+ * @param {any} ctx tickProduction から渡されるコンテキスト({ player } を含む)
+ * @param {string} resourceProp 消費するDynamic Property名(例: "strategic_horse")
+ * @param {string} resourceLabel 在庫不足時のメッセージに使う表示名(例: "馬")
+ * @param {(ownerId: string, ownerName: string) => any} createUnit 配置するユニットのデータを作る関数
+ * @param {(ctx: any, createUnit: any) => any} [placeFn] 配置関数(既定は placeProducedCombatUnit。
+ *   海軍ユニットは placeProducedNavalUnit を渡す)
+ * @returns {{ cancelled: boolean, cancelReason?: string, resourceLabel?: string } | undefined}
+ */
+/**
+ * 資源消費を伴う完成処理の共通ガード。在庫を確認し、無ければ生産を中止する
+ * (cancelReason: "noResource")。在庫があれば fn() を呼び、fn() 自身が別の理由で
+ * cancelled を返した場合は資源を消費せずそのまま返す。それ以外は在庫を1消費して
+ * fn() の戻り値をそのまま返す。
+ * @param {any} ctx tickProduction から渡されるコンテキスト({ player } を含む)
+ * @param {string} resourceProp 消費するDynamic Property名(例: "strategic_uranium")
+ * @param {string} resourceLabel 在庫不足時のメッセージに使う表示名(例: "ウラン")
+ * @param {() => any} fn 実際の完成効果(在庫が確認できた場合のみ呼ばれる)
+ */
+function withResourceConsumed(ctx, resourceProp, resourceLabel, fn) {
+    const stock = ctx?.player?.getDynamicProperty(resourceProp) ?? 0;
+    if (stock < 1) return { cancelled: true, cancelReason: "noResource", resourceLabel };
+    const result = fn();
+    if (result?.cancelled) return result;
+    ctx.player.setDynamicProperty(resourceProp, stock - 1);
+    return result;
+}
+
+function placeProducedCombatUnitConsumingResource(ctx, resourceProp, resourceLabel, createUnit, placeFn = placeProducedCombatUnit) {
+    return withResourceConsumed(ctx, resourceProp, resourceLabel, () => placeFn(ctx, createUnit));
+}
+
+/**
+ * placeProducedCombatUnitConsumingResource() のマス配置を伴わない版(ミサイルの在庫加算・
+ * 対空砲のフラグ設定など、city.production完了時にマスへの配置を行わない完成処理向け)。
+ * 在庫が無ければ他の資源消費ユニットと同じく生産を中止する(cancelReason: "noResource")。
+ * @param {any} ctx tickProduction から渡されるコンテキスト({ player } を含む)
+ * @param {string} resourceProp 消費するDynamic Property名(例: "strategic_uranium")
+ * @param {string} resourceLabel 在庫不足時のメッセージに使う表示名(例: "ウラン")
+ * @param {() => void} applyEffect 実際に完成効果を適用する関数(在庫が確認できた場合のみ呼ばれる)
+ */
+function completeConsumingResource(ctx, resourceProp, resourceLabel, applyEffect) {
+    return withResourceConsumed(ctx, resourceProp, resourceLabel, () => { applyEffect(); return undefined; });
+}
+
 export const PRODUCTION_DEFS = {
     worker: {
         label: "労働者",
@@ -207,10 +300,13 @@ export const PRODUCTION_DEFS = {
         icon: "[Missile]",
         category: "unit",
         cost: 200,
-        onComplete: (city) => {
+        requiresTechnology: "rocketry",
+        // 💡 ミサイルは完成時に国家の資源「ウラン」在庫を1消費する(在庫が無ければ生産中止。§24)。
+        consumesResource: "strategic_uranium",
+        onComplete: (city, ctx) => completeConsumingResource(ctx, "strategic_uranium", "ウラン", () => {
             city.missiles = (city.missiles ?? 0) + 1;
-        },
-        completeMessage: (city) => `§c[Missile][Complete]【${city.name}】ミサイルの製造が完了しました！ (在庫: ${city.missiles}発)`,
+        }),
+        completeMessage: (city) => `§c[Missile][Complete]【${city.name}】ミサイルの製造が完了しました！ (在庫: ${city.missiles}発、資源「ウラン」-1)`,
     },
     warrior: {
         label: "戦士",
@@ -248,6 +344,7 @@ export const PRODUCTION_DEFS = {
         icon: "[うおｗ]",
         category: "unit",
         cost: 500,
+        goldUpkeep: 0, // 💡 ネタユニットのため、通常のcost基準の計算式を上書きしてゴールド維持費を0固定にする。
         requiresEmptyCombatTile: true,
         onComplete: (city, ctx) => placeProducedCombatUnit(ctx, (ownerId, ownerName) => ({
             id: "uoooo", label: "うおｗ", hp: 100, maxHp: 100, combatStrength: 200,
@@ -255,20 +352,25 @@ export const PRODUCTION_DEFS = {
         })),
         completeMessage: (city) => `§e[Warrior]【${city.name}】にうおｗを配置しました！ (HP: 100/100、戦闘力: 20)`,
     },
+    // 💡 id/内部キーは"battleship"のままだが、表示名は「帆船」にしている(§8参照)。
+    //    前提技術「航海術」は序盤の安い技術(帆走の時代)なので、駆逐艦・巡洋艦のような
+    //    近代の鋼鉄艦の名前を割り当てると時代感が逆転してしまう。造船術(前提: 航海術)で
+    //    解禁される巡洋艦との上位関係も「帆船→巡洋艦」なら一目で分かるため、こちらにした。
     battleship: {
-        label: "軍艦",
-        icon: "[Battleship]",
+        label: "帆船",
+        icon: "[Sailboat]",
         category: "unit",
         cost: 60,
         unitClass: "naval",
+        requiresTechnology: "sailing",
         // 💡 都市自身のマスではなく、隣接する水上マス(海・川・池・湖)に配置される海軍ユニット。
         //    隣接する水上マスが無い(内陸の都市)場合は生産完了時に中止される。
         onComplete: (city, ctx) => placeProducedNavalUnit(ctx, (ownerId, ownerName) => ({
             // 💡 domain: 海軍ユニット。水上マスにしか進入できない。
-            id: "battleship", label: "軍艦", hp: 100, maxHp: 100, combatStrength: 25, unitClass: "naval",
+            id: "battleship", label: "帆船", hp: 100, maxHp: 100, combatStrength: 25, unitClass: "naval",
             movement: 2, movementRemaining: 2, attackRange: 3, domain: "naval", ownerId, ownerName,
         })),
-        completeMessage: (city) => `§e[Battleship]【${city.name}】に軍艦を配置しました！ (HP: 100/100、戦闘力: 25)`,
+        completeMessage: (city) => `§e[Sailboat]【${city.name}】に帆船を配置しました！ (HP: 100/100、戦闘力: 25)`,
     },
     spearman: {
         label: "槍兵",
@@ -286,6 +388,21 @@ export const PRODUCTION_DEFS = {
         })),
         completeMessage: (city) => `§e[Spearman]【${city.name}】に槍兵を配置しました！ (HP: 100/100、戦闘力: 32、対騎兵+10)`,
     },
+    pikeman: {
+        label: "長槍兵",
+        icon: "[Pikeman]",
+        category: "unit",
+        cost: 70,
+        unitClass: "antiCavalry",
+        requiresEmptyCombatTile: true,
+        // 💡 社会制度「封建制度」で解放される、槍兵の上位互換(中世の対騎兵専門兵科)。
+        requiresCivic: "feudalism",
+        onComplete: (city, ctx) => placeProducedCombatUnit(ctx, (ownerId, ownerName) => ({
+            id: "pikeman", label: "長槍兵", hp: 100, maxHp: 100, combatStrength: 42, unitClass: "antiCavalry",
+            movement: 1, movementRemaining: 1, attackRange: 1, domain: "land", ownerId, ownerName,
+        })),
+        completeMessage: (city) => `§e[Pikeman]【${city.name}】に長槍兵を配置しました！ (HP: 100/100、戦闘力: 42、対騎兵+10)`,
+    },
     horseman: {
         label: "騎兵",
         icon: "[Horseman]",
@@ -294,11 +411,117 @@ export const PRODUCTION_DEFS = {
         unitClass: "cavalry",
         requiresEmptyCombatTile: true,
         requiresTechnology: "horsebackRiding",
-        onComplete: (city, ctx) => placeProducedCombatUnit(ctx, (ownerId, ownerName) => ({
+        // 💡 兵種が騎兵(cavalry)のユニットは、完成時に国家の資源「馬」在庫を1消費する
+        //    (placeProducedCombatUnitConsumingResource参照。在庫が無ければ生産中止)。
+        consumesResource: "strategic_horse",
+        onComplete: (city, ctx) => placeProducedCombatUnitConsumingResource(ctx, "strategic_horse", "馬", (ownerId, ownerName) => ({
             id: "horseman", label: "騎兵", hp: 100, maxHp: 100, combatStrength: 30, unitClass: "cavalry",
             movement: 3, movementRemaining: 3, attackRange: 1, domain: "land", ownerId, ownerName,
         })),
-        completeMessage: (city) => `§e[Horseman]【${city.name}】に騎兵を配置しました！ (HP: 100/100、戦闘力: 30、移動力: 3)`,
+        completeMessage: (city) => `§e[Horseman]【${city.name}】に騎兵を配置しました！ (HP: 100/100、戦闘力: 30、移動力: 3、資源「馬」-1)`,
+    },
+    knight: {
+        label: "騎士",
+        icon: "[Knight]",
+        category: "unit",
+        cost: 110,
+        unitClass: "cavalry",
+        requiresEmptyCombatTile: true,
+        // 💡 社会制度「騎士道」で解放される、騎兵の上位互換。騎兵と同じく完成時に資源「馬」を1消費する。
+        requiresCivic: "chivalry",
+        consumesResource: "strategic_horse",
+        onComplete: (city, ctx) => placeProducedCombatUnitConsumingResource(ctx, "strategic_horse", "馬", (ownerId, ownerName) => ({
+            id: "knight", label: "騎士", hp: 100, maxHp: 100, combatStrength: 45, unitClass: "cavalry",
+            movement: 4, movementRemaining: 4, attackRange: 1, domain: "land", ownerId, ownerName,
+        })),
+        completeMessage: (city) => `§e[Knight]【${city.name}】に騎士を配置しました！ (HP: 100/100、戦闘力: 45、移動力: 4、資源「馬」-1)`,
+    },
+    tank: {
+        label: "戦車",
+        icon: "[Tank]",
+        category: "unit",
+        cost: 300,
+        unitClass: "cavalry",
+        requiresEmptyCombatTile: true,
+        requiresTechnology: "industrialization",
+        // 💡 騎兵・騎士の系譜を継ぐ機動兵科(兵種は変わらずcavalry)。馬ではなく燃料として
+        //    資源「石油」を1消費する(戦車・戦艦が初めての石油消費ユニット)。
+        consumesResource: "strategic_oil",
+        onComplete: (city, ctx) => placeProducedCombatUnitConsumingResource(ctx, "strategic_oil", "石油", (ownerId, ownerName) => ({
+            id: "tank", label: "戦車", hp: 100, maxHp: 100, combatStrength: 110, unitClass: "cavalry",
+            movement: 5, movementRemaining: 5, attackRange: 1, domain: "land", ownerId, ownerName,
+        })),
+        completeMessage: (city) => `§e[Tank]【${city.name}】に戦車を配置しました！ (HP: 100/100、戦闘力: 110、移動力: 5、資源「石油」-1)`,
+    },
+    // 💡 空軍(domain: "air")。陸軍/海軍と違ってマスには配置されず、都市の航空基地
+    //    (airbase.js。都心+飛行場+滑走路の合計枠)に配置され、そこから直接出撃する
+    //    (§航空戦。placeProducedAirUnit参照)。「移動力(movement)」は出撃・帰投(移動)の
+    //    航続距離、「攻撃距離(attackRange)」は拠点から出撃できる攻撃射程として使われる。
+    //    interceptCombatStrengthを持つユニット(recon以外)は哨戒(patrol)状態にでき、
+    //    自国の拠点周辺への空爆を迎撃できる(airbase.js/combat.js参照)。
+    //    対空砲(antiAir)は、これらのユニットが出撃・攻撃を行った際に迎撃できる(commands.js参照)。
+    airRecon: {
+        label: "支援偵察機",
+        icon: "[Recon]",
+        category: "unit",
+        cost: 130,
+        unitClass: "air",
+        requiresAirbaseCapacity: true,
+        requiresTechnology: "aviation",
+        onComplete: (city, ctx) => placeProducedAirUnit(ctx, (ownerId, ownerName) => ({
+            id: "airRecon", label: "支援偵察機", hp: 70, maxHp: 70, unitClass: "air", airRole: "recon",
+            rangedCombatStrength: 30, meleeCombatStrength: 15,
+            movement: 10, attackRange: 1, domain: "air", ownerId, ownerName,
+        })),
+        completeMessage: (city) => `§e[Recon]【${city.name}】の航空基地に支援偵察機を配置しました！ (HP: 70/70、遠距離戦闘力: 30、近距離戦闘力: 15、航続距離: 10)`,
+    },
+    airDefense: {
+        label: "支援防御機",
+        icon: "[AirDefense]",
+        category: "unit",
+        cost: 200,
+        unitClass: "air",
+        requiresAirbaseCapacity: true,
+        requiresTechnology: "aviation",
+        consumesResource: "strategic_oil",
+        onComplete: (city, ctx) => placeProducedCombatUnitConsumingResource(ctx, "strategic_oil", "石油", (ownerId, ownerName) => ({
+            id: "airDefense", label: "支援防御機", hp: 110, maxHp: 110, unitClass: "air", airRole: "defense",
+            rangedCombatStrength: 50, meleeCombatStrength: 70, interceptCombatStrength: 130,
+            movement: 7, attackRange: 1, domain: "air", ownerId, ownerName,
+        }), placeProducedAirUnit),
+        completeMessage: (city) => `§e[AirDefense]【${city.name}】の航空基地に支援防御機を配置しました！ (HP: 110/110、迎撃戦闘力: 130、航続距離: 7、資源「石油」-1)`,
+    },
+    fighter: {
+        label: "戦闘機",
+        icon: "[Fighter]",
+        category: "unit",
+        cost: 240,
+        unitClass: "air",
+        requiresAirbaseCapacity: true,
+        requiresTechnology: "aviation",
+        consumesResource: "strategic_oil",
+        onComplete: (city, ctx) => placeProducedCombatUnitConsumingResource(ctx, "strategic_oil", "石油", (ownerId, ownerName) => ({
+            id: "fighter", label: "戦闘機", hp: 100, maxHp: 100, unitClass: "air", airRole: "fighter",
+            rangedCombatStrength: 100, meleeCombatStrength: 40, interceptCombatStrength: 90,
+            movement: 8, attackRange: 2, domain: "air", ownerId, ownerName,
+        }), placeProducedAirUnit),
+        completeMessage: (city) => `§e[Fighter]【${city.name}】の航空基地に戦闘機を配置しました！ (HP: 100/100、遠距離戦闘力: 100、近距離戦闘力: 40、迎撃戦闘力: 90、航続距離: 8、資源「石油」-1)`,
+    },
+    bomber: {
+        label: "戦略爆撃機",
+        icon: "[Bomber]",
+        category: "unit",
+        cost: 320,
+        unitClass: "air",
+        requiresAirbaseCapacity: true,
+        requiresTechnology: "rocketry",
+        consumesResource: "strategic_oil",
+        onComplete: (city, ctx) => placeProducedCombatUnitConsumingResource(ctx, "strategic_oil", "石油", (ownerId, ownerName) => ({
+            id: "bomber", label: "戦略爆撃機", hp: 100, maxHp: 100, unitClass: "air", airRole: "bomber",
+            rangedCombatStrength: 140, meleeCombatStrength: 30,
+            movement: 6, attackRange: 3, domain: "air", ownerId, ownerName,
+        }), placeProducedAirUnit),
+        completeMessage: (city) => `§e[Bomber]【${city.name}】の航空基地に戦略爆撃機を配置しました！ (HP: 100/100、遠距離戦闘力: 140、近距離戦闘力: 30、航続距離: 6、資源「石油」-1。哨戒はできないが略奪が可能)`,
     },
     swordsman: {
         label: "剣士",
@@ -308,17 +531,54 @@ export const PRODUCTION_DEFS = {
         unitClass: "melee",
         requiresEmptyCombatTile: true,
         requiresTechnology: "ironWorking",
-        onComplete: (city, ctx) => placeProducedCombatUnit(ctx, (ownerId, ownerName) => ({
+        // 💡 剣士は完成時に国家の資源「鉄」在庫を1消費する(在庫が無ければ生産中止)。
+        consumesResource: "strategic_iron",
+        onComplete: (city, ctx) => placeProducedCombatUnitConsumingResource(ctx, "strategic_iron", "鉄", (ownerId, ownerName) => ({
             id: "swordsman", label: "剣士", hp: 100, maxHp: 100, combatStrength: 48, unitClass: "melee",
             movement: 1, movementRemaining: 1, attackRange: 1, domain: "land", ownerId, ownerName,
         })),
-        completeMessage: (city) => `§e[Swordsman]【${city.name}】に剣士を配置しました！ (HP: 100/100、戦闘力: 48)`,
+        completeMessage: (city) => `§e[Swordsman]【${city.name}】に剣士を配置しました！ (HP: 100/100、戦闘力: 48、資源「鉄」-1)`,
+    },
+    musketman: {
+        label: "銃士",
+        icon: "[Musketman]",
+        category: "unit",
+        cost: 140,
+        // 💡 マスケット銃兵はcombat.jsの兵種上は"melee"扱い(現実の間合いではなく「前線の
+        //    主力歩兵」という役割上の分類。剣士の直系の上位互換)。
+        unitClass: "melee",
+        requiresEmptyCombatTile: true,
+        requiresTechnology: "gunpowder",
+        // 💡 剣士と同じく完成時に資源「鉄」を1消費する(銃身・銃剣の原料として)。
+        consumesResource: "strategic_iron",
+        onComplete: (city, ctx) => placeProducedCombatUnitConsumingResource(ctx, "strategic_iron", "鉄", (ownerId, ownerName) => ({
+            id: "musketman", label: "銃士", hp: 100, maxHp: 100, combatStrength: 65, unitClass: "melee",
+            movement: 1, movementRemaining: 1, attackRange: 1, domain: "land", ownerId, ownerName,
+        })),
+        completeMessage: (city) => `§e[Musketman]【${city.name}】に銃士を配置しました！ (HP: 100/100、戦闘力: 65、資源「鉄」-1)`,
+    },
+    modernInfantry: {
+        label: "近代歩兵",
+        icon: "[ModernInfantry]",
+        category: "unit",
+        cost: 240,
+        unitClass: "melee",
+        requiresEmptyCombatTile: true,
+        requiresTechnology: "electricity",
+        onComplete: (city, ctx) => placeProducedCombatUnit(ctx, (ownerId, ownerName) => ({
+            id: "modernInfantry", label: "近代歩兵", hp: 100, maxHp: 100, combatStrength: 95, unitClass: "melee",
+            movement: 1, movementRemaining: 1, attackRange: 1, domain: "land", ownerId, ownerName,
+        })),
+        completeMessage: (city) => `§e[ModernInfantry]【${city.name}】に近代歩兵を配置しました！ (HP: 100/100、戦闘力: 95)`,
     },
     catapult: {
         label: "カタパルト",
         icon: "[Catapult]",
         category: "unit",
-        cost: 100,
+        // 💡 前提技術「工学」は徒弟制度(300)→工学(150)という、このツリーで最も投資の重い
+        //    チェーンの1つ(累積560)。以前はコスト100(剣士とほぼ同額)と釣り合っていなかったため
+        //    引き上げた。
+        cost: 160,
         unitClass: "siege",
         requiresEmptyCombatTile: true,
         requiresTechnology: "engineering",
@@ -330,11 +590,45 @@ export const PRODUCTION_DEFS = {
         })),
         completeMessage: (city) => `§e[Catapult]【${city.name}】にカタパルトを配置しました！ (HP: 100/100、遠距離戦闘力: 40、近距離戦闘力: 12)`,
     },
+    cannon: {
+        label: "大砲",
+        icon: "[Cannon]",
+        category: "unit",
+        cost: 220,
+        unitClass: "siege",
+        requiresEmptyCombatTile: true,
+        requiresTechnology: "metallurgy",
+        // 💡 カタパルトの上位互換。剣士・銃士と同じく完成時に資源「鉄」を1消費する(砲身の原料)。
+        consumesResource: "strategic_iron",
+        onComplete: (city, ctx) => placeProducedCombatUnitConsumingResource(ctx, "strategic_iron", "鉄", (ownerId, ownerName) => ({
+            id: "cannon", label: "大砲", hp: 100, maxHp: 100, unitClass: "siege",
+            combatStrength: 20, rangedCombatStrength: 70, meleeCombatStrength: 20,
+            movement: 1, movementRemaining: 1, attackRange: 2, domain: "land", ownerId, ownerName,
+        })),
+        completeMessage: (city) => `§e[Cannon]【${city.name}】に大砲を配置しました！ (HP: 100/100、遠距離戦闘力: 70、近距離戦闘力: 20、資源「鉄」-1)`,
+    },
+    artillery: {
+        label: "近代砲兵",
+        icon: "[Artillery]",
+        category: "unit",
+        cost: 320,
+        unitClass: "siege",
+        requiresEmptyCombatTile: true,
+        requiresTechnology: "industrialization",
+        onComplete: (city, ctx) => placeProducedCombatUnit(ctx, (ownerId, ownerName) => ({
+            id: "artillery", label: "近代砲兵", hp: 100, maxHp: 100, unitClass: "siege",
+            combatStrength: 30, rangedCombatStrength: 130, meleeCombatStrength: 30,
+            movement: 1, movementRemaining: 1, attackRange: 2, domain: "land", ownerId, ownerName,
+        })),
+        completeMessage: (city) => `§e[Artillery]【${city.name}】に近代砲兵を配置しました！ (HP: 100/100、遠距離戦闘力: 130、近距離戦闘力: 30)`,
+    },
     crossbowman: {
         label: "重装弓兵",
         icon: "[Crossbowman]",
         category: "unit",
-        cost: 110,
+        // 💡 前提技術「機械工学」は徒弟制度(300)→工学(150)→機械工学(220)というツリー最深部
+        //    (累積780)。以前はコスト110(剣士とほぼ同額)と釣り合っていなかったため引き上げた。
+        cost: 170,
         unitClass: "ranged",
         requiresEmptyCombatTile: true,
         requiresTechnology: "machinery",
@@ -345,6 +639,21 @@ export const PRODUCTION_DEFS = {
         })),
         completeMessage: (city) => `§e[Crossbowman]【${city.name}】に重装弓兵を配置しました！ (HP: 100/100、遠距離戦闘力: 38、近距離戦闘力: 25)`,
     },
+    machineGunner: {
+        label: "機関銃兵",
+        icon: "[MachineGunner]",
+        category: "unit",
+        cost: 260,
+        unitClass: "ranged",
+        requiresEmptyCombatTile: true,
+        requiresTechnology: "electricity",
+        onComplete: (city, ctx) => placeProducedCombatUnit(ctx, (ownerId, ownerName) => ({
+            id: "machineGunner", label: "機関銃兵", hp: 100, maxHp: 100, unitClass: "ranged",
+            combatStrength: 45, rangedCombatStrength: 85, meleeCombatStrength: 45,
+            movement: 1, movementRemaining: 1, attackRange: 2, domain: "land", ownerId, ownerName,
+        })),
+        completeMessage: (city) => `§e[MachineGunner]【${city.name}】に機関銃兵を配置しました！ (HP: 100/100、遠距離戦闘力: 85、近距離戦闘力: 45)`,
+    },
     cruiser: {
         label: "巡洋艦",
         icon: "[Cruiser]",
@@ -352,12 +661,29 @@ export const PRODUCTION_DEFS = {
         cost: 140,
         unitClass: "naval",
         requiresTechnology: "shipBuilding",
-        // 💡 軍艦と同じく、都市に隣接する水上マスへ配置される海軍ユニット。
+        // 💡 帆船(battleship)と同じく、都市に隣接する水上マスへ配置される海軍ユニット。
         onComplete: (city, ctx) => placeProducedNavalUnit(ctx, (ownerId, ownerName) => ({
             id: "cruiser", label: "巡洋艦", hp: 100, maxHp: 100, combatStrength: 50, unitClass: "naval",
             movement: 3, movementRemaining: 3, attackRange: 4, domain: "naval", ownerId, ownerName,
         })),
         completeMessage: (city) => `§e[Cruiser]【${city.name}】に巡洋艦を配置しました！ (HP: 100/100、戦闘力: 50)`,
+    },
+    // 💡 id は "dreadnought"(内部キー"battleship"は帆船が既に使っているため別名)。表示名は
+    //    「戦艦」で、帆船(sailboat)→巡洋艦(cruiser)→戦艦(battleship)という海軍の最終ティア。
+    dreadnought: {
+        label: "戦艦",
+        icon: "[Dreadnought]",
+        category: "unit",
+        cost: 280,
+        unitClass: "naval",
+        requiresTechnology: "industrialization",
+        // 💡 戦車と同じく、燃料として資源「石油」を1消費する。
+        consumesResource: "strategic_oil",
+        onComplete: (city, ctx) => placeProducedCombatUnitConsumingResource(ctx, "strategic_oil", "石油", (ownerId, ownerName) => ({
+            id: "dreadnought", label: "戦艦", hp: 100, maxHp: 100, combatStrength: 90, unitClass: "naval",
+            movement: 3, movementRemaining: 3, attackRange: 5, domain: "naval", ownerId, ownerName,
+        }), placeProducedNavalUnit),
+        completeMessage: (city) => `§e[Dreadnought]【${city.name}】に戦艦を配置しました！ (HP: 100/100、戦闘力: 90、資源「石油」-1)`,
     },
     tradingPost: {
         label: "交易所",
@@ -414,13 +740,16 @@ export const PRODUCTION_DEFS = {
         cost: 200,
         uniquePerCity: true,
         hasBuilt: (city) => !!city.antiAir,
+        requiresTechnology: "rocketry",
         // 💡 効果そのもの(ミサイルの迎撃)はflatYields等では表現できない特殊効果のため、
         //    turns.js の resolveMissileImpact() が city.antiAir / city.antiAirUsedThisTurn を
         //    直接見て判定する(§17)。1ターンに1回までという制限は、他の「今ターン使用済み」系
         //    フラグ(hasProselytizedThisTurn等)と同じく processPlayerTurnStart で毎ターン
         //    falseにリセットされる。
-        onComplete: (city) => { city.antiAir = true; },
-        completeMessage: (city) => `§e[Complete]【${city.name}】に対空砲が完成しました！ (1ターンに1回、この都市と周囲8マスへ着弾するミサイルを迎撃)`,
+        // 💡 ミサイルと同じく、完成時に国家の資源「ウラン」在庫を1消費する(§24)。
+        consumesResource: "strategic_uranium",
+        onComplete: (city, ctx) => completeConsumingResource(ctx, "strategic_uranium", "ウラン", () => { city.antiAir = true; }),
+        completeMessage: (city) => `§e[Complete]【${city.name}】に対空砲が完成しました！ (1ターンに1回、この都市と周囲8マスへ着弾するミサイルを迎撃、資源「ウラン」-1)`,
     },
     market: {
         label: "市場",
@@ -436,6 +765,37 @@ export const PRODUCTION_DEFS = {
         onComplete: (city) => { city.market = true; },
         completeMessage: (city) => `§e[Complete]【${city.name}】市場が完成しました！ (生産力+2、食料生産量+1)`,
     },
+    // 💡 世界遺産(新要素)。1ゲームにつき1国家しか着工できない(isWonder。canStartProduction
+    //    参照)。着工した時点で早い者勝ちで予約され(cmdStartProduction呼び出し時にclaimWonder)、
+    //    他国はそもそも着工できなくなる。効果自体はflatYields経由でgetFlagFlatYields()が
+    //    自動加算するため、通常の建造物と全く同じ扱い(uniquePerCityも1都市1つの意味で
+    //    そのまま流用できる)。
+    pyramids: {
+        label: "ピラミッド",
+        icon: "[Pyramids]",
+        category: "building",
+        cost: 200,
+        uniquePerCity: true,
+        hasBuilt: (city) => !!city.pyramids,
+        requiresTechnology: "masonry",
+        isWonder: true,
+        flatYields: { production: 5 },
+        onComplete: (city) => { city.pyramids = true; },
+        completeMessage: (city) => `§6*** [Wonder]【${city.name}】に世界遺産「ピラミッド」が完成しました！ (生産力+5) ***`,
+    },
+    greatLighthouse: {
+        label: "大灯台",
+        icon: "[Lighthouse]",
+        category: "building",
+        cost: 220,
+        uniquePerCity: true,
+        hasBuilt: (city) => !!city.greatLighthouse,
+        requiresTechnology: "shipBuilding",
+        isWonder: true,
+        flatYields: { gold: 5 },
+        onComplete: (city) => { city.greatLighthouse = true; },
+        completeMessage: (city) => `§6*** [Wonder]【${city.name}】に世界遺産「大灯台」が完成しました！ (ゴールドの産出+5) ***`,
+    },
     trainingGround: {
         label: "訓練場",
         icon: "[Training]",
@@ -444,9 +804,11 @@ export const PRODUCTION_DEFS = {
         uniquePerCity: true,
         hasBuilt: (city) => !!city.trainingGround,
         requiresCivic: "militaryTradition",
-        flatYields: { production: 2 },
+        // 💡 軍制改革(政治哲学20+軍制改革35=累積55)という社会制度投資の重さに対して
+        //    生産力+2は見劣りしていたため+4に引き上げた。
+        flatYields: { production: 4 },
         onComplete: (city) => { city.trainingGround = true; },
-        completeMessage: (city) => `§e[Complete]【${city.name}】訓練場が完成しました！ (生産力+2)`,
+        completeMessage: (city) => `§e[Complete]【${city.name}】訓練場が完成しました！ (生産力+4)`,
     },
     wall: {
         label: "防壁",
@@ -486,6 +848,19 @@ export const PRODUCTION_DEFS = {
         },
         completeMessage: (city) => `§e[Capital]【${city.name}】が新たな首都になりました！(遷都完了)`,
     },
+    // 💡 区域専用建造物「原子力発電所」(districts.js)を持つ都市限定のプロジェクト。区域専用
+    //    建造物メニューではなく、通常の生産メニュー(建造物カテゴリ)から選べるようにするため、
+    //    ここPRODUCTION_DEFS側に置く(§24)。uniquePerCityは付けない(老朽化年数が溜まるたびに
+    //    何度でも実行できる)。
+    reactorRestart: {
+        label: "原子炉の再稼働",
+        icon: "[Reactor]",
+        category: "building",
+        cost: 300,
+        requiresBuildingFlag: "nuclearPowerPlant",
+        onComplete: (city) => { city.nuclearPowerPlantAge = 0; },
+        completeMessage: (city) => `§e[Complete]【${city.name}】原子炉を再稼働し、老朽化年数をリセットしました！`,
+    },
 };
 
 /** 生産物IDの一覧を取得 */
@@ -504,9 +879,11 @@ export function getProductionDef(id) {
  * @param {string} id 生産物ID
  * @param {any} [tile] 都市が乗っているマス(requiresEmptyCombatTileの判定に使用)
  * @param {any} [player] 生産を行おうとしているプレイヤー/国家(requiresTechnologyの判定に使用)
+ * @param {string} [cityKey] "tx,tz"形式の都市タイルのキー(requiresAirbaseCapacityの判定に使用)
+ * @param {any} [tiles] 全タイルデータ(requiresAirbaseCapacityの判定に使用)
  * @returns {{ ok: boolean, message?: string }}
  */
-export function canStartProduction(city, id, tile = null, player = null) {
+export function canStartProduction(city, id, tile = null, player = null, cityKey = null, tiles = null) {
     const def = PRODUCTION_DEFS[id];
     if (!def) return { ok: false, message: "§c不明な生産物です。" };
     if (city.production) return { ok: false, message: "§c既にこの都市では別の生産が進行中です。" };
@@ -516,11 +893,37 @@ export function canStartProduction(city, id, tile = null, player = null) {
     if (def.requiresEmptyCombatTile && tile?.combatUnit) {
         return { ok: false, message: "§cこのマスにはすでに戦闘ユニットが存在します。" };
     }
+    // 💡 航空ユニットはマスではなく航空基地(都心+飛行場+滑走路の合計枠、airbase.js)に配置される。
+    //    実際の空き枠チェックはonComplete(placeProducedAirUnit)で確実に行うが、cityKey/tilesが
+    //    渡されていればここでも先んじて弾き、無駄な着工を防ぐ(進行度は消えないとはいえUXのため)。
+    if (def.requiresAirbaseCapacity && cityKey && tiles) {
+        const capacity = getAirbaseCapacity(city, cityKey, tiles);
+        if (getBasedAirUnits(city).length >= capacity) {
+            return { ok: false, message: `§c航空基地の空き枠がありません。(枠: ${getBasedAirUnits(city).length}/${capacity}。飛行場・滑走路で拡張できます)` };
+        }
+    }
     if (def.disallowInCapital && city.isCapital) {
         return { ok: false, message: "§cこの都市は既に首都です。" };
     }
     if (def.category === "building" && city.districtConstruction) {
         return { ok: false, message: "§c区域を建設中はこの都市で新しい建造物を着工できません。" };
+    }
+    if (def.requiresBuildingFlag && !city[def.requiresBuildingFlag]) {
+        return { ok: false, message: `§c【${def.label}】の生産には対応する建造物が必要です。` };
+    }
+    // 💡 世界遺産(新要素): 1ゲームにつき1国家しか着工できない。着工した時点で早い者勝ちで
+    //    予約されるため(startProduction呼び出し元がclaimWonderする)、他国はそもそも
+    //    着工できない(完成まで競争して負けたらゴールドに還元、のような仕組みはスコープ外)。
+    if (def.isWonder) {
+        const ownerId = getWonderClaims()[id];
+        if (ownerId) {
+            // 💡 自国の別の都市で既に着工済みの場合も含めてブロックする(同じ遺産を複数の
+            //    自都市で並行着工してボーナスを重複させられてしまうのを防ぐため)。
+            const message = ownerId === player?.id
+                ? `§c【${def.label}】は既に自国の別の都市で建設中/完成済みです。`
+                : `§c【${def.label}】は既に他の国家が建設中/完成済みです。`;
+            return { ok: false, message };
+        }
     }
     if (def.requiresTechnology) {
         const hasTech = !!player && hasCompletedProgress(player, "technology", def.requiresTechnology);
@@ -536,7 +939,31 @@ export function canStartProduction(city, id, tile = null, player = null) {
             return { ok: false, message: `§c【${def.label}】の生産には社会制度【${civicDef?.label ?? def.requiresCivic}】の取得が必要です。` };
         }
     }
+    // 💡 (バグ修正) 資源消費ユニット(consumesResource)は、以前はここで在庫を確認していなかった
+    //    ため、在庫0のまま着工でき、数ターン生産力を注ぎ込んだ末に完成時(onComplete内)で
+    //    静かにキャンセルされる(BotはcanBotStartProductionで別途この確認をしていたため、
+    //    このバグは人間プレイヤーのみが踏んでいた)。着工前にここで弾く。
+    if (def.consumesResource) {
+        const stock = player ? (player.getDynamicProperty(def.consumesResource) ?? 0) : 0;
+        if (stock < 1) {
+            return { ok: false, message: `§c【${def.label}】の生産には必要な資源が不足しています。(在庫: ${stock})` };
+        }
+    }
     return { ok: true };
+}
+
+/**
+ * この都市が保持する「完成済み」の世界遺産すべての予約(civ:wonderClaims)を解放する。
+ * 建設中の世界遺産(city.production.id)は destroyCity/cmdCaptureCity 側で個別に扱われるため、
+ * ここでは city[id] === true (=完成済み) の世界遺産のみを対象にする。
+ * 都市の占領・破壊時に呼ばないと、完成済み遺産を持っていた都市が消えた後もその遺産IDが
+ * 永久にロックされ、誰も二度と建設できなくなってしまう。
+ */
+export function releaseCityCompletedWonders(city, ownerId) {
+    if (!city || !ownerId) return;
+    for (const id in PRODUCTION_DEFS) {
+        if (PRODUCTION_DEFS[id].isWonder && city[id]) releaseWonder(id, ownerId);
+    }
 }
 
 /**
@@ -569,7 +996,9 @@ export function cancelProduction(city) {
  * 毎ターン呼び出す生産の進行処理。
  * @param {any} city 対象の都市データ
  * @param {number} productionAmount このターン、この都市が産出した生産力
- * @param {any} ctx onComplete に渡す追加情報 ({ cityKey, tiles, connectTradeRoutes } など)
+ * @param {any} ctx onComplete に渡す追加情報 ({ cityKey, tiles, connectTradeRoutes, player } など。
+ *   player は都市の所有者のストレージハンドル。horsemanの馬消費など、国家単位の資源を
+ *   参照/消費するonCompleteが使う)
  * @returns {{ done: boolean, message: string } | null} 生産中でなければ null
  */
 export function tickProduction(city, productionAmount, ctx) {
@@ -594,6 +1023,8 @@ export function tickProduction(city, productionAmount, ctx) {
                 ? "都市のマスに敵の戦闘ユニットがいる"
                 : completionResult.cancelReason === "noNavalTile"
                 ? "隣接する海・川などの水上マスが無い(または空きが無い)"
+                : completionResult.cancelReason === "noResource"
+                ? `資源「${completionResult.resourceLabel ?? "?"}」の在庫が無い`
                 : "配置できる空きマスが周囲に無い";
             const message = `§c[Warning]【${city.name}】${def.label}の生産が完了しましたが、${reasonText}ため配置できず中止されました。(進行度は保持されます)`;
 

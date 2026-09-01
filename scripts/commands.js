@@ -1,22 +1,26 @@
 // commands.js
 import { world, system, BlockPermutation, PlayerPermissionLevel, CustomCommandStatus, CustomCommandParamType, CommandPermissionLevel } from "@minecraft/server";
 import { generateMap, TERRAIN_TYPES, worldToTile, TILE_SIZE, RESOURCE_TYPES, ASSUMED_SIMULATION_RANGE_BLOCKS, isImpassableTerrain, isWaterTerrain } from "./mapGen.js";
-import { getMapConfig, setMapConfig, getTile, setTile, resetAll, setTiles, getTiles, broadcast, getMatchSettings, getMapGenSettings } from "./state.js";
-import { joinGame, turnInfoText, isPlayersTurn, endGame, getTurnState, setTurnState, getCityCurrentYields, resolveMissileImpact, getPlayerColor, checkAndAnnounceVictory } from "./turns.js";
-import { PRODUCTION_DEFS, canStartProduction, startProduction, cancelProduction, addWorkers, consumeWorkerAction, hasAvailableWorkerAction, getProductionIds } from "./production.js";
-import { getDefinition, getKindLabel, startProgress, getDefinitions } from "./progression.js";
+import { getMapConfig, setMapConfig, getTile, setTile, resetAll, setTiles, getTiles, broadcast, getMatchSettings, getMapGenSettings, claimWonder, releaseWonder } from "./state.js";
+import { joinGame, turnInfoText, isPlayersTurn, endGame, getTurnState, setTurnState, getCityCurrentYields, resolveMissileImpact, getPlayerColor, checkAndAnnounceVictory, connectTradeRoutes, isAlliedOrSameCiv, findInterceptingAntiAirCity } from "./turns.js";
+import { PRODUCTION_DEFS, canStartProduction, startProduction, cancelProduction, tickProduction, addWorkers, consumeWorkerAction, hasAvailableWorkerAction, getProductionIds, RUSH_BUY_GOLD_PER_PRODUCTION } from "./production.js";
+import { getDefinition, getKindLabel, startProgress, getDefinitions, getGreatPersonPoints, recruitGreatPerson, grantProgressPoints, GREAT_PERSON_THRESHOLD } from "./progression.js";
 import { hasDiplomaticAgreement, signAgreement, isAtWar } from "./diplomacy.js";
 import {
     getAttackRange, resolveCombat, tileDistance, canUnitEnterTerrain, canUnitEnterOwnership,
-    canUnitEnterCityTile, countFlankingAllies, getFlankingBonus, canTravelPath,
-    getAttackableCityTargets, getCityCombatStrength, getBestRangedCombatStrength,
-    resolveCityAttack, resolveCityRangedAttack, isMeleeUnitClass,
+    canUnitEnterCityTile, isFallenEnemyCityTile, countFlankingAllies, getFlankingBonus, getReachablePositions,
+    getAttackableTargets, getAttackableCityTargets, getCityCombatStrength, getBestRangedCombatStrength,
+    resolveCityAttack, resolveCityRangedAttack, resolveAirPatrolInterception, isMeleeUnitClass,
     CITY_MAX_HP, WALL_MAX_HP, CITY_RANGED_ATTACK_RANGE,
 } from "./combat.js";
-import { addVirtualCiv, getControllableCivs, getActiveCivId, setActiveCivId, getActingPlayer, getOnlinePlayerById, getRealPlayer } from "./civs.js";
+import {
+    getAirbaseCapacity, getBasedAirUnits, addBasedAirUnit, removeBasedAirUnit, findInterceptingPatrolUnit,
+    PILLAGE_MIN_HP_RATIO, canAirUnitPatrol,
+} from "./airbase.js";
+import { addVirtualCiv, getControllableCivs, getActiveCivId, setActiveCivId, getActingPlayer, getOnlinePlayerById, getRealPlayer, getCivStorageHandle, resolveCivName } from "./civs.js";
 import { getFacilityDef, canInstallFacility, installFacility, getFacilityIds } from "./facilities.js";
 import { resolveOwningCityKey } from "./adjacency.js";
-import { getDistrictDef, canStartDistrict, startDistrictConstruction, getDistrictBuildingDef, canStartDistrictBuilding, startDistrictBuildingConstruction, getDistrictIds, getDistrictBuildingIds } from "./districts.js";
+import { getDistrictDef, canStartDistrict, startDistrictConstruction, getDistrictBuildingDef, canStartDistrictBuilding, startDistrictBuildingConstruction, getDistrictIds, getDistrictBuildingIds, DISTRICT_BUILDING_DEFS } from "./districts.js";
 import {
     getReligiousUnitDef, hasFoundedReligion, getReligionName, setReligionName,
     canFoundReligion, foundReligion, calculateProselytizePressure, addReligiousPressure,
@@ -26,6 +30,7 @@ import {
 } from "./religion.js";
 import { openMainMenu } from "./ui.js";
 import { refreshUnitLabelAt, clearAllUnitLabels } from "./unitLabels.js";
+import { clearAllUnitModels, animateUnitModelMove } from "./unitModels.js";
 // 💡 bots.js は cmdClaim/cmdSettle/cmdBuyRights/cmdStartProduction をBotの行動再現に使うため
 //    このファイルを import する(相互import)。実際の呼び出しは関数本体の中でのみ行われるため
 //    (モジュール評価順に依存しない)ESモジュールとして安全に解決される。詳細は bots.js を参照。
@@ -102,12 +107,14 @@ function cmdHelp(player) {
         "§e/civ:claim §f: 周囲の土地を領有 (コスト: 人口1)",
         "§e/civ:buyrights §f: 開拓権を獲得 (コスト: 首都人口2)",
         "§e/civ:settle §f: 都市を建設 (コスト: 開拓権x1)",
-        "§e/civ:build <worker|warrior|spearman|archer|battleship|horseman|swordsman|catapult|crossbowman|cruiser|missile|tradingPost|granary|obelisk|market|trainingGround|antiAir|capital> §f: 生産を開始",
+        "§e/civ:build <worker|warrior|spearman|pikeman|archer|battleship|horseman|knight|tank|swordsman|musketman|modernInfantry|catapult|cannon|artillery|crossbowman|machineGunner|cruiser|dreadnought|uoooo|airRecon|airDefense|fighter|bomber|missile|tradingPost|granary|obelisk|market|trainingGround|wall|antiAir|capital|reactorRestart> §f: 生産を開始(航空ユニットはマスではなく航空基地に配置される。§航空戦)",
         "§c/civ:cancelbuild §f: 進行中の生産を中止(蓄積分は次に引き継ぎ)",
+        "§6/civ:rushbuy §f: 進行中の生産をゴールドで即時購入(必要ゴールド = 残り必要生産力×3)",
+        "§6/civ:giftgold <国家ID> <金額> §f: 他国家にゴールドを贈与する",
         "§e/civ:chop §f: 森林を伐採して住宅上限+1",
-        "§e/civ:install <quarry|blacksmith|harbor> §f: 足元の空き領有マスに施設を設置(労働者の行動回数を1消費)",
+        "§e/civ:install <quarry|blacksmith|harbor|pasture|camp|plantation|meteorCraterMine|airstrip> §f: 足元の空き領有マスに施設を設置(労働者の行動回数を1消費)",
         "§e/civ:district <sacredSite|industrialZone|campus> §f: 足元の空き領有マスに区域の建設を開始(帰属都市の生産力を使用)",
-        "§e/civ:districtbuilding <shrine|library|cathedral> §f: 足元の区域に専用の建造物を建設開始(帰属都市の生産力を使用)",
+        "§e/civ:districtbuilding <shrine|library|cathedral|workshop|factory|coalPowerPlant|oilPowerPlant|nuclearPowerPlant|airport> §f: 足元の区域に専用の建造物を建設開始(帰属都市の生産力を使用)",
         "§e/civ:foundreligion §f: 宗教を創始する(国家全体の信仰力100以上、かつ聖地が必要)",
         "§e/civ:renamereligion <名前> §f: 創始した宗教の名前を変更する",
         "§e/civ:buyreligious <missionary|apostle|inquisitor> §f: 都市の信仰力を使って宗教ユニットを購入(社/大聖堂/審問の開始が必要。購入するたびにコスト+30)",
@@ -262,6 +269,7 @@ function cmdGenerate(player, args) {
 
     resetAll();
     clearAllUnitLabels();
+    clearAllUnitModels();
     const config = { originX, originZ, ySurface, width, height, tileSize: TILE_SIZE };
     setMapConfig(config);
 
@@ -362,6 +370,7 @@ export function cmdClaim(player) {
     const tile = getTile(tx, tz);
     if (!tile) { reply(player, "§cマス情報がありません。"); return; }
     if (tile.ownerId) { reply(player, `§cこのマスは既に ${tile.ownerName} の領地です。`); return; }
+    if (tile.combatUnit && tile.combatUnit.ownerId !== player.id) { reply(player, "§cこのマスには他国の戦闘ユニットがいるため領有できません。"); return; }
 
     const allTiles = getTiles();
     let hasNeighbor = false;
@@ -466,10 +475,13 @@ export function cmdStartProduction(player, productionId) {
     if (!tile || !tile.city) { reply(player, "§cここにあなたの都市はありません。"); return { ok: false }; }
     if (tile.ownerId !== player.id) { reply(player, "§cこの都市の所有権がありません。"); return { ok: false }; }
 
-    const check = canStartProduction(tile.city, productionId, tile, player);
+    const check = canStartProduction(tile.city, productionId, tile, player, `${tx},${tz}`, getTiles());
     if (!check.ok) { reply(player, check.message); return { ok: false }; }
 
     startProduction(tile.city, productionId);
+    // 💡 世界遺産(新要素): 着工した時点で早い者勝ちの予約を確定する(canStartProductionが
+    //    既存の予約を弾いているので、ここに来る時点では未予約か自国の予約のどちらか)。
+    if (def.isWonder) claimWonder(productionId, player.id);
     setTile(tx, tz, tile);
 
     const { production } = getCityCurrentYields(`${tx},${tz}`, getTiles());
@@ -502,8 +514,125 @@ export function cmdCancelProduction(player) {
     setTile(tx, tz, tile);
 
     const def = PRODUCTION_DEFS[cancelled.id];
+    // 💡 世界遺産(新要素): 中止したら予約を解放し、他国(または自国の別都市)が再度着工できる
+    //    ようにする(civIdが一致する場合のみ解放。念のための整合性チェック)。
+    if (def?.isWonder) releaseWonder(cancelled.id, player.id);
     const label = def?.label ?? cancelled.id;
     broadcast(`§7[Stop] ${player.name} が都市【${tile.city.name}】の【${label}】の生産を中止しました。(蓄積生産力 ${cancelled.progress} は次の生産へ引き継がれます)`);
+    return { ok: true };
+}
+
+/**
+ * 💡 ゴールドによる即時購入コマンド。足元の自都市で進行中の生産(city.production)の残り必要
+ *    生産力ぶんを、通常のターン経過による完成(turns.js の processPlayerTurnStart)と全く同じ
+ *    tickProduction() を直接呼んで即座に完成させる(資源消費・配置失敗時のcancelledなど
+ *    既存ロジックがそのまま効く)。区域(district)の建設には使えない(city.production限定)。
+ */
+export function cmdRushBuyProduction(player) {
+    const config = getMapConfig();
+    if (!config) { reply(player, "§cマップ未生成です。"); return { ok: false }; }
+    if (!isPlayersTurn(player)) { reply(player, "§cあなたのターンではありません。"); return { ok: false }; }
+
+    const { tx, tz } = worldToTile(config, Math.floor(player.location.x), Math.floor(player.location.z));
+    const tile = getTile(tx, tz);
+    if (!tile || !tile.city) { reply(player, "§cここにあなたの都市はありません。"); return { ok: false }; }
+    if (tile.ownerId !== player.id) { reply(player, "§cこの都市の所有権がありません。"); return { ok: false }; }
+    if (!tile.city.production) { reply(player, "§c現在、生産中の物がありません。"); return { ok: false }; }
+
+    const remaining = Math.max(0, tile.city.production.cost - tile.city.production.progress);
+    // 💡 (バグ修正) 蓄積済みの生産力が既にコスト以上(remaining=0)の場合、goldCostも0になり
+    //    「無料で即時購入できてしまう」うえ、実際には自然完了を待つだけなのに「購入した」と
+    //    誤った放送が流れていた。既に完了間近ならそもそも購入の必要が無いとして弾く。
+    if (remaining <= 0) { reply(player, "§cこの生産は既に完了間近のため、購入の必要はありません。"); return { ok: false }; }
+    const goldCost = Math.ceil(remaining * RUSH_BUY_GOLD_PER_PRODUCTION);
+    const gold = player.getDynamicProperty("strategic_gold") ?? 0;
+    if (gold < goldCost) {
+        reply(player, `§cゴールドが足りません。(必要: ${goldCost}、保有: ${gold})`);
+        return { ok: false };
+    }
+
+    const allTiles = getTiles();
+    const def = PRODUCTION_DEFS[tile.city.production.id];
+    const result = tickProduction(tile.city, remaining, { cityKey: `${tx},${tz}`, tiles: allTiles, connectTradeRoutes, isAllied: isAlliedOrSameCiv, player });
+    setTiles(allTiles);
+    if (!result) { reply(player, "§c購入に失敗しました。"); return { ok: false }; }
+    // 💡 (バグ修正) 資源不足・配置先の空きマス無しなどでtickProductionが完成を中止した場合
+    //    (result.cancelled)、ゴールドを消費せず「購入成功」の一斉放送も行わない
+    //    (以前は中止時もゴールドが減り、実際には配置されていないのに購入成功のメッセージが
+    //    全員に流れてしまっていた)。進行度自体はtickProduction側でproductionCarryとして
+    //    保持されるため、ゴールドが無駄になるだけで進行度は失われない。
+    if (result.cancelled) { reply(player, result.message); return { ok: false }; }
+
+    player.setDynamicProperty("strategic_gold", gold - goldCost);
+    broadcast(`§6[Gold] ${player.name} が都市【${tile.city.name}】の【${def?.label ?? tile.city.production?.id}】をゴールド${goldCost}で即時購入しました！ (残高: ${gold - goldCost})`);
+    reply(player, result.message);
+    return { ok: true };
+}
+
+/**
+ * 💡 他国家へのゴールドの贈与(§23)。相手の承諾は不要な一方的な取引として最小実装する。
+ */
+export function cmdGiftGold(player, targetCivId, amount) {
+    if (!isPlayersTurn(player)) { reply(player, "§cあなたのターンではありません。"); return { ok: false }; }
+    const goldAmount = Math.floor(Number(amount));
+    if (!Number.isFinite(goldAmount) || goldAmount <= 0) { reply(player, "§c金額は1以上の整数で指定してください。"); return { ok: false }; }
+    if (targetCivId === player.id) { reply(player, "§c自国には贈与できません。"); return { ok: false }; }
+
+    const targetHandle = getCivStorageHandle(targetCivId);
+    if (!targetHandle) { reply(player, "§c対象の国家が見つかりません(オフラインの可能性があります)。"); return { ok: false }; }
+
+    const gold = player.getDynamicProperty("strategic_gold") ?? 0;
+    if (gold < goldAmount) { reply(player, `§cゴールドが足りません。(必要: ${goldAmount}、保有: ${gold})`); return { ok: false }; }
+
+    player.setDynamicProperty("strategic_gold", gold - goldAmount);
+    targetHandle.setDynamicProperty("strategic_gold", (targetHandle.getDynamicProperty("strategic_gold") ?? 0) + goldAmount);
+
+    const targetName = resolveCivName(targetCivId) ?? targetCivId;
+    broadcast(`§6[Gold] ${player.name} が【${targetName}】にゴールド${goldAmount}を贈与しました！`);
+    return { ok: true };
+}
+
+const GREAT_PERSON_BONUS_POINTS = 250; // 大科学者/大文人が即時付与する技術/社会制度ポイント
+const GREAT_PERSON_FAITH_BONUS = 50; // 大預言者が自国の都市1つあたりに加算する信仰力備蓄
+export const GREAT_PERSON_LABELS = { science: "大科学者", civic: "大文人", faith: "大預言者" };
+const PROGRESS_KIND_LABELS = { technology: "技術ポイント", civic: "社会制度ポイント" };
+// 💡 (簡素化) science/civicは即時付与する研究種別が違うだけの同じ操作(grantProgressPoints)、
+//    faithだけ自国の全都市に信仰力備蓄を加算する別種の操作のため、種別ごとに1エントリの
+//    テーブルとしてまとめる(4種目以降を足すときもここに1行足すだけでよい)。ボーナス量は
+//    openGreatPersonMenu(ui.js)からも参照するため export する。
+export const GREAT_PERSON_EFFECTS = {
+    science: { progressKind: "technology", points: GREAT_PERSON_BONUS_POINTS },
+    civic: { progressKind: "civic", points: GREAT_PERSON_BONUS_POINTS },
+    faith: { faithBonus: GREAT_PERSON_FAITH_BONUS },
+};
+
+/**
+ * 偉人を招聘する(新要素)。技術/文化力/信仰力の産出の一部から貯まる偉人ポイント
+ * (progression.jsのGREAT_PERSON_THRESHOLD分)を使って即時ボーナスを得る。
+ */
+export function cmdRecruitGreatPerson(player, type) {
+    if (!isPlayersTurn(player)) { reply(player, "§cあなたのターンではありません。"); return { ok: false }; }
+    const effect = GREAT_PERSON_EFFECTS[type];
+    if (!effect) { reply(player, "§c不明な偉人種別です。"); return { ok: false }; }
+
+    const result = recruitGreatPerson(player, type);
+    if (!result.ok) { reply(player, `§c偉人ポイントが不足しています。(必要: ${GREAT_PERSON_THRESHOLD})`); return { ok: false }; }
+
+    const label = GREAT_PERSON_LABELS[type];
+    if (effect.progressKind) {
+        const msg = grantProgressPoints(player, effect.progressKind, effect.points);
+        broadcast(`§b*** [Great] ${player.name} が【${label}】を招聘しました！ (${PROGRESS_KIND_LABELS[effect.progressKind]}+${effect.points}) ***`);
+        if (msg) broadcast(msg);
+    } else {
+        const tiles = getTiles();
+        let count = 0;
+        for (const key in tiles) {
+            const t = tiles[key];
+            if (t.ownerId === player.id && t.city) { t.city.faithStorage = (t.city.faithStorage ?? 0) + effect.faithBonus; count++; }
+        }
+        if (count) setTiles(tiles);
+        broadcast(`§b*** [Great] ${player.name} が【${label}】を招聘しました！ (自国の全都市の信仰力備蓄+${effect.faithBonus}) ***`);
+    }
     return { ok: true };
 }
 
@@ -544,7 +673,7 @@ export function cmdLaunchMissile(player, targetTx, targetTz) {
 
     // 💡 演出用に少し間を置いてから着弾させる（2秒後）
     system.runTimeout(() => {
-        const impactMessage = resolveMissileImpact(config, ttx, ttz);
+        const impactMessage = resolveMissileImpact(config, ttx, ttz, player.id);
         if (impactMessage) broadcast(impactMessage);
     }, 40);
 
@@ -565,6 +694,7 @@ export function cmdSettle(player) {
     if (tile.city) { reply(player, "§c既に都市が存在します。"); return; }
     if (isImpassableTerrain(tile.type)) { reply(player, "§c山脈マスには都市を建設できません。"); return; }
     if (isWaterTerrain(tile.type)) { reply(player, "§c水上マスには都市を建設できません。"); return; }
+    if (tile.combatUnit && tile.combatUnit.ownerId !== player.id) { reply(player, "§cこのマスには他国の戦闘ユニットがいるため都市を建設できません。"); return; }
 
     const allTiles = getTiles();
     let hasAnyCity = false;
@@ -1272,6 +1402,8 @@ export function registerScriptCommands() {
                 case "buildmissile": cmdStartProduction(player, "missile"); break; // 互換用エイリアス
                 case "buildtp": cmdStartProduction(player, "tradingPost"); break; // 互換用エイリアス
                 case "cancelbuild": cmdCancelProduction(player); break;
+                case "rushbuy": cmdRushBuyProduction(player); break;
+                case "giftgold": cmdGiftGold(player, args[0], args[1]); break;
                 case "research": cmdStartProgress(player, "technology", args[0]); break;
                 case "civic": cmdStartProgress(player, "civic", args[0]); break;
                 case "launch": {
@@ -1418,6 +1550,15 @@ export function registerCustomCommands() {
 
         cmd("cancelbuild", "進行中の生産を中止する(蓄積分は次に引き継ぎ)", {}, (origin) => runCivCommand(origin, (r, player) => cmdCancelProduction(player)));
 
+        cmd("rushbuy", "進行中の生産をゴールドで即時購入する", {}, (origin) => runCivCommand(origin, (r, player) => cmdRushBuyProduction(player)));
+
+        cmd("giftgold", "他国家にゴールドを贈与する", {
+            mandatoryParameters: [
+                { name: "civId", type: CustomCommandParamType.String },
+                { name: "amount", type: CustomCommandParamType.Integer },
+            ],
+        }, (origin, civId, amount) => runCivCommand(origin, (r, player) => cmdGiftGold(player, civId, amount)));
+
         cmd("research", "技術の研究を開始する", {
             mandatoryParameters: [{ name: "civ:technologyId", type: CustomCommandParamType.Enum }],
         }, (origin, techId) => runCivCommand(origin, (r, player) => cmdStartProgress(player, "technology", techId)));
@@ -1472,14 +1613,19 @@ export function cmdSignAgreement(player, type, targetId) {
         reply(player, "§cあなたのターンではありません。");
         return { ok: false };
     }
-    const result = signAgreement(player, type, targetId);
+    const result = signAgreement(player, targetId, type);
     if (result.ok) broadcast(result.message);
     else reply(player, result.message);
     return result;
 }
 
-/** 戦闘ユニットをマス間で移動する。戦闘・都市占領はここでは扱わない。 */
-export function cmdMoveCombatUnit(player, fromTx, fromTz, toTx, toTz) {
+/**
+ * 戦闘ユニットをマス間で移動する。戦闘・都市占領はここでは扱わない。
+ * 💡 人間プレイヤーの操作(player.isBotが立っていない)の場合のみ、見た目モデルが直進していく
+ *    アニメーション(unitModels.js)の完了を待ってから返す。Botは体感速度を落とさないため
+ *    アニメーションを待たない(タイルデータの更新自体はどちらも同期的に完了済み)。
+ */
+export async function cmdMoveCombatUnit(player, fromTx, fromTz, toTx, toTz) {
     const config = getMapConfig();
     if (!config) { reply(player, "§cマップ未生成です。"); return { ok: false }; }
     if (!isPlayersTurn(player)) { reply(player, "§cあなたのターンではありません。"); return { ok: false }; }
@@ -1489,7 +1635,17 @@ export function cmdMoveCombatUnit(player, fromTx, fromTz, toTx, toTz) {
     const unit = source?.combatUnit;
     if (!unit || unit.ownerId !== player.id) { reply(player, "§cこのマスに移動可能なあなたの戦闘ユニットはいません。"); return { ok: false }; }
     if (!target) { reply(player, "§c移動先がマップ外です。"); return { ok: false }; }
-    if (target.combatUnit) { reply(player, "§c移動先にはすでに戦闘ユニットが存在します。"); return { ok: false }; }
+    // 💡 (バグ修正・§13) 敵の都心が陥落(HP<=0)している場合は、駐留ユニットがいても進入できる
+    //    (都心のHPは駐留ユニットも含めた防衛力を表す数値であり、陥落=駐留ユニットも共に敗北した
+    //    扱いとする)。これが無いと、都心マスにユニットを置いたまま放置するだけでその都市は
+    //    HPを0にしても永久に占領不可能になってしまう(都市自体が攻撃対象になり駐留ユニットは
+    //    直接の攻撃対象にならない設計のため、駐留ユニットを倒す手段が他に無いことに起因する)。
+    // 💡 (バグ修正) canUnitEnterCityTile ではなく isFallenEnemyCityTile を使う。前者は
+    //    「進入できるか」の判定で同盟国/不可侵条約相手の健在な都市にもtrueを返すため、
+    //    それをそのまま「陥落判定」に使うと健在な味方の都市に進入しただけで駐留ユニットが
+    //    「陥落と共に敗北した」扱いで消えてしまっていた(戦争相手かつHP<=0の場合のみに限定)。
+    const enemyCityFallen = isFallenEnemyCityTile(unit, target);
+    if (target.combatUnit && !enemyCityFallen) { reply(player, "§c移動先にはすでに戦闘ユニットが存在します。"); return { ok: false }; }
     if (!canUnitEnterTerrain(unit, target)) {
         reply(player, unit.domain === "naval" ? "§c海軍ユニットは水上マス(海・川・池・湖)にしか移動できません。" : "§c陸軍ユニットは陸地マスにしか移動できません(水上・山脈マスには移動できません)。");
         return { ok: false };
@@ -1503,20 +1659,25 @@ export function cmdMoveCombatUnit(player, fromTx, fromTz, toTx, toTz) {
         return { ok: false };
     }
 
-    const distance = Math.max(Math.abs(toTx - fromTx), Math.abs(toTz - fromTz));
     const remaining = unit.movementRemaining ?? unit.movement ?? 0;
-    if (distance < 1 || distance > remaining) { reply(player, "§cそのマスへ移動するには移動力が足りません。"); return { ok: false }; }
-    if (!canTravelPath(unit, fromTx, fromTz, toTx, toTz, getTiles())) {
-        reply(player, "§c移動経路が塞がっているため、そのマスへは直接移動できません。(陸地や他ユニットなどを飛び越えることはできません)");
+    if ((fromTx === toTx && fromTz === toTz) || remaining <= 0) { reply(player, "§cそのマスへ移動するには移動力が足りません。"); return { ok: false }; }
+    const reachable = getReachablePositions(unit, fromTx, fromTz, getTiles(), config, remaining);
+    const cost = reachable.get(`${toTx},${toTz}`);
+    if (cost === undefined) {
+        reply(player, "§cそのマスへ移動する経路がありません。(移動力が足りないか、経路が他国領土・地形・他ユニットなどに塞がれています)");
         return { ok: false };
     }
 
+    const defeatedGarrison = enemyCityFallen ? target.combatUnit : null;
+
     source.combatUnit = null;
-    unit.movementRemaining = remaining - distance;
+    unit.movementRemaining = remaining - cost;
     target.combatUnit = unit;
     setTile(fromTx, fromTz, source);
     setTile(toTx, toTz, target);
-    broadcast(`§e[Warrior] ${player.name} の${unit.label ?? "戦闘ユニット"}が (${fromTx}, ${fromTz}) から (${toTx}, ${toTz}) へ移動しました。 (残り移動力: ${unit.movementRemaining})`);
+    const garrisonText = defeatedGarrison ? ` §c(駐留していた${defeatedGarrison.label ?? "戦闘ユニット"}は陥落した都心と共に敗北した)` : "";
+    broadcast(`§e[Warrior] ${player.name} の${unit.label ?? "戦闘ユニット"}が (${fromTx}, ${fromTz}) から (${toTx}, ${toTz}) へ移動しました。 (残り移動力: ${unit.movementRemaining})${garrisonText}`);
+    if (!player.isBot) await animateUnitModelMove(fromTx, fromTz, toTx, toTz);
     return { ok: true };
 }
 
@@ -1535,9 +1696,10 @@ export function cmdAttackCombatUnit(player, fromTx, fromTz, toTx, toTz) {
     const attacker = source?.combatUnit;
     if (!attacker || attacker.ownerId !== player.id) { reply(player, "§cこのマスに攻撃可能なあなたの戦闘ユニットはいません。"); return { ok: false }; }
     if (!target) { reply(player, "§c攻撃先がマップ外です。"); return { ok: false }; }
-    // 💡 都市のマスに駐留するユニットは、都市自身が防衛の主体になるため直接攻撃できない
-    //    (§13)。都市そのものを攻撃するには cmdAttackCity を使う。
-    if (target.city) { reply(player, "§cこのマスには都市があります。都市への攻撃は別のコマンド/メニューから行ってください。"); return { ok: false }; }
+    // 💡 都市が健在なマスに駐留するユニットは、都市自身が防衛の主体になるため直接攻撃できない
+    //    (§13)。都市そのものを攻撃するには cmdAttackCity を使う。ただし都心のHPが既に0
+    //    (陥落済み)なら、駐留ユニットはもう都市に守られていないので通常通り直接攻撃できる。
+    if (target.city && !isFallenEnemyCityTile(attacker, target)) { reply(player, "§cこのマスには都市があります。都市への攻撃は別のコマンド/メニューから行ってください。"); return { ok: false }; }
 
     const defender = target.combatUnit;
     if (!defender) { reply(player, "§c攻撃先に戦闘ユニットが存在しません。"); return { ok: false }; }
@@ -1616,6 +1778,14 @@ export function cmdAttackCity(player, fromTx, fromTz, cityTx, cityTz) {
     if (!target?.city) { reply(player, "§c攻撃先に都市がありません。"); return { ok: false }; }
     if (target.ownerId === player.id) { reply(player, "§c自分の都市は攻撃できません。"); return { ok: false }; }
     if (!isAtWar(player.id, target.ownerId)) { reply(player, "§c宣戦布告していない相手の都市は攻撃できません。外交メニューから宣戦布告してください。"); return { ok: false }; }
+    // 💡 都心のHPが既に0(陥落済み)の都市はこれ以上攻撃する意味が無い。駐留ユニットが
+    //    残っていればcmdAttackCombatUnitで直接攻撃できる(isFallenEnemyCityTile)。
+    if ((target.city.hp ?? CITY_MAX_HP) <= 0) {
+        reply(player, target.combatUnit
+            ? "§cこの都市は既に陥落しています。駐留ユニットは通常の攻撃で直接狙えます。"
+            : "§cこの都市は既に陥落しています。そのマスへ移動して占領してください。");
+        return { ok: false };
+    }
 
     const remaining = attacker.movementRemaining ?? attacker.movement ?? 0;
     if (remaining <= 0) { reply(player, "§c移動力が残っていないため攻撃できません。"); return { ok: false }; }
@@ -1629,7 +1799,7 @@ export function cmdAttackCity(player, fromTx, fromTz, cityTx, cityTz) {
 
     const garrisonUnit = target.combatUnit?.ownerId === target.ownerId ? target.combatUnit : null;
     const cityStrength = getCityCombatStrength(target.ownerId, allTiles, garrisonUnit);
-    const result = resolveCityAttack(attacker, target.city, cityStrength);
+    const result = resolveCityAttack(attacker, target.city, cityStrength, garrisonUnit);
     attacker.movementRemaining = 0;
     source.combatUnit = attacker;
 
@@ -1638,6 +1808,18 @@ export function cmdAttackCity(player, fromTx, fromTz, cityTx, cityTz) {
     lines.push(target.city.wall
         ? `§7防壁軽減後ダメージ: ${result.damage} (シールド: -${result.wallDamage} / 都心HP: -${result.hpDamage})`
         : `§7ダメージ: ${result.damage}`);
+
+    // 💡 都心HPに届いたダメージ(hpDamage)は駐留ユニットのHPにも並列で入る(resolveCityAttack参照)。
+    //    都市が陥落したかどうかとは独立に、駐留ユニット単体が力尽きることがある。
+    if (garrisonUnit) {
+        if (result.garrisonDestroyed) {
+            lines.push(`§c[Defeated] 駐留していた${garrisonUnit.label ?? "戦闘ユニット"}は撃破されました！`);
+            target.combatUnit = null;
+            refreshUnitLabelAt(cityTx, cityTz);
+        } else {
+            lines.push(`§7  -> 駐留${garrisonUnit.label ?? "戦闘ユニット"} 残りHP: ${Math.max(0, Math.round(garrisonUnit.hp))}/${garrisonUnit.maxHp ?? 100}`);
+        }
+    }
 
     if (result.cityDestroyed) {
         lines.push(`§c[Fall]【${cityName}】の都心HPが0になりました！ 敵ユニットが進入・占領できるようになります。`);
@@ -1662,6 +1844,286 @@ export function cmdAttackCity(player, fromTx, fromTz, cityTx, cityTz) {
     setTile(cityTx, cityTz, target);
     broadcast(lines.join("\n"));
     return { ok: true, result };
+}
+
+// ==================== §航空戦: 航空ユニット(支援偵察・支援防御・戦闘機・戦略爆撃機) ====================
+// 陸軍/海軍と違ってマス上を移動しない。都市の航空基地(city.airbase.units、airbase.js)に
+// 配置され、そこから出撃・略奪・哨戒・帰投(移設)する。命令の対象は「拠点(baseTx,baseTz)」+
+// 「その拠点内でのユニット番号(unitIndex、city.airbase.unitsの配列インデックス)」で指定する。
+
+/**
+ * baseTx,baseTz の自国都市の航空基地から、unitIndex番目の自国航空ユニットを取得する
+ * (cmdAirStrike/cmdAirPillage/cmdSetAirPatrol/cmdRebaseAirUnitで共通のルックアップ)。
+ */
+function getOwnBasedAirUnit(player, baseTx, baseTz, unitIndex) {
+    const baseTile = getTile(baseTx, baseTz);
+    if (!baseTile?.city) return { ok: false, message: "§cこのマスに都市がありません。" };
+    if (baseTile.ownerId !== player.id) return { ok: false, message: "§cこの都市の所有権がありません。" };
+    const unit = getBasedAirUnits(baseTile.city)[unitIndex];
+    if (!unit || unit.ownerId !== player.id) return { ok: false, message: "§cこの航空基地にそのユニットはいません。" };
+    return { ok: true, baseTile, unit };
+}
+
+/**
+ * 航空ユニットが出撃(cmdAirStrike/cmdAirPillage)する際、対空砲(antiAir。確実な迎撃・撃墜、
+ * 既存のミサイル迎撃と同じヘルパー)→哨戒中の迎撃ユニット(airbase.js の
+ * findInterceptingPatrolUnit。ダメージを与えるのみで、撃墜しない限り出撃自体は成立する)の順で
+ * 迎撃を試みる。対空砲が迎撃した場合は出撃元の航空基地からユニットを除去するところまで行う。
+ * @returns {{ destroyed: boolean } | null} 迎撃が発生しなければ null。
+ */
+function tryInterceptAirStrike(tiles, player, attacker, baseTile, targetTx, targetTz) {
+    const antiAir = findInterceptingAntiAirCity(tiles, targetTx, targetTz, attacker.ownerId);
+    if (antiAir) {
+        antiAir.city.antiAirUsedThisTurn = true;
+        const [itx, itz] = antiAir.key.split(",").map(Number);
+        setTile(itx, itz, tiles[antiAir.key]);
+        removeBasedAirUnit(baseTile.city, attacker);
+        broadcast(`§b[AntiAir]【${antiAir.city.name}】の対空砲が ${player.name} の${attacker.label ?? "航空ユニット"}を迎撃・撃墜しました！`);
+        return { destroyed: true };
+    }
+
+    const patrol = findInterceptingPatrolUnit(tiles, targetTx, targetTz, attacker.ownerId);
+    if (patrol) {
+        const result = resolveAirPatrolInterception(patrol.unit, attacker, patrol.bonus);
+        patrol.unit.interceptedThisTurn = true;
+        patrol.unit.actedThisTurn = true;
+        const [ptx, ptz] = patrol.cityKey.split(",").map(Number);
+        setTile(ptx, ptz, tiles[patrol.cityKey]);
+        if (result.attackerDestroyed) {
+            removeBasedAirUnit(baseTile.city, attacker);
+            broadcast(`§b[Intercept]【${patrol.city.name}】の${patrol.unit.label ?? "哨戒機"}が ${player.name} の${attacker.label ?? "航空ユニット"}を迎撃・撃墜しました！`);
+            return { destroyed: true };
+        }
+        broadcast(`§b[Intercept]【${patrol.city.name}】の${patrol.unit.label ?? "哨戒機"}が ${player.name} の${attacker.label ?? "航空ユニット"}を迎撃(ダメージ: ${result.damage}、残りHP: ${Math.max(0, Math.round(attacker.hp))}/${attacker.maxHp ?? 100})！このまま出撃が続行されます。`);
+        return { destroyed: false };
+    }
+    return null;
+}
+
+/**
+ * 航空ユニットが拠点(baseTx,baseTz)から出撃し、攻撃距離内にある敵ユニット/敵都市を直接攻撃する
+ * (拠点そのものは移動しない。§航空戦)。tryInterceptAirStrikeを経てから、通常の戦闘解決
+ * (resolveCombat/resolveCityAttack。既存の陸海軍ユニットの攻撃と同じ計算式)を行う。
+ * 1ユニット1ターン1回まで(actedThisTurn。哨戒の切り替えは対象外)。
+ */
+export function cmdAirStrike(player, baseTx, baseTz, unitIndex, targetTx, targetTz) {
+    if (!isPlayersTurn(player)) { reply(player, "§cあなたのターンではありません。"); return { ok: false }; }
+
+    const lookup = getOwnBasedAirUnit(player, baseTx, baseTz, unitIndex);
+    if (!lookup.ok) { reply(player, lookup.message); return { ok: false }; }
+    const { baseTile, unit } = lookup;
+    if (unit.actedThisTurn) { reply(player, "§cこのユニットは今ターン既に行動済みです。"); return { ok: false }; }
+
+    const range = getAttackRange(unit);
+    const distance = tileDistance(baseTx, baseTz, targetTx, targetTz);
+    if (distance < 1 || distance > range) { reply(player, "§cそのマスは攻撃距離外です。"); return { ok: false }; }
+
+    const tiles = getTiles();
+    const config = getMapConfig();
+    const hasAgreementFn = (a, b) => !isAtWar(a, b);
+    const cityTarget = getAttackableCityTargets(baseTx, baseTz, player.id, unit, tiles, config, hasAgreementFn)
+        .find((t) => t.tx === targetTx && t.tz === targetTz);
+    const unitTarget = cityTarget ? null : getAttackableTargets(baseTx, baseTz, player.id, unit, tiles, config, hasAgreementFn)
+        .find((t) => t.tx === targetTx && t.tz === targetTz);
+    if (!cityTarget && !unitTarget) { reply(player, "§c有効な攻撃対象がそのマスにありません。"); return { ok: false }; }
+
+    const interception = tryInterceptAirStrike(tiles, player, unit, baseTile, targetTx, targetTz);
+    if (interception?.destroyed) {
+        setTile(baseTx, baseTz, baseTile);
+        return { ok: true, intercepted: true };
+    }
+
+    const attackerLabel = unit.label ?? "航空ユニット";
+    const lines = [];
+
+    if (cityTarget) {
+        const target = cityTarget.tile;
+        const cityName = target.city.name;
+        const garrisonUnit = target.combatUnit?.ownerId === target.ownerId ? target.combatUnit : null;
+        const cityStrength = getCityCombatStrength(target.ownerId, tiles, garrisonUnit);
+        const result = resolveCityAttack(unit, target.city, cityStrength, garrisonUnit);
+
+        lines.push(`§c[Airstrike] ${player.name} の${attackerLabel}(拠点: ${baseTx}, ${baseTz})が【${cityName}】(${targetTx}, ${targetTz})を空爆！`);
+        lines.push(target.city.wall
+            ? `§7防壁軽減後ダメージ: ${result.damage} (シールド: -${result.wallDamage} / 都心HP: -${result.hpDamage})`
+            : `§7ダメージ: ${result.damage}`);
+        if (garrisonUnit) {
+            if (result.garrisonDestroyed) {
+                lines.push(`§c[Defeated] 駐留していた${garrisonUnit.label ?? "戦闘ユニット"}は撃破されました！`);
+                target.combatUnit = null;
+                refreshUnitLabelAt(targetTx, targetTz);
+            } else {
+                lines.push(`§7  -> 駐留${garrisonUnit.label ?? "戦闘ユニット"} 残りHP: ${Math.max(0, Math.round(garrisonUnit.hp))}/${garrisonUnit.maxHp ?? 100}`);
+            }
+        }
+        if (result.cityDestroyed) {
+            lines.push(`§c[Fall]【${cityName}】の都心HPが0になりました！ 敵ユニットが進入・占領できるようになります。`);
+        } else {
+            lines.push(`§7  -> 【${cityName}】 残りHP: ${Math.max(0, Math.round(target.city.hp))}/${CITY_MAX_HP}`);
+        }
+        setTile(targetTx, targetTz, target);
+    } else {
+        const target = unitTarget.tile;
+        const defender = unitTarget.unit;
+        const defenderLabel = defender.label ?? "戦闘ユニット";
+        const flankingAllies = countFlankingAllies(targetTx, targetTz, player.id, baseTx, baseTz, tiles);
+        const result = resolveCombat(unit, defender, distance, getFlankingBonus(flankingAllies));
+
+        lines.push(`§c[Airstrike] ${player.name} の${attackerLabel}(拠点: ${baseTx}, ${baseTz})が ${defenderLabel}(${targetTx}, ${targetTz})を空爆！`);
+        lines.push(`§7ダメージ: ${result.firstDamage}`);
+        if (result.defenderDestroyed) {
+            lines.push(`§c[Defeated] ${defenderLabel}は撃破されました！`);
+            target.combatUnit = null;
+            refreshUnitLabelAt(targetTx, targetTz);
+        } else {
+            lines.push(`§7  -> ${defenderLabel} 残りHP: ${Math.max(0, Math.round(defender.hp))}/${defender.maxHp ?? 100}`);
+            if (result.counterSkippedReason === "outOfDefenderRange") {
+                lines.push(`§7${defenderLabel}の攻撃範囲外からの出撃のため、反撃はありません。`);
+            } else {
+                lines.push(`§7反撃ダメージ: ${result.counterDamage}`);
+                if (result.attackerDestroyed) {
+                    lines.push(`§c[Defeated] ${attackerLabel}は反撃により撃墜されました！`);
+                } else {
+                    lines.push(`§7  -> ${attackerLabel} 残りHP: ${Math.max(0, Math.round(unit.hp))}/${unit.maxHp ?? 100}`);
+                }
+            }
+        }
+        setTile(targetTx, targetTz, target);
+    }
+
+    unit.actedThisTurn = true;
+    if ((unit.hp ?? 0) <= 0) removeBasedAirUnit(baseTile.city, unit);
+    setTile(baseTx, baseTz, baseTile);
+    broadcast(lines.join("\n"));
+    return { ok: true };
+}
+
+/**
+ * 略奪(§航空戦)。戦略爆撃機のみ実行できる(哨戒できない代わりに持つ能力)。HPが最大値の
+ * PILLAGE_MIN_HP_RATIO(50%)以上残っている場合のみ実行でき、対象マスの施設、または完成済みの
+ * 区域にある区域専用建造物を1つ破壊する(陸軍の略奪と違い戦利品・ゴールドは得られない)。
+ */
+export function cmdAirPillage(player, baseTx, baseTz, unitIndex, targetTx, targetTz) {
+    if (!isPlayersTurn(player)) { reply(player, "§cあなたのターンではありません。"); return { ok: false }; }
+
+    const lookup = getOwnBasedAirUnit(player, baseTx, baseTz, unitIndex);
+    if (!lookup.ok) { reply(player, lookup.message); return { ok: false }; }
+    const { baseTile, unit } = lookup;
+    if (unit.airRole !== "bomber") { reply(player, "§c略奪は戦略爆撃機のみ実行できます。"); return { ok: false }; }
+    if (unit.actedThisTurn) { reply(player, "§cこのユニットは今ターン既に行動済みです。"); return { ok: false }; }
+    if ((unit.hp ?? 0) < (unit.maxHp ?? 100) * PILLAGE_MIN_HP_RATIO) {
+        reply(player, `§c略奪にはHPが最大値の${Math.round(PILLAGE_MIN_HP_RATIO * 100)}%以上残っている必要があります。(現在: ${Math.max(0, Math.round(unit.hp ?? 0))}/${unit.maxHp ?? 100})`);
+        return { ok: false };
+    }
+
+    const range = getAttackRange(unit);
+    const distance = tileDistance(baseTx, baseTz, targetTx, targetTz);
+    if (distance < 1 || distance > range) { reply(player, "§cそのマスは攻撃距離外です。"); return { ok: false }; }
+
+    const tiles = getTiles();
+    const targetKey = `${targetTx},${targetTz}`;
+    const target = tiles[targetKey];
+    if (!target || !target.ownerId || target.ownerId === player.id) { reply(player, "§c略奪対象は敵国の領有マスである必要があります。"); return { ok: false }; }
+    if (!isAtWar(player.id, target.ownerId)) { reply(player, "§c宣戦布告していない相手は略奪できません。外交メニューから宣戦布告してください。"); return { ok: false }; }
+
+    const interception = tryInterceptAirStrike(tiles, player, unit, baseTile, targetTx, targetTz);
+    if (interception?.destroyed) {
+        setTile(baseTx, baseTz, baseTile);
+        return { ok: true, intercepted: true };
+    }
+
+    let pillageMessage = null;
+    if (target.facility) {
+        pillageMessage = `§c[Pillage] ${player.name} の${unit.label ?? "戦略爆撃機"}(拠点: ${baseTx}, ${baseTz})が (${targetTx}, ${targetTz}) の${target.facility.label ?? "施設"}を破壊しました！`;
+        target.facility = null;
+    } else if (target.district && !target.underDistrictConstruction) {
+        const ownerCity = tiles[target.belongsToCityKey]?.city;
+        const builtId = ownerCity
+            ? Object.keys(DISTRICT_BUILDING_DEFS).find((id) => DISTRICT_BUILDING_DEFS[id].forDistrict === target.district.id && ownerCity[id])
+            : null;
+        if (ownerCity && builtId) {
+            const def = DISTRICT_BUILDING_DEFS[builtId];
+            ownerCity[builtId] = false;
+            def.onReplaced?.(ownerCity);
+            pillageMessage = `§c[Pillage] ${player.name} の${unit.label ?? "戦略爆撃機"}(拠点: ${baseTx}, ${baseTz})が (${targetTx}, ${targetTz}) の${target.district.label ?? "区域"}にある${def.label}を破壊しました！`;
+        }
+    }
+
+    if (!pillageMessage) { reply(player, "§cそのマスには略奪できる施設・建造物がありません。"); return { ok: false }; }
+
+    unit.actedThisTurn = true;
+    setTile(baseTx, baseTz, baseTile);
+    setTile(targetTx, targetTz, target);
+    if (target.belongsToCityKey && target.belongsToCityKey !== targetKey) {
+        const [otx, otz] = target.belongsToCityKey.split(",").map(Number);
+        setTile(otx, otz, tiles[target.belongsToCityKey]);
+    }
+    broadcast(pillageMessage);
+    return { ok: true };
+}
+
+/**
+ * 航空ユニットの哨戒状態を切り替える(戦略爆撃機・支援偵察機は哨戒できない)。哨戒中は、
+ * 拠点からAIR_PATROL_INTERCEPT_RADIUSマス以内への敵の空爆を迎撃できる(airbase.js参照)。
+ * 行動回数(actedThisTurn)を消費しないため、いつでも切り替えられる。
+ */
+export function cmdSetAirPatrol(player, baseTx, baseTz, unitIndex, patrol) {
+    if (!isPlayersTurn(player)) { reply(player, "§cあなたのターンではありません。"); return { ok: false }; }
+
+    const lookup = getOwnBasedAirUnit(player, baseTx, baseTz, unitIndex);
+    if (!lookup.ok) { reply(player, lookup.message); return { ok: false }; }
+    const { baseTile, unit } = lookup;
+    if (!canAirUnitPatrol(unit)) {
+        reply(player, "§cこのユニットは哨戒できません。");
+        return { ok: false };
+    }
+
+    unit.patrol = !!patrol;
+    setTile(baseTx, baseTz, baseTile);
+    broadcast(`§b[Patrol] ${player.name} の${unit.label ?? "航空ユニット"}(拠点: ${baseTx}, ${baseTz})が哨戒を${unit.patrol ? "開始" : "解除"}しました。`);
+    return { ok: true };
+}
+
+/**
+ * 航空ユニットを、航続距離(movement)以内にある自国の別の航空基地へ移設する(§航空戦。
+ * 陸海軍の移動に相当する)。移設先に空き枠が必要。1ユニット1ターン1回まで(actedThisTurn。
+ * 出撃・略奪と共有)。
+ */
+export function cmdRebaseAirUnit(player, baseTx, baseTz, unitIndex, targetBaseTx, targetBaseTz) {
+    if (!isPlayersTurn(player)) { reply(player, "§cあなたのターンではありません。"); return { ok: false }; }
+
+    const lookup = getOwnBasedAirUnit(player, baseTx, baseTz, unitIndex);
+    if (!lookup.ok) { reply(player, lookup.message); return { ok: false }; }
+    const { baseTile, unit } = lookup;
+    if (unit.actedThisTurn) { reply(player, "§cこのユニットは今ターン既に行動済みです。"); return { ok: false }; }
+    if (baseTx === targetBaseTx && baseTz === targetBaseTz) { reply(player, "§c同じ航空基地には移設できません。"); return { ok: false }; }
+
+    const targetTile = getTile(targetBaseTx, targetBaseTz);
+    if (!targetTile?.city || targetTile.ownerId !== player.id) { reply(player, "§c移設先は自国の都市である必要があります。"); return { ok: false }; }
+
+    const distance = tileDistance(baseTx, baseTz, targetBaseTx, targetBaseTz);
+    if (distance > (unit.movement ?? 0)) {
+        reply(player, `§c航続距離が足りません。(必要: ${distance}、航続距離: ${unit.movement ?? 0})`);
+        return { ok: false };
+    }
+
+    const tiles = getTiles();
+    const targetKey = `${targetBaseTx},${targetBaseTz}`;
+    const capacity = getAirbaseCapacity(targetTile.city, targetKey, tiles);
+    const basedCount = getBasedAirUnits(targetTile.city).length;
+    if (basedCount >= capacity) {
+        reply(player, `§c移設先の航空基地に空き枠がありません。(枠: ${basedCount}/${capacity})`);
+        return { ok: false };
+    }
+
+    removeBasedAirUnit(baseTile.city, unit);
+    addBasedAirUnit(targetTile.city, unit);
+    unit.actedThisTurn = true;
+
+    setTile(baseTx, baseTz, baseTile);
+    setTile(targetBaseTx, targetBaseTz, targetTile);
+    broadcast(`§e[Rebase] ${player.name} の${unit.label ?? "航空ユニット"}が (${baseTx}, ${baseTz}) から (${targetBaseTx}, ${targetBaseTz}) の航空基地へ移設しました。`);
+    return { ok: true };
 }
 
 /**
@@ -1704,6 +2166,26 @@ export function cmdCaptureCity(player, tx, tz) {
     tile.city.attackedRecently = false;
     tile.city.rangedAttackUsedThisTurn = false;
 
+    // 💡 世界遺産(新要素)の予約は着工した civId に紐づくため、その civ から都市そのものを
+    //    奪っても予約は自動では移らない。生産中だった世界遺産があれば、旧オーナーの予約を
+    //    解放して占領側の予約に付け替える(そのままだと旧オーナーが二度とその都市を
+    //    触れなくなった後、生産中止や都市破壊でも解放条件(civId一致)を満たせず、
+    //    その世界遺産が試合中ずっと誰も着工できなくなってしまう)。
+    const capturedWonderId = tile.city.production?.id;
+    if (capturedWonderId && PRODUCTION_DEFS[capturedWonderId]?.isWonder) {
+        releaseWonder(capturedWonderId, previousOwnerId);
+        claimWonder(capturedWonderId, player.id);
+    }
+    // 💡 (バグ修正) 建設中だけでなく、完成済みの世界遺産(city.pyramids等)も占領側にそのまま
+    //    引き継がれる。旧オーナーの予約を解放して占領側の予約に付け替えないと、その遺産IDが
+    //    永久にロックされ、誰も(占領側含め)二度と建設できなくなってしまう。
+    for (const id in PRODUCTION_DEFS) {
+        if (PRODUCTION_DEFS[id].isWonder && tile.city[id]) {
+            releaseWonder(id, previousOwnerId);
+            claimWonder(id, player.id);
+        }
+    }
+
     // 💡 占領した都市はそのまま自分の首都にはならない(通常の都市として扱う)。
     //    首都を占領しても占領側にそのまま首都権が移ってしまうバグの修正。
     //    占領側がここを首都にしたい場合は、改めて「遷都」を生産する必要がある。
@@ -1711,6 +2193,13 @@ export function cmdCaptureCity(player, tx, tz) {
     if (capturedCapital) {
         tile.city.isCapital = false;
     }
+
+    // 💡 §航空戦。この都市の航空基地に配置中だった旧オーナーの航空ユニットは、地上で
+    //    捕捉されたものとして撃墜扱いにする(マス上に存在しないため、占領側が引き継ぐ・
+    //    逃げる、といった選択肢を実装するスコープ外。滑走路・飛行場の枠自体は施設/区域として
+    //    そのまま占領側に引き継がれるので、次に生産する航空ユニットからはそのまま使える)。
+    const lostAirUnitCount = getBasedAirUnits(tile.city).length;
+    if (lostAirUnitCount > 0) tile.city.airbase = { units: [] };
 
     // 💡 この都市に帰属していた領有マス(belongsToCityKey が一致するマス)も同時に占領する
     let capturedTileCount = 0;
@@ -1763,6 +2252,7 @@ export function cmdCaptureCity(player, tx, tz) {
     const captureDetails = [];
     if (capturedFacilityCount > 0) captureDetails.push(`施設${capturedFacilityCount}個`);
     if (capturedDistrictCount > 0) captureDetails.push(`区域${capturedDistrictCount}個`);
+    if (lostAirUnitCount > 0) captureDetails.push(`§c配置中の航空ユニット${lostAirUnitCount}機は地上で撃墜§7`);
     const extraText = capturedTileCount > 0
         ? ` (帰属していた領有マス${capturedTileCount}マスも同時に占領${captureDetails.length > 0 ? `、うち${captureDetails.join("・")}を接収` : ""})`
         : "";

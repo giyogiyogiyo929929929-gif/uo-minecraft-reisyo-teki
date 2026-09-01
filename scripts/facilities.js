@@ -19,7 +19,8 @@
 
 import { hasCompletedProgress, getDefinition } from "./progression.js";
 import { matchesTerrainWeighted, sumAssignedTileYields, sumAssignedTileAdjacencyYields } from "./adjacency.js";
-import { RESOURCE_TYPES, isWaterTerrain } from "./mapGen.js";
+import { RESOURCE_TYPES, TERRAIN_TYPES, isWaterTerrain } from "./mapGen.js";
+import { AIRBASE_SLOTS_AIRSTRIP } from "./airbase.js";
 
 /**
  * @typedef {Object} FacilityDef
@@ -28,9 +29,16 @@ import { RESOURCE_TYPES, isWaterTerrain } from "./mapGen.js";
  * @property {string} [requiresTechnology] 設置に必要な技術ID(technology progression)
  * @property {string} [requiresCivic] 設置に必要な社会制度ID(civic progression)
  * @property {string} [requiresResource] 設置できるマスの資源を限定する(tile.resourceと一致が必要)
+ * @property {string[]} [requiresTerrain] 設置できるマスの地形(tile.type)を限定する(いずれかに
+ *   一致が必要。requiresResourceが資源を限定するのに対し、こちらは地形そのものを限定する。
+ *   例: キャンプは森林・熱帯雨林・寒冷地限定、プランテーションは砂漠・草原限定)
  * @property {boolean} [allowWater] trueの場合のみ水上マス(川・海・池・湖)に設置できる(省略時は不可)
  * @property {Record<string, number>} [flatYields] この施設があるだけで(隣接マスに関係なく)
  *   都市に毎ターン加算される産出量(例: { iron: 2, production: 4 })
+ * @property {{resource: string, yields: Record<string, number>}} [resourceYields] flatYieldsと違い、
+ *   この施設が設置されているマス自身が指定した資源(resource)を持つ場合にのみ、毎ターン加算される
+ *   産出量(例: 牧場は、設置マスに資源「馬」があるときだけ馬+1)。requiresResourceのように設置自体を
+ *   制限するのではなく、「どこにでも置けるが、資源があるマスに置くとボーナスが乗る」施設向け。
  * @property {Array<any>} [adjacencyBonuses] 隣接マスに応じたボーナスのルール一覧(adjacency.js参照)
  * @property {(tile: any, tx: number, tz: number) => string} [installMessage] 設置完了時のメッセージ生成関数
  */
@@ -53,6 +61,17 @@ export const FACILITY_DEFS = {
         flatYields: { iron: 2, production: 4 },
         installMessage: (tile, tx, tz) => `§e[Complete] (${tx}, ${tz}) に鍛冶場を設置しました！(毎ターン鉄+2、生産力+4)`,
     },
+    // 💡 隕石(meteor)は生成時の基礎生産力+2以外に使い道が無かった唯一の資源だったため、
+    //    専用施設を追加した(§2)。前提技術「工学」はカタパルトと同じ投資額のため、
+    //    それに見合う特大ボーナスにしている。
+    meteorCraterMine: {
+        label: "隕石クレーター採掘場",
+        icon: "[MeteorMine]",
+        requiresTechnology: "engineering",
+        requiresResource: "meteor",
+        flatYields: { production: 6, science: 2 },
+        installMessage: (tile, tx, tz) => `§e[Complete] (${tx}, ${tz}) に隕石クレーター採掘場を設置しました！(毎ターン生産力+6、科学力+2)`,
+    },
     harbor: {
         label: "港",
         icon: "[Harbor]",
@@ -61,6 +80,44 @@ export const FACILITY_DEFS = {
         allowWater: true,
         flatYields: { food: 2, production: 1 },
         installMessage: (tile, tx, tz) => `§e[Complete] (${tx}, ${tz}) に港を設置しました！(毎ターン食料+2、生産力+1)`,
+    },
+    pasture: {
+        label: "牧場",
+        icon: "[Pasture]",
+        requiresTechnology: "animalHusbandry",
+        // 💡 requiresResourceと違い、設置自体は資源を問わない(どの領有マスにも置ける)が、
+        //    設置マスに資源「馬」がある場合のみ resourceYields で馬+1が追加される(下記installMessage参照)。
+        flatYields: { food: 1 },
+        resourceYields: { resource: "horse", yields: { horse: 1 } },
+        installMessage: (tile, tx, tz) => `§e[Complete] (${tx}, ${tz}) に牧場を設置しました！(毎ターン食料+1${tile.resource === "horse" ? "、資源「馬」により馬+1" : ""})`,
+    },
+    camp: {
+        label: "キャンプ",
+        icon: "[Camp]",
+        requiresTechnology: "currency",
+        // 💡 森林・熱帯雨林・寒冷地(狩猟に適した地形)限定。requiresTerrainの初使用例。
+        requiresTerrain: ["forest", "rainforest", "cold"],
+        flatYields: { gold: 3 },
+        installMessage: (tile, tx, tz) => `§e[Complete] (${tx}, ${tz}) にキャンプを設置しました！(毎ターンゴールド+3)`,
+    },
+    plantation: {
+        label: "プランテーション",
+        icon: "[Plantation]",
+        requiresTechnology: "currency",
+        // 💡 砂漠・草原(農園に適した地形)限定。
+        requiresTerrain: ["desert", "grassland"],
+        flatYields: { gold: 3 },
+        installMessage: (tile, tx, tz) => `§e[Complete] (${tx}, ${tz}) にプランテーションを設置しました！(毎ターンゴールド+3)`,
+    },
+    // 💡 §航空戦。産出量ボーナスは持たず、この都市の航空基地(airbase.js)の空き枠を
+    //    +AIRBASE_SLOTS_AIRSTRIP増やすためだけの施設(帰属都市の判定はresolveOwningCityKey/
+    //    belongsToCityKey経由。他の施設と同じくtile.facility.idの存在だけでgetAirbaseCapacity
+    //    が自動的に数えるため、ここに特別な処理は不要)。
+    airstrip: {
+        label: "滑走路",
+        icon: "[Airstrip]",
+        requiresTechnology: "aviation",
+        installMessage: (tile, tx, tz) => `§e[Complete] (${tx}, ${tz}) に滑走路を設置しました！(帰属都市の航空基地の空き枠+${AIRBASE_SLOTS_AIRSTRIP})`,
     },
 };
 
@@ -90,6 +147,10 @@ export function canInstallFacility(tile, id, playerId, player = null) {
     if (tile.district) return { ok: false, message: `§cこのマスには区域【${tile.district.label ?? tile.district.id}】があるため施設は設置できません。` };
     if (tile.underDistrictConstruction) return { ok: false, message: "§cこのマスは区域を建設中のため施設は設置できません。" };
     if (!def.allowWater && isWaterTerrain(tile.type)) return { ok: false, message: `§c【${def.label}】は水上マスには設置できません。` };
+    if (def.requiresTerrain && !def.requiresTerrain.includes(tile.type)) {
+        const terrainLabels = def.requiresTerrain.map(t => TERRAIN_TYPES[t]?.label ?? t).join("・");
+        return { ok: false, message: `§c【${def.label}】は${terrainLabels}にのみ設置できます。` };
+    }
     if (def.requiresResource && tile.resource !== def.requiresResource) {
         const resourceLabel = RESOURCE_TYPES[def.requiresResource]?.label ?? def.requiresResource;
         return { ok: false, message: `§c【${def.label}】は資源【${resourceLabel}】があるマスにのみ設置できます。` };
@@ -141,4 +202,29 @@ export function getFacilityAdjacencyYields(assignedTiles, tiles) {
  */
 export function getFacilityFlatYields(assignedTiles) {
     return sumAssignedTileYields(assignedTiles, (tile) => tile?.facility, FACILITY_DEFS, "flatYields");
+}
+
+/**
+ * 都市に帰属するマスの一覧から、resourceYieldsを持つ施設が設置されているものを見つけ、
+ * その施設のマス自身が指定資源(resourceYields.resource)を持っている場合にのみ産出量を合算する
+ * (牧場の「馬がある場合だけ馬+1」のような、設置マス自身の資源に条件付くボーナス用。flatYieldsは
+ * 資源の有無を問わず常に加算されるのに対し、こちらは条件を満たさなければ何も加算しない)。
+ * @param {Array<{tx:number, tz:number, tile:any}>} assignedTiles その都市に帰属するマスの一覧
+ * @returns {{ [yieldKey: string]: number }}
+ */
+export function getFacilityResourceYields(assignedTiles) {
+    const totals = {};
+    if (!Array.isArray(assignedTiles)) return totals;
+
+    for (const t of assignedTiles) {
+        const facility = t.tile?.facility;
+        if (!facility) continue;
+        const def = FACILITY_DEFS[facility.id];
+        const rc = def?.resourceYields;
+        if (!rc || t.tile.resource !== rc.resource) continue;
+
+        for (const key in rc.yields) totals[key] = (totals[key] ?? 0) + rc.yields[key];
+    }
+
+    return totals;
 }

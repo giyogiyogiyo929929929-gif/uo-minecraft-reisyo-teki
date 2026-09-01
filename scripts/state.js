@@ -8,6 +8,7 @@ const KEY_TURN = "civ:turn";
 const KEY_TILE_ROW_PREFIX = "civ:tiles_row_";
 const KEY_MATCH_SETTINGS = "civ:matchSettings";
 const KEY_MAP_GEN_SETTINGS = "civ:mapGenSettings";
+const KEY_WONDER_CLAIMS = "civ:wonderClaims";
 
 // 💡 試合の設定(産出の倍率、不可侵条約・同盟の有無、Bot同士の手番間隔、など)。マップ/ターン状態
 //    とは異なり、OPがゲームリセットを跨いで使い回せるよう resetAll() では消去しない(意図的)。
@@ -45,6 +46,8 @@ let matchSettingsCache = null;
 let matchSettingsLoaded = false;
 let mapGenSettingsCache = null;
 let mapGenSettingsLoaded = false;
+let wonderClaimsCache = null;
+let wonderClaimsLoaded = false;
 
 function makeConfigKey(config) {
     return config ? JSON.stringify({
@@ -247,6 +250,50 @@ export function setMatchSettings(partial) {
 }
 
 /**
+ * 世界遺産(新要素)の所有状況 { [wonderId]: civId } を取得する。1ゲームにつき1国家しか
+ * 着工できない世界遺産の「早い者勝ち」を判定するための、マップ/ターン状態と同じ
+ * ゲームインスタンス単位のデータ(matchSettings/mapGenSettingsとは違い、resetAll()で消去する)。
+ */
+export function getWonderClaims() {
+    if (wonderClaimsLoaded) return wonderClaimsCache;
+
+    const raw = world.getDynamicProperty(KEY_WONDER_CLAIMS);
+    wonderClaimsCache = {};
+    if (typeof raw === "string") {
+        try {
+            Object.assign(wonderClaimsCache, JSON.parse(raw));
+        } catch {
+            // 壊れた保存値は空扱いにする。
+        }
+    }
+    wonderClaimsLoaded = true;
+    return wonderClaimsCache;
+}
+
+/** claims(getWonderClaimsの複製済みオブジェクト)を保存し、キャッシュを同期する共通処理。 */
+function saveWonderClaims(claims) {
+    world.setDynamicProperty(KEY_WONDER_CLAIMS, JSON.stringify(claims));
+    wonderClaimsCache = claims;
+    wonderClaimsLoaded = true;
+}
+
+/** 世界遺産を着工した国家として登録する(着工時に呼ぶ。既に他国が保持していても上書きしない)。 */
+export function claimWonder(wonderId, civId) {
+    const claims = { ...getWonderClaims() };
+    if (claims[wonderId]) return;
+    claims[wonderId] = civId;
+    saveWonderClaims(claims);
+}
+
+/** 世界遺産の着工を取り消す(生産中止時のみ呼ぶ。civIdが一致する場合だけ解放する)。 */
+export function releaseWonder(wonderId, civId) {
+    const claims = { ...getWonderClaims() };
+    if (claims[wonderId] !== civId) return;
+    delete claims[wonderId];
+    saveWonderClaims(claims);
+}
+
+/**
  * マップ生成の設定 { biomes: { [id]: { enabled, weight } }, resourceChance } を取得
  * (未設定/未知のバイオームIDは既定値で補う)。
  */
@@ -324,6 +371,7 @@ export function resetAll() {
 
     world.setDynamicProperty(KEY_CONFIG, undefined);
     world.setDynamicProperty(KEY_TURN, undefined);
+    world.setDynamicProperty(KEY_WONDER_CLAIMS, undefined);
     tilesCache = null;
     tileRowsCache = null;
     tileRowsRawCache = null;
@@ -331,5 +379,7 @@ export function resetAll() {
     mapConfigCache = null;
     mapConfigLoaded = true;
     turnStateCache = null;
+    wonderClaimsCache = null;
+    wonderClaimsLoaded = false;
     stateVersion++;
 }

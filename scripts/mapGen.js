@@ -38,11 +38,12 @@ export const RESOURCE_TYPES = {
     meteor: { label: "隕石", category: "戦略", allowedTerrains: ["grassland", "desert", "mountain"], block: "minecraft:magma" },
     magic_crystal: { label: "魔晶石", category: "高級", allowedTerrains: ["desert"], block: "minecraft:crying_obsidian" },
     moonstone: { label: "月の石", category: "高級", allowedTerrains: ["grassland"], block: "minecraft:end_stone" },
-    uranium: { label: "ウラン(238)", category: "戦略", allowedTerrains: ["grassland"], block: "minecraft:element_92" }
+    uranium: { label: "ウラン(238)", category: "戦略", allowedTerrains: ["grassland"], block: "minecraft:element_92" },
+    horse: { label: "馬", category: "戦略", allowedTerrains: ["grassland"], block: "minecraft:composter" },
 };
 
 const RESOURCE_KEYS = Object.keys(RESOURCE_TYPES);
-const SURFACE_BLOCK_BY_TYPE = {
+export const SURFACE_BLOCK_BY_TYPE = {
     grassland: "minecraft:grass_block", forest: "minecraft:grass_block", desert: "minecraft:sand", mountain: "minecraft:stone",
     river: "minecraft:water", pond: "minecraft:water", lake: "minecraft:water", sea: "minecraft:water", cold: "minecraft:snow", rainforest: "minecraft:podzol",
     mountainRange: "minecraft:stone",

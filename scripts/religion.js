@@ -37,6 +37,7 @@ const RELIGIOUS_KILL_PRESSURE_SHIFT = 1000;
 const RANDOM_RELIGION_NAMES = [
     "太陽の教え", "大地の信仰", "星辰教", "森羅の道", "光明教団",
     "静寂の教え", "潮流信仰", "灰燼の教え", "黎明教", "深緑の信仰",
+    "キリスト教", "イスラム教", "仏教", "フラットアーサー"
 ];
 
 function pickRandomReligionName() {
@@ -266,6 +267,14 @@ export function hasStartedInquisition(civHandle) {
 /** 審問を開始する。一度開始すれば、以後この国家はずっと審問済み扱いになる(再開始は不要)。 */
 export function startInquisition(civHandle) {
     civHandle.setDynamicProperty("civ:inquisitionStarted", true);
+}
+
+/** 新しいゲーム開始時に呼び、この国家の宗教関連の永続状態(創始・名前・購入回数・審問)を初期化する。 */
+export function resetReligion(civHandle) {
+    civHandle.setDynamicProperty("civ:religionFounded", false);
+    civHandle.setDynamicProperty("civ:religionName", undefined);
+    civHandle.setDynamicProperty("civ:religiousUnitPurchaseCount", undefined);
+    civHandle.setDynamicProperty("civ:inquisitionStarted", false);
 }
 
 /**
