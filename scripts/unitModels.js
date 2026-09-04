@@ -1,5 +1,6 @@
 // unitModels.js
-// 各マスにいる戦闘ユニットのうち、見た目モデルが用意されている種類(現状は戦車・戦士・飛行船・戦艦)を
+// 各マスにいる戦闘ユニットのうち、見た目モデルが用意されている種類(現状は戦車・戦士・飛行船・
+// 戦艦・大砲・近代砲兵・機関銃兵)を
 // 実際のエンティティ(civ:tank など、resource pack "testapia_models" 側で定義)として
 // ワールドに配置し、同期を取るモジュール。unitLabels.js と全く同じ設計パターン
 // (getStateVersion() で変化を検知、一定間隔で間引き、"tx,tz" キーで現在の表示物を管理し、
@@ -49,6 +50,9 @@ const MODEL_TYPE_IDS = {
     warrior: "civ:warrior",
     airship: "civ:airship",
     dreadnought: "civ:dreadnought",
+    cannon: "civ:cannon",
+    artillery: "civ:artillery",
+    machineGunner: "civ:machine_gunner",
 };
 
 // 航空基地(city.airbase.units)に配置される航空ユニットのうち、見た目モデルがあるものの表。
