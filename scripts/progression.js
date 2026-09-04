@@ -53,7 +53,7 @@ export const TECHNOLOGIES = {
     //    電力経由でこのツリー最深部にあるため、航空力学を経由しなくても単独で「空軍の
     //    最終形態」としての重みが出る(rocketryの前提にaviationを追加すると、ミサイル・
     //    対空砲まで巻き込んで前提が重くなってしまうため、あえて独立させている)。
-    aviation: { label: "航空力学", cost: 380, prerequisites: ["industrialization"], effect: "ユニット「戦闘機」を解放" },
+    aviation: { label: "航空力学", cost: 380, prerequisites: ["industrialization"], effect: "ユニット「戦闘機」「飛行船」を解放" },
 };
 
 export const CIVICS = {

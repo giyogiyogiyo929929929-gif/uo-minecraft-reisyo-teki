@@ -202,7 +202,9 @@ const DEFAULT_BOT_TURN_DELAY_TICKS = 5;
 //    低い攻城ユニットのため、フォールバック順ではクロスボウ兵の下(=より打たれ強い方を先に
 //    使い切ってから頼る)にしてある。
 const MELEE_UNIT_PRIORITY = ["tank", "modernInfantry", "musketman", "swordsman", "knight", "pikeman", "spearman", "horseman", "warrior"];
-const RANGED_UNIT_PRIORITY = ["machineGunner", "artillery", "crossbowman", "cannon", "catapult", "archer"];
+// 💡 飛行船はカタパルトと同じ理由(遠距離戦闘力は高いが近接戦闘力35と打たれ弱い)に加えて、
+//    石油を戦車と取り合うため、据え置きの砲兵を使い切ってから頼る位置に置いてある。
+const RANGED_UNIT_PRIORITY = ["machineGunner", "artillery", "airship", "crossbowman", "cannon", "catapult", "archer"];
 /** production.jsのunitClass(melee/antiCavalry/cavalry)を基準に、このユニットIDが近接系かどうかを判定する。 */
 function isMeleeProductionId(id) {
     return isMeleeUnitClass(PRODUCTION_DEFS[id]?.unitClass);

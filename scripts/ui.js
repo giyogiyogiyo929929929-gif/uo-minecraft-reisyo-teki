@@ -3,7 +3,7 @@ import { ActionFormData, ModalFormData, MessageFormData } from "@minecraft/serve
 import { ChestFormData } from "./chestForms.js";
 import { getMapConfig, getTile, getTiles, setTiles, getMatchSettings, setMatchSettings, getMapGenSettings, setMapGenSettings, resetMapGenSettings, broadcast } from "./state.js";
 import { worldToTile, TERRAIN_TYPES, RESOURCE_TYPES } from "./mapGen.js"
-import { turnInfoText, isPlayersTurn, joinGame, endGame, getTurnState, setTurnState, calculateCityFoodIncomes, getCityCurrentYields, getCityGoldBreakdown, formatGoldBreakdownText, debugForceVictory, connectTradeRoutes, getPlayerColor, isLuxuryResource, GOLD_PER_LUXURY_RESOURCE } from "./turns.js";
+import { turnInfoText, isPlayersTurn, joinGame, endGame, getTurnState, setTurnState, calculateCityFoodIncomes, getCityCurrentYields, getCityGoldBreakdown, formatGoldBreakdownText, debugForceVictory, connectTradeRoutes, getPlayerColor, isLuxuryResource, GOLD_PER_LUXURY_RESOURCE, STRATEGIC_RESOURCES } from "./turns.js";
 import { PRODUCTION_DEFS, canStartProduction, getTotalWorkerActionsRemaining, WORKER_ACTIONS_PER_UNIT, getWorkerCount, RUSH_BUY_GOLD_PER_PRODUCTION } from "./production.js";
 import { getFacilityIds, getFacilityDef, canInstallFacility } from "./facilities.js";
 import { getDistrictIds, getDistrictDef, canStartDistrict, getDistrictBuildingIds, getDistrictBuildingDef, canStartDistrictBuilding, isSacredSiteTile, hasCityDistrict } from "./districts.js";
@@ -25,6 +25,7 @@ import { getRealPlayer, getControllableCivs, getActiveCivId, setActiveCivId, add
 import { refreshUnitLabelAt } from "./unitLabels.js";
 import { openMapMonitorMenu, describeMonitorTile } from "./mapMonitor.js";
 import { MonitorFormData, MONITOR_COLS, MONITOR_ROWS } from "./monitorForm.js";
+import { openProgressTreeMenu } from "./progressTree.js";
 
 function isOperator(player) {
     return player.playerPermissionLevel === PlayerPermissionLevel.Operator;
@@ -99,6 +100,7 @@ const MAIN_MENU_ACTION_ICONS = {
     debugvictory: "minecraft:totem_of_undying",
     debugtile: "minecraft:command_block",
     debugallcivs: "minecraft:spyglass",
+    debugresources: "minecraft:gold_ingot",
     civmanage: "minecraft:player_head",
     togglemenustyle: "minecraft:compass",
     toggleunitactionuistyle: "minecraft:arrow",
@@ -664,6 +666,7 @@ export async function openMainMenu(player) {
     if (isOp && turn.started) buttons.push({ text: "§c[Debug]【デバッグ】指定した国家を即座に勝利させる", action: "debugvictory", group: "op" });
     if (isOp && currentTile) buttons.push({ text: "§c[Debug]【デバッグ】このマスを編集する", action: "debugtile", group: "op" });
     if (isOp && turn.started) buttons.push({ text: "§b[Intel]【デバッグ】全国家の情報を閲覧する", action: "debugallcivs", group: "op" });
+    if (isOp && turn.started) buttons.push({ text: "§6[Debug]【デバッグ】国家の資源・ゴールドを編集する", action: "debugresources", group: "op" });
     if (isOp) buttons.push({ text: "§d[Civs] 国家管理(ソロテスト用)", action: "civmanage", group: "op" });
     if (isOp && config) buttons.push({ text: "§b[Test] マップを見る(チェストUI)", action: "mapview", group: "op" });
     if (isOp && config) buttons.push({ text: "§b[Test] マップモニターを見る(勢力図)", action: "mapmonitor", group: "op" });
@@ -717,8 +720,10 @@ export async function openMainMenu(player) {
         case "buyreligious": await openBuyReligiousUnitMenu(player, tx, tz); break;
         case "movereligious": await openReligiousUnitMoveMenu(player, tx, tz); break;
         case "proselytize": await openProselytizeMenu(player, tx, tz); break;
-        case "technology": await openProgressMenu(player, "technology"); break;
-        case "civic": await openProgressMenu(player, "civic"); break;
+        // 💡 研究/社会制度は、前提条件をそのまま盤面に並べたツリー画面(progressTree.js)で開く。
+        //    従来のリスト表示(openProgressMenu)はツリー画面の「リスト」ボタンから開ける。
+        case "technology": await openProgressTreeMenu(player, "technology"); break;
+        case "civic": await openProgressTreeMenu(player, "civic"); break;
         case "diplomacy": await openDiplomacyMenu(player); break;
         case "myunits": await openMyUnitsMenu(player); break;
         case "airunits": await openAirbaseUnitsMenu(player); break;
@@ -802,6 +807,7 @@ export async function openMainMenu(player) {
         case "debugvictory": if (isOp) await openDebugVictoryMenu(getRealPlayer(player)); break;
         case "debugtile": if (isOp && currentTile) await openDebugTileMenu(getRealPlayer(player), tx, tz); break;
         case "debugallcivs": if (isOp) await openDebugAllCivsMenu(getRealPlayer(player)); break;
+        case "debugresources": if (isOp) await openDebugResourceCivMenu(getRealPlayer(player)); break;
         case "matchsettings": if (isOp) await openMatchSettingsMenu(getRealPlayer(player)); break;
         case "mapgensettings": if (isOp) await openMapGenSettingsMenu(getRealPlayer(player)); break;
         case "civmanage": if (isOp) await openCivManagementMenu(getRealPlayer(player)); break;
@@ -1416,9 +1422,101 @@ async function openDebugCivDetailMenu(realPlayer, civId) {
     const form = new ActionFormData()
         .title(`[Intel] ${handle.name}`)
         .body(lines.join("\n"))
+        .button("§6[Debug] 資源・ゴールドを編集する")
         .button("戻る");
-    await form.show(realPlayer);
+    const res = await form.show(realPlayer);
+    if (!res.canceled && res.selection === 0) {
+        await openDebugResourceEditMenu(realPlayer, civId, async () => await openDebugCivDetailMenu(realPlayer, civId));
+        return;
+    }
     await openDebugAllCivsMenu(realPlayer);
+}
+
+/**
+ * OP専用デバッグ機能: 資源・ゴールドを編集する国家を選ぶ入口メニュー。
+ * 「全国家の情報閲覧」(openDebugAllCivsMenu)と同じ一覧だが、選ぶと情報表示ではなく
+ * 直接編集画面へ入る(在庫をいじるためだけに長い情報表示を経由しなくて済むようにする)。
+ */
+async function openDebugResourceCivMenu(realPlayer) {
+    const turn = getTurnState();
+    const civIds = Array.isArray(turn?.playerOrder) ? turn.playerOrder : [];
+    if (civIds.length === 0) {
+        realPlayer.sendMessage("§7参加している国家がいません。");
+        await openMainMenu(realPlayer);
+        return;
+    }
+
+    const items = civIds.map((civId) => {
+        const virtualCiv = getVirtualCivById(civId);
+        const typeTag = virtualCiv?.isBot ? "§7(Bot)" : virtualCiv ? "§7(テスト国家)" : "§7(プレイヤー)";
+        const gold = getCivStorageHandle(civId)?.getDynamicProperty?.("strategic_gold") ?? 0;
+        return { text: `${resolveCivName(civId) ?? civId} ${typeTag} §6[Gold]${gold}`, action: civId };
+    });
+
+    await showPaginatedMenu(
+        realPlayer,
+        "[Debug] 資源・ゴールドを編集",
+        "§7在庫を編集する国家を選択してください。(OP専用のデバッグ機能です)",
+        items,
+        async (civId) => await openDebugResourceEditMenu(realPlayer, civId, async () => await openDebugResourceCivMenu(realPlayer)),
+        async () => await openMainMenu(realPlayer),
+    );
+}
+
+/**
+ * OP専用デバッグ機能: 指定した1国家の戦略資源(石油・鉄・馬・石炭・ウラン)・ゴールド・
+ * 累計CO2排出量の在庫を直接書き換える。産出・維持費・消費といった通常の計算は一切通さず、
+ * Dynamic Property の値をそのまま上書きする(動作確認・デモ用)。
+ * 編集欄は turns.js の STRATEGIC_RESOURCES から組み立てているので、資源を1種類足せば
+ * この画面にも自動的に欄が増える(ここに一覧をハードコードしない)。
+ * @param {Player} realPlayer 操作しているOP本人
+ * @param {string} civId 編集対象の国家ID
+ * @param {() => Promise<void>} back 閉じたとき/更新後に戻る先の画面
+ */
+async function openDebugResourceEditMenu(realPlayer, civId, back) {
+    const handle = getCivStorageHandle(civId);
+    if (!handle) {
+        realPlayer.sendMessage("§cこの国家の情報を取得できませんでした。(オフラインの人間プレイヤーの可能性があります)");
+        await back();
+        return;
+    }
+
+    // 💡 ゴールドだけはマイナスを許可する。残高がマイナスに振り切れたときの強制解散
+    //    (§23のapplyGoldBankruptcy)を確認するには、負の残高を作れる必要があるため。
+    //    他は「在庫の個数」なので0未満には落とさない。
+    const fields = [
+        ...STRATEGIC_RESOURCES.map((r) => ({ prop: r.prop, label: r.label, allowNegative: r.key === "gold" })),
+        { prop: "strategic_co2", label: "累計CO2排出量", allowNegative: false },
+    ];
+
+    // 💡 ModalFormDataには説明文(body)を置けないため、対象国家名はタイトルに入れておく。
+    const form = new ModalFormData().title(`§c[Debug] 資源編集: ${handle.name}`);
+    for (const f of fields) {
+        form.textField(`${f.label} (${f.prop})`, "例: 10", { defaultValue: String(handle.getDynamicProperty?.(f.prop) ?? 0) });
+    }
+
+    const res = await form.show(realPlayer);
+    if (res.canceled) { await back(); return; }
+
+    const changes = [];
+    fields.forEach((f, i) => {
+        // 💡 Number("") は NaN ではなく 0 になるので、Number.isFinite だけでは空欄を弾けない
+        //    (空欄のまま送ると在庫が 0 に上書きされてしまう)。先に空文字を除外する。
+        const raw = String(res.formValues[i] ?? "").trim();
+        if (raw === "") return; // 空欄の項目は変更しない
+        const parsed = Number(raw);
+        if (!Number.isFinite(parsed)) return; // 数値として読めない入力は、その項目だけ変更しない
+        const next = f.allowNegative ? Math.trunc(parsed) : Math.max(0, Math.floor(parsed));
+        const current = handle.getDynamicProperty?.(f.prop) ?? 0;
+        if (next === current) return;
+        handle.setDynamicProperty(f.prop, next);
+        changes.push(`${f.label}: ${current} → ${next}`);
+    });
+
+    realPlayer.sendMessage(changes.length
+        ? `§a【${handle.name}】の在庫を更新しました。 §7(${changes.join(" / ")})`
+        : `§7【${handle.name}】の在庫に変更はありませんでした。`);
+    await back();
 }
 
 /**
@@ -2191,7 +2289,7 @@ async function openGreatPersonMenu(player) {
 }
 
 /** 研究ツリー／社会制度ツリーの共通選択画面。 */
-async function openProgressMenu(player, kind) {
+export async function openProgressMenu(player, kind) {
     const state = getProgressState(player, kind);
     const defs = getDefinitions(kind);
     const activeDef = state.activeId ? defs[state.activeId] : null;

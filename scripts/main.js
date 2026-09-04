@@ -10,7 +10,7 @@ import { getCityCurrentYields, getCityGoldBreakdown, formatGoldBreakdownText } f
 import { forceEndTurnAuto } from "./bots.js";
 import { PRODUCTION_DEFS, getWorkerCount } from "./production.js";
 import { getDistrictDef } from "./districts.js";
-import { getEffectiveCombatStrength, getEffectiveRangedStrength, isRangedUnit, getUnitClassLabel, CITY_MAX_HP, WALL_MAX_HP } from "./combat.js";
+import { getEffectiveCombatStrength, getEffectiveRangedStrength, isRangedUnit, getUnitClassLabel, getUnitDomainLabel, CITY_MAX_HP, WALL_MAX_HP } from "./combat.js";
 import { getActingPlayer, getActiveCivId, resolveCivName, getCivStorageHandle } from "./civs.js";
 import { hasDiplomaticAgreement } from "./diplomacy.js";
 import { syncUnitLabels } from "./unitLabels.js";
@@ -176,8 +176,9 @@ system.runInterval(() => {
     // 💡 マスにいる戦闘ユニット(陸軍/海軍)をワールド内ラベルとして同期表示する。
     //    内部で間引き実行されるため、ここで毎tick呼んでもコストは小さい。
     syncUnitLabels();
-    // 💡 見た目モデルが用意されているユニット(現状は戦車・戦闘機・戦士)を実際のエンティティとして
+    // 💡 見た目モデルが用意されているユニット(現状は戦車・戦士・飛行船・戦艦)を実際のエンティティとして
     //    マスの上に配置・同期する(unitLabels.jsと同じ間引き設計、unitModels.js参照)。
+    //    航空基地に配置中の機体(戦闘機)も同じ呼び出しで拠点上空の旋回に同期される。
     syncUnitModels();
 
     for (const player of world.getAllPlayers()) {
@@ -252,7 +253,7 @@ system.runInterval(() => {
                 : (tile.underDistrictConstruction ? " §5[区域: 建設中...]" : "");
             const combatUnit = tile.combatUnit;
             const combatUnitText = combatUnit
-                ? `§c[${combatUnit.domain === "naval" ? "Naval" : "Land"}] ${combatUnit.label ?? combatUnit.id} §7(${getUnitClassLabel(combatUnit.unitClass)})§r | HP: ${combatUnit.hp ?? 0}/${combatUnit.maxHp ?? 100} | 戦闘力: ${formatCombatStrengthText(combatUnit)} | 移動力: ${combatUnit.movementRemaining ?? combatUnit.movement ?? 0}/${combatUnit.movement ?? 0} | 攻撃距離: ${combatUnit.attackRange ?? combatUnit.movement ?? 0}`
+                ? `§c[${getUnitDomainLabel(combatUnit.domain)}] ${combatUnit.label ?? combatUnit.id} §7(${getUnitClassLabel(combatUnit.unitClass)})§r | HP: ${combatUnit.hp ?? 0}/${combatUnit.maxHp ?? 100} | 戦闘力: ${formatCombatStrengthText(combatUnit)} | 移動力: ${combatUnit.movementRemaining ?? combatUnit.movement ?? 0}/${combatUnit.movement ?? 0} | 攻撃距離: ${combatUnit.attackRange ?? combatUnit.movement ?? 0}`
                 : "§7戦闘ユニット: なし";
             const religiousUnit = tile.religiousUnit;
             const religiousUnitText = religiousUnit

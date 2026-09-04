@@ -523,6 +523,32 @@ export const PRODUCTION_DEFS = {
         }), placeProducedAirUnit),
         completeMessage: (city) => `§e[Bomber]【${city.name}】の航空基地に戦略爆撃機を配置しました！ (HP: 100/100、遠距離戦闘力: 140、近距離戦闘力: 30、航続距離: 6、資源「石油」-1。哨戒はできないが略奪が可能)`,
     },
+    // 💡 飛行船(airship)は domain:"air" だが、上の航空ユニット(戦闘機など)とは別物で、
+    //    航空基地の枠ではなく「マスそのもの」に配置される飛行する戦闘ユニット。
+    //    combat.js の canUnitEnterTerrain は domain:"air" のユニットに地形制約を課さないため、
+    //    山脈・海の上をそのまま進める(陸軍にも海軍にも進路を塞がれない)。
+    //    unitClass を "air" ではなく "siege" にしているのは意図的で、"air" は
+    //    airbase.js / ui.js が「拠点から出撃するユニット」として扱う分類のため、
+    //    マスに立つこのユニットに付けると航空基地のUIに流れ込んでしまう。
+    airship: {
+        label: "飛行船",
+        icon: "[Airship]",
+        category: "unit",
+        cost: 340,
+        unitClass: "siege",
+        requiresEmptyCombatTile: true,
+        requiresTechnology: "aviation",
+        consumesResource: "strategic_oil",
+        onComplete: (city, ctx) => placeProducedCombatUnitConsumingResource(ctx, "strategic_oil", "石油", (ownerId, ownerName) => ({
+            // 💡 近代砲兵(遠距離130・移動1・射程2)と対になる攻城ユニット。遠距離戦闘力は劣るが、
+            //    移動力4・射程3で地形を無視して詰め寄れる。代わりに近距離戦闘力35と打たれ弱く、
+            //    戦車(戦闘力110)のような近接ユニットに肉薄されると一方的に落とされる。
+            id: "airship", label: "飛行船", hp: 130, maxHp: 130, unitClass: "siege",
+            combatStrength: 35, rangedCombatStrength: 95, meleeCombatStrength: 35,
+            movement: 4, movementRemaining: 4, attackRange: 3, domain: "air", ownerId, ownerName,
+        })),
+        completeMessage: (city) => `§e[Airship]【${city.name}】に飛行船を配置しました！ (HP: 130/130、遠距離戦闘力: 95、近距離戦闘力: 35、移動力: 4、攻撃距離: 3、地形を無視して移動、資源「石油」-1)`,
+    },
     swordsman: {
         label: "剣士",
         icon: "[Swordsman]",

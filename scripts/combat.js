@@ -146,6 +146,20 @@ export function getUnitClassLabel(unitClass) {
     return UNIT_CLASS_LABELS[unitClass] ?? unitClass ?? "不明";
 }
 
+// 💡 ユニットが活動する領域(陸/海/空)のタグ表示名。domain 未設定のユニットは陸扱い。
+//    HUD(main.js)とワールド上のラベル(unitLabels.js)の両方がここを見るので、
+//    領域を増やすときはここへ足せば両方に反映される。
+const UNIT_DOMAIN_LABELS = {
+    naval: "Naval",
+    air: "Air",
+    land: "Land",
+};
+
+/** ユニットの領域(陸/海/空)のタグ表示名を取得する。 */
+export function getUnitDomainLabel(domain) {
+    return UNIT_DOMAIN_LABELS[domain] ?? UNIT_DOMAIN_LABELS.land;
+}
+
 // 💡 「このクラスは、あのクラス相手なら戦闘力+n」という一方向の relationship の一覧。
 //    対騎兵(スピアマン系)は騎兵の機動力を封じる専門兵科という位置づけで、騎兵と戦う間
 //    (攻撃・防御・反撃のいずれでも)+10される。近接ユニットは、対騎兵ユニットの得意分野

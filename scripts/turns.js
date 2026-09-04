@@ -30,7 +30,9 @@ const YIELD_KEYS = ["food", "production", "oil", "faith", "iron", "science", "ho
 // 💡 都市の産出量のうち、都市個別ではなく国家全体の在庫として貯まる戦略資源。
 //    ここに1エントリ追加するだけで、蓄積・DynamicPropertyへの保存・ターン報告メッセージが
 //    すべて自動的に対応する(processPlayerTurnStart参照)。
-const STRATEGIC_RESOURCES = [
+//    ui.js のデバッグ用の在庫編集メニュー(openDebugResourceEditMenu)もこの配列を読むので、
+//    資源を1種類足せば編集欄も自動的に増える。
+export const STRATEGIC_RESOURCES = [
     { key: "oil", prop: "strategic_oil", prefix: "§b[Oil] ", label: "石油" },
     { key: "iron", prop: "strategic_iron", prefix: "§7[Iron] ", label: "鉄" },
     { key: "horse", prop: "strategic_horse", prefix: "§6[Horse] ", label: "馬" },

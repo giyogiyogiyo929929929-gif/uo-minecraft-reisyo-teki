@@ -2,14 +2,14 @@
   "format_version": "1.21.0",
   "minecraft:entity": {
     "description": {
-      "identifier": "civ:fighter",
+      "identifier": "civ:goliath",
       "is_spawnable": false,
       "is_summonable": true,
       "is_experimental": false
     },
     "components": {
       "minecraft:collision_box": { "width": 0.1, "height": 0.1 },
-      "minecraft:scale": { "value": 0.34 },
+      "minecraft:scale": { "value": 0.42 },
       "minecraft:physics": { "has_gravity": false, "has_collision": false },
       "minecraft:pushable": { "is_pushable": false, "is_pushable_by_piston": false },
       "minecraft:movement": { "value": 0 },
