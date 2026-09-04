@@ -18,6 +18,26 @@ There is no npm/build/lint/test tooling in this repo (no `package.json`). Develo
 
 There are no automated tests; correctness is verified by playing the game in a Bedrock world.
 
+### Resource packs: always bump `version` after editing
+
+The auxiliary resource packs live outside this behavior pack, at
+`../../development_resource_packs/testapia_models/` (unit models/textures/animations) and
+`../../development_resource_packs/testapia_ui/` (chest-UI textures). Minecraft caches an
+enabled resource pack by version, so edits to a pack's contents may not show up in a world
+that already has it enabled until the pack version changes.
+
+**Whenever you change anything inside a resource pack folder, bump the version in that
+folder's `manifest.json` in the same change.** Bump only the two fields literally named
+`version` — `header.version` and each entry of `modules[].version` — and keep them in sync
+with each other. Do **not** touch `format_version` or `min_engine_version`; those describe
+the file/engine format, not the pack revision.
+
+Patch bumps (`[1, 0, 0]` → `[1, 0, 1]`) are the normal case; that is enough to invalidate
+the cache. This applies to regenerated `models/entity/*.geo.json` and
+`textures/entity/*.png` too — a re-run of `tools/gen_*.js` is a resource pack change.
+Editing only `tools/*` (the generator scripts, which the pack loader never reads) does not
+need a bump on its own, but re-running them to regenerate the pack contents does.
+
 ## Primary spec
 
 `README.md` (Japanese) is the authoritative, up-to-date specification of every game system — turn flow, city/population/food/starvation math, worker action points, production, facilities, districts, religion, adjacency bonuses, combat formulas, tech/civic trees, diplomacy, victory conditions, missiles, UI structure, and the full chat command list. **The README is a snapshot; if it disagrees with the code, the code (the `.js` files) wins.** Read the relevant README section before changing a system — the numeric constants and rules (e.g. combat damage formula, starvation thresholds, growth thresholds) live there and are easy to get subtly wrong from code alone.
